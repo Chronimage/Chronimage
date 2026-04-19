@@ -140,6 +140,29 @@ export async function listImports(sourceId?: number): Promise<ImportSummary[]> {
   return tauriInvoke<ImportSummary[]>('list_imports', { sourceId: sourceId ?? null });
 }
 
+// ── Source-side cleanup ─────────────────────────────────────────────────────
+
+export interface SourceCleanupItem {
+  source_copy_id: number;
+  photo_id: number;
+  source_id: number;
+  path: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface CleanupPlan {
+  source_id: number;
+  source_name: string;
+  reclaimable_bytes: number;
+  item_count: number;
+  items: SourceCleanupItem[];
+}
+
+export async function cleanupDryRun(sourceId?: number): Promise<CleanupPlan[]> {
+  return tauriInvoke<CleanupPlan[]>('cleanup_dry_run', { sourceId: sourceId ?? null });
+}
+
 // ── Rediscovery commands ────────────────────────────────────────────────────
 
 export async function onThisDay(limit?: number): Promise<PhotoRow[]> {

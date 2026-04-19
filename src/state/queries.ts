@@ -6,6 +6,8 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AlbumRow,
+  type CleanupPlan,
+  cleanupDryRun,
   createSource,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
@@ -17,13 +19,23 @@ import {
   listSources,
   onThisDay,
   type PhotoRow,
+  type SourceCleanupItem,
   type SourceRow,
   type StartImportResponse,
   startImport,
   unseenPhotos,
 } from '../tauri/invoke';
 
-export type { AlbumRow, ImportProgressEvent, ImportSummary, PhotoRow, SourceRow, StartImportResponse };
+export type {
+  AlbumRow,
+  CleanupPlan,
+  ImportProgressEvent,
+  ImportSummary,
+  PhotoRow,
+  SourceCleanupItem,
+  SourceRow,
+  StartImportResponse,
+};
 export { IMPORT_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
@@ -69,6 +81,13 @@ export function useUnseenPhotos(limit?: number, minScore?: number) {
   return useQuery({
     queryKey: ['unseen_photos', limit, minScore],
     queryFn: () => unseenPhotos(limit, minScore),
+  });
+}
+
+export function useCleanupDryRun(sourceId?: number) {
+  return useQuery({
+    queryKey: ['cleanup_dry_run', sourceId],
+    queryFn: () => cleanupDryRun(sourceId),
   });
 }
 

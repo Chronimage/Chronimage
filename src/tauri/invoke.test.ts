@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { describe, expect, it, vi } from 'vitest';
 import {
   appVersion,
+  cleanupDryRun,
   createSource,
   currentChannel,
   listAlbums,
@@ -100,6 +101,17 @@ describe('invoke wrappers', () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await unseenPhotos(15, 6.5);
     expect(tauriInvoke).toHaveBeenCalledWith('unseen_photos', { limit: 15, minScore: 6.5 });
+  });
+
+  it('cleanupDryRun calls cleanup_dry_run and returns array', async () => {
+    expect(Array.isArray(await cleanupDryRun())).toBe(true);
+    expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run', { sourceId: null });
+  });
+
+  it('cleanupDryRun forwards sourceId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await cleanupDryRun(5);
+    expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run', { sourceId: 5 });
   });
 
   it('listImports calls list_imports with optional sourceId', async () => {

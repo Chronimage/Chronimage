@@ -66,6 +66,7 @@ fn main() {
             commands::create_source,
             commands::on_this_day,
             commands::unseen_photos,
+            commands::cleanup_dry_run,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

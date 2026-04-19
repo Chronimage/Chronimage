@@ -4,6 +4,7 @@ import React from 'react';
 import { describe, expect, it } from 'vitest';
 import {
   useAlbums,
+  useCleanupDryRun,
   useCreateSource,
   useImports,
   useOnThisDay,
@@ -76,6 +77,12 @@ describe('catalog query hooks', () => {
 
   it('useUnseenPhotos returns empty array from mock', async () => {
     const { result } = renderHook(() => useUnseenPhotos(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+  });
+
+  it('useCleanupDryRun returns empty array from mock', async () => {
+    const { result } = renderHook(() => useCleanupDryRun(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual([]);
   });

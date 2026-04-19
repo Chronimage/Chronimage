@@ -3,8 +3,10 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../primitives/Icon';
 import {
+  type CleanupPlan,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
+  useCleanupDryRun,
   useCreateSource,
   useSources,
   useStartImport,
@@ -22,10 +24,96 @@ interface ActiveImport {
   finished: boolean;
 }
 
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(0)} MB`;
+  return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+function CleanupSection({ plans }: { plans: CleanupPlan[] }) {
+  const totalBytes = plans.reduce((sum, p) => sum + p.reclaimable_bytes, 0);
+  return (
+    <div style={{ marginTop: 32 }}>
+      <div
+        className="mono"
+        style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginBottom: 10, letterSpacing: '0.08em' }}
+      >
+        STORAGE RECLAIMABLE · SHA256-VERIFIED
+      </div>
+      <div
+        style={{
+          padding: '12px 14px',
+          border: '1px solid var(--accent)',
+          borderRadius: 10,
+          background: 'color-mix(in oklch, var(--accent) 6%, var(--bg-elev))',
+          marginBottom: 10,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <span className="display" style={{ fontSize: 28 }}>
+            {fmtBytes(totalBytes)}
+          </span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+            {plans.reduce((s, p) => s + p.item_count, 0).toLocaleString()} photos across {plans.length}{' '}
+            {plans.length === 1 ? 'source' : 'sources'}
+          </span>
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {plans.map((plan) => (
+          <div
+            key={plan.source_id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '8px 12px',
+              border: '1px solid var(--stroke)',
+              borderRadius: 8,
+              background: 'var(--bg-elev)',
+            }}
+          >
+            <Icon name={SOURCE_KIND_ICON[getSourceKind(plan.source_name)] ?? 'disk'} size={14} />
+            <span style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>{plan.source_name}</span>
+            <span className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+              {plan.item_count.toLocaleString()} photos
+            </span>
+            <span className="mono" style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>
+              {fmtBytes(plan.reclaimable_bytes)}
+            </span>
+            <button
+              type="button"
+              className="btn2"
+              style={{ padding: '4px 10px', fontSize: 11 }}
+              disabled
+              title="Source cleanup executes in Phase 1b"
+            >
+              Clean up
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 8 }}>
+        Local copies verified by SHA256. Source files will not be deleted without a second confirmation.
+      </div>
+    </div>
+  );
+}
+
+function getSourceKind(sourceName: string): string {
+  const lower = sourceName.toLowerCase();
+  if (lower.includes('google')) return 'google_photos';
+  if (lower.includes('icloud')) return 'icloud';
+  if (lower.includes('iphone')) return 'iphone';
+  if (lower.includes('nas')) return 'nas';
+  return 'local';
+}
+
 export function OnboardScreen() {
   const { data: sources = [] } = useSources();
   const createSource = useCreateSource();
   const startImport = useStartImport();
+  const { data: cleanupPlans = [] } = useCleanupDryRun();
   const setScreen = useUi((s) => s.setScreen);
 
   const [activeImports, setActiveImports] = useState<Map<number, ActiveImport>>(new Map());
@@ -267,6 +355,8 @@ export function OnboardScreen() {
                 </div>
               ))}
             </div>
+
+            {cleanupPlans.length > 0 && <CleanupSection plans={cleanupPlans} />}
 
             <button
               type="button"
