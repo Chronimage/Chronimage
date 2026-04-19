@@ -171,6 +171,17 @@
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/hooks/pre-compact.cjs",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
