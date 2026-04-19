@@ -1,0 +1,43 @@
+# Lefthook — local git hooks for Chronimage
+# Install: `pnpm prepare` (runs `lefthook install` via package.json script)
+
+pre-commit:
+  parallel: true
+  commands:
+    biome-check:
+      glob: "{src,tests,scripts}/**/*.{ts,tsx,js,jsx,json,css}"
+      run: pnpm exec biome check --write --no-errors-on-unmatched {staged_files} && git add {staged_files}
+      stage_fixed: true
+    rust-fmt-check:
+      glob: "src-tauri/**/*.rs"
+      run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+    rust-clippy:
+      glob: "src-tauri/**/*.rs"
+      run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+    typecheck:
+      glob: "{src,tests}/**/*.{ts,tsx}"
+      run: pnpm exec tsc --noEmit
+    forbidden-patterns:
+      glob: "{src,src-tauri,tests,scripts}/**/*.{ts,tsx,rs}"
+      run: node scripts/forbidden-patterns.cjs {staged_files}
+    detect-secrets:
+      run: node scripts/detect-secrets.cjs {staged_files}
+
+commit-msg:
+  commands:
+    conventional:
+      run: pnpm exec commitlint --edit {1}
+
+pre-push:
+  commands:
+    unit-tests:
+      run: pnpm exec vitest run --reporter=dot
+    rust-tests:
+      run: cargo test --manifest-path src-tauri/Cargo.toml --lib --quiet
+
+post-checkout:
+  commands:
+    install-deps:
+      # Only run if package.json or Cargo.toml changed in the checkout
+      files: git diff-tree -r --name-only --no-commit-id HEAD
+      run: echo "Dependency manifests changed — remember to run 'pnpm install' and 'cargo fetch'." || true

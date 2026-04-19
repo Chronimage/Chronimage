@@ -1,0 +1,6 @@
+[toolchain]
+# edition2024 (1.85+) is needed by several transitive Tauri deps. Some crates
+# in the lockfile also require 1.88 (serde_with, darling, time) so pin stable.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
