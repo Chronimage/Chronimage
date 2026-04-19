@@ -201,6 +201,61 @@ async fn execute_pipeline(
                 .execute(&pool)
                 .await?;
                 imported.fetch_add(1, Ordering::Relaxed);
+
+                // Stage 2.5: extract EXIF + pHash for this photo.
+                let meta_path = path.clone();
+                let (exif, phash) = match tokio::task::spawn_blocking(move || {
+                    let exif = crate::import::exif::read(&meta_path);
+                    let phash = crate::dedupe::phash::compute(&meta_path);
+                    (exif, phash)
+                })
+                .await
+                {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %path_str, "metadata task join error");
+                        (crate::import::exif::ExifData::default(), None)
+                    }
+                };
+
+                if let Err(e) = sqlx::query(
+                    "UPDATE photos SET \
+                     width            = COALESCE(?1,  width), \
+                     height           = COALESCE(?2,  height), \
+                     captured_at      = COALESCE(?3,  captured_at), \
+                     captured_at_local= COALESCE(?4,  captured_at_local), \
+                     camera_make      = COALESCE(?5,  camera_make), \
+                     camera_model     = COALESCE(?6,  camera_model), \
+                     lens_model       = COALESCE(?7,  lens_model), \
+                     aperture         = COALESCE(?8,  aperture), \
+                     shutter          = COALESCE(?9,  shutter), \
+                     iso              = COALESCE(?10, iso), \
+                     focal_mm         = COALESCE(?11, focal_mm), \
+                     gps_lat          = COALESCE(?12, gps_lat), \
+                     gps_lng          = COALESCE(?13, gps_lng), \
+                     phash            = COALESCE(?14, phash) \
+                     WHERE id = ?15",
+                )
+                .bind(exif.width.map(|v| v as i64))
+                .bind(exif.height.map(|v| v as i64))
+                .bind(&exif.captured_at)
+                .bind(&exif.captured_at_local)
+                .bind(&exif.camera_make)
+                .bind(&exif.camera_model)
+                .bind(&exif.lens_model)
+                .bind(exif.aperture)
+                .bind(&exif.shutter)
+                .bind(exif.iso.map(|v| v as i64))
+                .bind(exif.focal_mm)
+                .bind(exif.gps_lat)
+                .bind(exif.gps_lng)
+                .bind(&phash)
+                .bind(photo_id)
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(error = %e, photo_id, "metadata UPDATE failed");
+                }
             } else {
                 skipped.fetch_add(1, Ordering::Relaxed);
             }

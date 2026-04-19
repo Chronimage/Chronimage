@@ -56,9 +56,13 @@ tracing-loki = { version = "0.2", default-features = false, features = ["compat-
 # Storage + migrations (Phase 1 will flesh these out)
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "uuid"] }
 
-# Hashing
+# Hashing + perceptual hash
 sha2 = "0.10"
 hex = "0.4"
+image_hasher = "2"
+
+# EXIF
+kamadak-exif = "0.5"
 
 # Paths + misc
 dirs = "5"
