@@ -18,8 +18,20 @@ vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: vi.fn(() => ({
     minimize: vi.fn(() => Promise.resolve()),
     toggleMaximize: vi.fn(() => Promise.resolve()),
+    maximize: vi.fn(() => Promise.resolve()),
+    unmaximize: vi.fn(() => Promise.resolve()),
+    isMaximized: vi.fn(() => Promise.resolve(false)),
+    setSize: vi.fn(() => Promise.resolve()),
+    center: vi.fn(() => Promise.resolve()),
     close: vi.fn(() => Promise.resolve()),
   })),
+  currentMonitor: vi.fn(() => Promise.resolve({ size: { width: 1920, height: 1080 }, scaleFactor: 1 })),
+  LogicalSize: class LogicalSize {
+    constructor(
+      public width: number,
+      public height: number,
+    ) {}
+  },
 }));
 
 // Mock Tauri event API — listen/emit need window.__TAURI_INTERNALS__ which

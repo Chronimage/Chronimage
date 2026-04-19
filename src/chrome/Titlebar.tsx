@@ -1,4 +1,4 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { currentMonitor, getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import logoUrl from '../assets/logo.svg';
 import { Icon } from '../primitives/Icon';
 import type { Screen } from '../state/ui';
@@ -6,6 +6,26 @@ import type { Screen } from '../state/ui';
 export interface TitlebarProps {
   screen: Screen;
   appName: string;
+}
+
+async function handleMaximize() {
+  const win = getCurrentWindow();
+  const maximized = await win.isMaximized();
+  if (!maximized) {
+    await win.maximize();
+  } else {
+    await win.unmaximize();
+    const monitor = await currentMonitor();
+    if (monitor) {
+      const { width, height } = monitor.size;
+      const scaleFactor = monitor.scaleFactor;
+      // Convert physical pixels → logical, then take 3/4
+      const logicalW = Math.round((width / scaleFactor) * 0.75);
+      const logicalH = Math.round((height / scaleFactor) * 0.75);
+      await win.setSize(new LogicalSize(logicalW, logicalH));
+      await win.center();
+    }
+  }
 }
 
 export function Titlebar({ screen, appName }: TitlebarProps) {
@@ -31,7 +51,7 @@ export function Titlebar({ screen, appName }: TitlebarProps) {
         <button type="button" aria-label="minimize" onClick={() => win.minimize()}>
           <Icon name="min" size={13} />
         </button>
-        <button type="button" aria-label="maximize" onClick={() => win.toggleMaximize()}>
+        <button type="button" aria-label="maximize" onClick={handleMaximize}>
           <Icon name="max" size={11} />
         </button>
         <button type="button" aria-label="close" className="close" onClick={() => win.close()}>
