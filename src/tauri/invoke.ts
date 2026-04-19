@@ -206,6 +206,31 @@ export async function listIphoneDevices(): Promise<UsbDevice[]> {
   return tauriInvoke<UsbDevice[]>('list_iphone_devices');
 }
 
+// ── AI commands ────────────────────────────────────────────────────────────
+
+export type HardwareTier = 'CpuOnly' | 'GpuLow' | 'GpuHigh';
+
+export interface HardwareInfo {
+  tier: HardwareTier;
+  vram_mb: number;
+  adapter_name: string;
+}
+
+/** Detect GPU tier + VRAM (Windows DXGI; stub on other platforms). */
+export async function detectHardware(): Promise<HardwareInfo> {
+  return tauriInvoke<HardwareInfo>('detect_hardware');
+}
+
+/** Embed an image via SigLIP-B/16. Returns 768-dim f32 array. Errors if model not downloaded. */
+export async function embedImage(path: string): Promise<number[]> {
+  return tauriInvoke<number[]>('embed_image', { path });
+}
+
+/** Score a photo 0–10 for aesthetic quality via NIMA. Errors if model not downloaded. */
+export async function scoreAesthetic(path: string): Promise<number> {
+  return tauriInvoke<number>('score_aesthetic', { path });
+}
+
 // ── Import progress event ───────────────────────────────────────────────────
 
 export interface ImportProgressEvent {

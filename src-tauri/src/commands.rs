@@ -611,6 +611,33 @@ pub async fn on_this_day(
     Ok(rows)
 }
 
+// ── AI inference commands ─────────────────────────────────────────────────
+
+/// Detect the hardware tier (CPU / GpuLow / GpuHigh) and available VRAM.
+/// Called once at startup so the frontend can show the correct model badge.
+#[tauri::command]
+pub fn detect_hardware() -> crate::ai::budget::HardwareInfo {
+    crate::ai::budget::detect()
+}
+
+/// Embed a single image using SigLIP-B/16.
+/// Returns 768 f32 values. Errors when the model file is not yet downloaded.
+#[tauri::command]
+pub fn embed_image(path: String) -> AppResult<Vec<f32>> {
+    let model_path = crate::util::paths::models_dir()?.join("siglip-b16-image.onnx");
+    let session = crate::ai::siglip::get_or_load(&model_path)?;
+    session.embed_image(std::path::Path::new(&path))
+}
+
+/// Score a single image for aesthetic quality (1.0–10.0).
+/// Errors when the model file is not yet downloaded.
+#[tauri::command]
+pub fn score_aesthetic(path: String) -> AppResult<f32> {
+    let model_path = crate::util::paths::models_dir()?.join("nima.onnx");
+    let session = crate::ai::aesthetic::get_or_load(&model_path)?;
+    session.score(std::path::Path::new(&path))
+}
+
 /// Photos that have never been viewed or were last viewed more than two years ago,
 /// with an aesthetic_score >= `min_score` (default 0.0).
 /// Returns at most `limit` rows (default 20), ordered by aesthetic_score desc.

@@ -63,6 +63,12 @@ vi.mock('@tauri-apps/api/core', () => ({
         return null;
       case 'list_iphone_devices':
         return [];
+      case 'detect_hardware':
+        return { tier: 'CpuOnly', vram_mb: 0, adapter_name: 'stub' };
+      case 'embed_image':
+        return new Array(768).fill(0);
+      case 'score_aesthetic':
+        return 5.5;
       default:
         throw new Error(`mock invoke: unknown command ${cmd}`);
     }

@@ -71,6 +71,9 @@ fn main() {
             commands::import_google_takeout,
             commands::detect_icloud_path,
             commands::list_iphone_devices,
+            commands::detect_hardware,
+            commands::embed_image,
+            commands::score_aesthetic,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

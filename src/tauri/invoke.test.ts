@@ -5,7 +5,9 @@ import {
   cleanupDryRun,
   createSource,
   currentChannel,
+  detectHardware,
   detectIcloudPath,
+  embedImage,
   importDryRun,
   importGoogleTakeout,
   listAlbums,
@@ -16,6 +18,7 @@ import {
   onThisDay,
   ping,
   refreshSmartAlbums,
+  scoreAesthetic,
   startImport,
   unseenPhotos,
 } from './invoke';
@@ -151,6 +154,25 @@ describe('invoke wrappers', () => {
     const path = await detectIcloudPath();
     expect(path).toBeNull();
     expect(tauriInvoke).toHaveBeenCalledWith('detect_icloud_path');
+  });
+
+  it('detectHardware calls detect_hardware and returns tier', async () => {
+    const info = await detectHardware();
+    expect(info.tier).toBe('CpuOnly');
+    expect(info.vram_mb).toBe(0);
+    expect(tauriInvoke).toHaveBeenCalledWith('detect_hardware');
+  });
+
+  it('embedImage calls embed_image and returns 768-dim array', async () => {
+    const vec = await embedImage('/photo.jpg');
+    expect(vec).toHaveLength(768);
+    expect(tauriInvoke).toHaveBeenCalledWith('embed_image', { path: '/photo.jpg' });
+  });
+
+  it('scoreAesthetic calls score_aesthetic and returns number', async () => {
+    const score = await scoreAesthetic('/photo.jpg');
+    expect(score).toBe(5.5);
+    expect(tauriInvoke).toHaveBeenCalledWith('score_aesthetic', { path: '/photo.jpg' });
   });
 
   it('listIphoneDevices calls list_iphone_devices and returns array', async () => {
