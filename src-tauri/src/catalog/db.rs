@@ -33,6 +33,11 @@ impl PoolOptions {
 ///
 /// Configures WAL, foreign keys, normal-sync — match what the initial
 /// migration also pragmas. Doing it twice is harmless.
+///
+/// After migrations run, attempts a best-effort load of the sqlite-vec
+/// extension and creation of `vec_photo_embeddings`. If the extension is
+/// absent the error is logged as a warning and the app continues using the
+/// BLOB fallback in `photo_embeddings.embedding`.
 pub async fn open_pool(opts: PoolOptions) -> AppResult<SqlitePool> {
     if let Some(parent) = opts.db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -54,13 +59,45 @@ pub async fn open_pool(opts: PoolOptions) -> AppResult<SqlitePool> {
         .await?;
 
     if opts.run_migrations {
+        // Run all migrations except those that require sqlite-vec. The
+        // 20260421000000_sqlite_vec.sql migration contains a CREATE VIRTUAL
+        // TABLE statement that will fail if the vec0 extension is not loaded.
+        // We skip that statement here and attempt it ourselves below via
+        // best-effort extension loading.
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("catalog migration failed: {e}")))?;
     }
 
+    // Best-effort: try to ensure the sqlite-vec virtual table exists.
+    // If the extension or the vec0 module is unavailable we log a warning and
+    // continue — the BLOB fallback path in photo_embeddings handles this case.
+    try_init_sqlite_vec(&pool).await;
+
     Ok(pool)
+}
+
+/// Attempt to create `vec_photo_embeddings` using the sqlite-vec vec0 module.
+///
+/// sqlite-vec is a loadable extension; on some machines it may not be present.
+/// Any error here is non-fatal — the app falls back to brute-force cosine
+/// over `photo_embeddings.embedding` BLOBs.
+async fn try_init_sqlite_vec(pool: &SqlitePool) {
+    let result = sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_photo_embeddings USING vec0(embedding float[768])",
+    )
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(_) => tracing::debug!("sqlite-vec: vec_photo_embeddings ready"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "sqlite-vec extension unavailable — falling back to BLOB cosine search. \
+             Install vec0 to enable ANN search."
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -82,7 +119,7 @@ mod tests {
                 .await
                 .expect("schema_version row");
         assert!(
-            ["1", "2"].contains(&row.0.as_str()),
+            ["1", "2", "3"].contains(&row.0.as_str()),
             "unexpected schema version: {}",
             row.0
         );

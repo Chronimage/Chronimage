@@ -4,6 +4,9 @@
 //! The text encoder is a separate model deferred to a later phase; `embed_text`
 //! returns a zero vector stub so call-sites can be written now.
 //!
+//! Phase 1 also adds `load_or_stub` so the `search_photos` command can
+//! construct a session without requiring the model file to be present.
+//!
 //! Model path (relative to model root): `siglip-b16-image.onnx`
 //! Input:  `pixel_values` — [1, 3, 224, 224] f32, normalised to [-1, 1]
 //! Output: `image_embeds`  — [1, 768] f32
@@ -24,9 +27,15 @@ const INPUT_SIZE: u32 = 224;
 /// `Session::run` requires `&mut self` in ort rc.12, so we wrap it in a
 /// `Mutex` so the outer `&SigLipSession` reference (from `OnceLock`) can
 /// still drive inference across threads.
+///
+/// When `is_stub` is `true` the real ONNX model was not loaded and text
+/// queries return zero-vectors (Phase 1 stub). Image embedding still
+/// requires the model to be present.
 #[derive(Debug)]
 pub struct SigLipSession {
-    session: Mutex<Session>,
+    session: Mutex<Option<Session>>,
+    /// When `true` the real ONNX model is not loaded.
+    pub is_stub: bool,
 }
 
 impl SigLipSession {
@@ -43,8 +52,32 @@ impl SigLipSession {
             .commit_from_file(model_path)
             .map_err(|e| AppError::Internal(format!("ort load: {e}")))?;
         Ok(Self {
-            session: Mutex::new(session),
+            session: Mutex::new(Some(session)),
+            is_stub: false,
         })
+    }
+
+    /// Try to load a real SigLIP model from `model_path`. Falls back to the
+    /// stub session (returns `Ok`) if the path doesn't exist or the ort runtime
+    /// isn't available yet.
+    pub fn load_or_stub(model_path: Option<&Path>) -> Self {
+        // Phase 1 stub: the real ort::Session init comes in Phase 1b once the
+        // model-download flow lands. For now we always return the stub.
+        let path_exists = model_path.map(|p| p.exists()).unwrap_or(false);
+
+        if path_exists {
+            tracing::info!(
+                "SigLIP model found at {:?} (stub load — ort not wired yet)",
+                model_path
+            );
+        } else {
+            tracing::debug!("SigLIP model absent — using zero-vector stub for text queries");
+        }
+
+        Self {
+            session: Mutex::new(None),
+            is_stub: true,
+        }
     }
 
     /// Embed a single image. Resize → normalise → forward pass → 768-dim f32.
@@ -61,16 +94,32 @@ impl SigLipSession {
             .session
             .lock()
             .map_err(|_| AppError::Internal("siglip session mutex poisoned".into()))?;
-        let outputs = guard
+        let session = guard.as_mut().ok_or_else(|| {
+            AppError::Internal("siglip image session is stub — cannot embed images".into())
+        })?;
+        let outputs = session
             .run(ort::inputs!["pixel_values" => input_tensor])
             .map_err(|e| AppError::Internal(format!("ort run: {e}")))?;
 
         extract_embedding(&outputs, "image_embeds", EMBED_DIM)
     }
 
-    /// Stub: text encoder is a separate model, wired in Phase 2.
-    /// Returns a zero vector of the correct dimensionality.
-    pub fn embed_text(&self, _text: &str) -> AppResult<Vec<f32>> {
+    /// Encode `text` into a 768-dim f32 vector.
+    ///
+    /// Returns a zero-vector stub until the real ONNX runtime is wired in
+    /// Phase 1b. The caller must L2-normalise before computing cosine scores.
+    pub fn embed_text(&self, text: &str) -> AppResult<Vec<f32>> {
+        if !self.is_stub {
+            // Placeholder for real ort inference — will be filled in Phase 1b.
+            return Err(AppError::Internal(
+                "real SigLIP text inference not yet implemented".into(),
+            ));
+        }
+
+        // Stub: return a zero-vector. Cosine search against real embeddings
+        // will score 0.0 for everything (no matches), which is the correct
+        // no-op behaviour for an absent model.
+        let _ = text; // suppress unused-variable warning
         Ok(vec![0.0_f32; EMBED_DIM])
     }
 }
@@ -121,6 +170,29 @@ fn extract_embedding(
         )));
     }
     Ok(flat)
+}
+
+// ── vector math helpers ───────────────────────────────────────────────────
+
+/// L2-normalise a vector in-place.
+///
+/// If the vector is all-zero (e.g. the stub) this is a no-op — the zero
+/// vector cannot be normalised and all dot products will remain 0.0.
+pub fn l2_normalise(v: &mut [f32]) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 1e-10 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Dot product of two equal-length slices.
+///
+/// For unit vectors this equals cosine similarity. Panics in debug if lengths
+/// differ; in release it silently truncates to the shorter slice.
+pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 // ── global singleton ──────────────────────────────────────────────────────
@@ -202,5 +274,43 @@ mod tests {
         for v in &pixels {
             assert!(*v >= -1.0 && *v <= 1.0, "pixel {v} out of range");
         }
+    }
+
+    #[test]
+    fn identical_normalised_vecs_have_cosine_one() {
+        let mut v = vec![1.0_f32, 2.0, 3.0];
+        l2_normalise(&mut v);
+        let mut u = v.clone();
+        l2_normalise(&mut u);
+        let score = dot_product(&v, &u);
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "expected cosine ~1.0, got {score}"
+        );
+    }
+
+    #[test]
+    fn orthogonal_vecs_have_cosine_zero() {
+        let mut a = vec![1.0_f32, 0.0, 0.0];
+        let mut b = vec![0.0_f32, 1.0, 0.0];
+        l2_normalise(&mut a);
+        l2_normalise(&mut b);
+        let score = dot_product(&a, &b);
+        assert!(score.abs() < 1e-6, "expected cosine ~0.0, got {score}");
+    }
+
+    #[test]
+    fn zero_vector_stub_does_not_panic_on_normalise() {
+        let mut v = vec![0.0_f32; EMBED_DIM];
+        l2_normalise(&mut v); // must be a no-op, not NaN or panic
+        assert!(v.iter().all(|x| *x == 0.0), "zero-vec should stay zero");
+    }
+
+    #[test]
+    fn stub_session_returns_zero_vector() {
+        let sess = SigLipSession::load_or_stub(None);
+        let emb = sess.embed_text("a photo of a dog").expect("embed_text");
+        assert_eq!(emb.len(), EMBED_DIM);
+        assert!(emb.iter().all(|x| *x == 0.0));
     }
 }

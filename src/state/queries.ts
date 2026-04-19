@@ -30,6 +30,7 @@ import {
   type SourceCleanupItem,
   type SourceRow,
   type StartImportResponse,
+  searchPhotos,
   startImport,
   type UsbDevice,
   unseenPhotos,
@@ -182,5 +183,15 @@ export function useDuplicates(minSimilarity?: number) {
   return useQuery({
     queryKey: ['duplicates', minSimilarity] as const,
     queryFn: () => findDuplicates(minSimilarity),
+  });
+}
+
+export function useSearchPhotos(query: string) {
+  return useQuery<PhotoRow[], Error>({
+    queryKey: ['search_photos', query],
+    queryFn: () => searchPhotos(query),
+    enabled: query.trim().length > 0,
+    staleTime: 30_000,
+    placeholderData: (prev) => prev,
   });
 }

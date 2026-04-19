@@ -3,7 +3,12 @@
 //! just wire arguments and serialize results.
 
 use crate::{
-    catalog, dedupe::confirm::DuplicateGroup, import, state::AppState, AppError, AppResult,
+    ai::{dot_product, l2_normalise, SigLipSession},
+    catalog,
+    dedupe::confirm::DuplicateGroup,
+    import,
+    state::AppState,
+    AppError, AppResult,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -278,7 +283,13 @@ pub async fn list_albums(state: State<'_, AppState>) -> AppResult<Vec<AlbumRow>>
     Ok(rows)
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+// ── Natural-language search ───────────────────────────────────────────────
+
+/// A photo row returned by search and the catalog grid.
+///
+/// Field names mirror the `photos` table columns that the frontend grid
+/// already understands. Optional Phase 1 columns are included when populated.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PhotoRow {
     pub id: i64,
     pub sha256: String,
@@ -286,6 +297,7 @@ pub struct PhotoRow {
     pub width: i64,
     pub height: i64,
     pub captured_at: Option<String>,
+    pub imported_at: String,
     pub is_raw: bool,
     pub size_bytes: Option<i64>,
     pub camera_make: Option<String>,
@@ -296,6 +308,7 @@ pub struct PhotoRow {
     pub focal_mm: Option<f64>,
     pub aesthetic_score: Option<f64>,
     pub paired_photo_id: Option<i64>,
+    pub raw_format: Option<String>,
 }
 
 /// List photos ordered by imported_at desc, with optional pagination and album filter.
@@ -338,9 +351,9 @@ pub async fn list_photos(
     };
 
     let sql = format!(
-        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-         paired_photo_id \
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+         size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+         aesthetic_score, paired_photo_id, raw_format \
          FROM photos {where_clause} ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2"
     );
     let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -616,9 +629,9 @@ pub async fn on_this_day(
     // captured_at is stored as RFC3339 which starts with YYYY-MM-DDTHH:MM:SS…
     let today_md = chrono::Utc::now().format("%m-%d").to_string();
     let rows = sqlx::query_as::<_, PhotoRow>(
-        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-         paired_photo_id \
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+         size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+         aesthetic_score, paired_photo_id, raw_format \
          FROM photos \
          WHERE captured_at IS NOT NULL \
            AND strftime('%m-%d', captured_at) = ?1 \
@@ -743,9 +756,9 @@ pub async fn unseen_photos(
     let lim = limit.unwrap_or(20);
     let score = min_score.unwrap_or(0.0);
     let rows = sqlx::query_as::<_, PhotoRow>(
-        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
-         p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-         p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
+         p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
@@ -776,6 +789,133 @@ pub async fn find_duplicates(
         )));
     }
     crate::dedupe::confirm::find_duplicate_groups(&state.pool, threshold).await
+}
+
+// ── Natural-language search ───────────────────────────────────────────────
+
+/// Encode `query` with the SigLIP text encoder and return the `limit`
+/// (default 50) most similar photos ordered by cosine similarity desc.
+///
+/// Uses the BLOB fallback path: reads `embedding` from `photo_embeddings`,
+/// L2-normalises, computes dot product with the query vector. This handles
+/// the case where `vec_rowid` is NULL (sqlite-vec unavailable or not yet
+/// populated).
+///
+/// Returns an empty vec — not an error — when:
+/// - No photos have stored embeddings yet.
+/// - The SigLIP model is absent (stub emits a zero-vector → all scores 0.0).
+#[tauri::command]
+pub async fn search_photos(
+    query: String,
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PhotoRow>> {
+    let max_results = limit.unwrap_or(50).clamp(1, 1000);
+
+    // 1. Encode the query text into a 768-dim vector via the SigLIP stub.
+    //    Model path: `{data_local_dir}/app.chronimage.desktop/models/siglip_text.onnx`
+    //    We pass None for now — the stub will be used if the file is absent.
+    let models_dir = crate::util::paths::models_dir().ok();
+    let model_path = models_dir.as_deref().map(|d| d.join("siglip_text.onnx"));
+    let session = SigLipSession::load_or_stub(model_path.as_deref());
+
+    let mut query_vec = session.embed_text(&query)?;
+
+    // 2. L2-normalise. If the model is absent this stays a zero-vector and
+    //    all dot products will be 0.0 — effectively returning no results.
+    l2_normalise(&mut query_vec);
+
+    // If the query vector is all-zero (stub) there's nothing meaningful to
+    // rank; return empty rather than an arbitrary ordering.
+    let is_zero = query_vec.iter().all(|x| *x == 0.0);
+    if is_zero {
+        tracing::debug!(
+            query = %query,
+            "search_photos: SigLIP stub returned zero vector — no results"
+        );
+        return Ok(Vec::new());
+    }
+
+    // 3. Fetch all photo_id + embedding BLOBs (BLOB fallback path).
+    //    We only pull rows that have a non-null embedding BLOB.
+    let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT photo_id, embedding FROM photo_embeddings \
+         WHERE embedding IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 4. Decode each BLOB (768 × f32 LE), L2-normalise, compute dot product.
+    let expected_bytes = crate::ai::EMBED_DIM * std::mem::size_of::<f32>();
+    let mut scored: Vec<(i64, f32)> = rows
+        .into_iter()
+        .filter_map(|(photo_id, blob)| {
+            if blob.len() != expected_bytes {
+                tracing::warn!(
+                    photo_id,
+                    blob_len = blob.len(),
+                    expected = expected_bytes,
+                    "photo_embeddings BLOB has wrong length — skipping"
+                );
+                return None;
+            }
+            let mut emb: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            l2_normalise(&mut emb);
+            let score = dot_product(&query_vec, &emb);
+            Some((photo_id, score))
+        })
+        .collect();
+
+    // 5. Sort by score descending, take top N.
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(max_results as usize);
+
+    if scored.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 6. Fetch full PhotoRow data for the ranked photo IDs.
+    //    We preserve the score order by fetching all and re-sorting.
+    let photo_ids: Vec<i64> = scored.iter().map(|(id, _)| *id).collect();
+
+    // Build a parameterised IN clause. sqlx doesn't support dynamic IN with
+    // query_as!, so we fall back to the dynamic form.
+    let placeholders: String = photo_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
+         is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format \
+         FROM photos WHERE id IN ({placeholders})"
+    );
+
+    let mut q = sqlx::query_as::<_, PhotoRow>(&sql);
+    for id in &photo_ids {
+        q = q.bind(id);
+    }
+    let mut photos: Vec<PhotoRow> = q.fetch_all(&state.pool).await?;
+
+    // Re-sort to match the score ordering from step 5.
+    let order: std::collections::HashMap<i64, usize> = photo_ids
+        .iter()
+        .enumerate()
+        .map(|(rank, &id)| (id, rank))
+        .collect();
+    photos.sort_by_key(|p| order.get(&p.id).copied().unwrap_or(usize::MAX));
+
+    Ok(photos)
 }
 
 #[cfg(test)]
@@ -936,9 +1076,10 @@ mod tests {
     async fn list_photos_returns_empty_on_fresh_catalog() {
         let (_tmp, pool) = make_pool().await;
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format \
+             FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
         )
         .fetch_all(&pool)
         .await
@@ -964,9 +1105,10 @@ mod tests {
         }
 
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format \
+             FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
         )
         .fetch_all(&pool)
         .await
@@ -1018,9 +1160,10 @@ mod tests {
         let rule = crate::catalog::rules::parse_rule(rule_json).unwrap();
         let frag = crate::catalog::rules::rule_to_sql(&rule).unwrap();
         let sql = format!(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format \
+             FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
         );
         let rows = sqlx::query_as::<_, PhotoRow>(&sql)
             .fetch_all(&pool)
@@ -1307,9 +1450,9 @@ mod tests {
     async fn on_this_day_returns_empty_when_no_photos() {
         let (_tmp, pool) = make_pool().await;
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos \
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -1356,9 +1499,9 @@ mod tests {
 
         let today_md = chrono::Utc::now().format("%m-%d").to_string();
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos \
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = ?1 \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -1395,9 +1538,10 @@ mod tests {
         }
 
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
-             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
+             p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
+             p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
+             p.paired_photo_id, p.raw_format \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -1437,9 +1581,10 @@ mod tests {
         .expect("view");
 
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
-             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
+             p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
+             p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
+             p.paired_photo_id, p.raw_format \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \

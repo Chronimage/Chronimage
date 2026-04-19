@@ -110,6 +110,7 @@ fn main() {
             commands::score_aesthetic,
             commands::download_models,
             commands::find_duplicates,
+            commands::search_photos,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

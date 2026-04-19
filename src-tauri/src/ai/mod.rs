@@ -7,3 +7,5 @@ pub mod aesthetic;
 pub mod budget;
 pub mod download;
 pub mod siglip;
+
+pub use siglip::{dot_product, l2_normalise, SigLipSession, EMBED_DIM};

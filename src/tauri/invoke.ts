@@ -58,6 +58,10 @@ export interface AlbumRow {
   is_system: boolean;
 }
 
+/**
+ * A photo row as returned by catalog queries and `search_photos`.
+ * Field names mirror the `photos` SQLite table.
+ */
 export interface PhotoRow {
   id: number;
   sha256: string;
@@ -65,6 +69,7 @@ export interface PhotoRow {
   width: number;
   height: number;
   captured_at: string | null;
+  imported_at: string;
   is_raw: boolean;
   size_bytes: number | null;
   camera_make: string | null;
@@ -75,6 +80,7 @@ export interface PhotoRow {
   focal_mm: number | null;
   aesthetic_score: number | null;
   paired_photo_id: number | null;
+  raw_format: string | null;
 }
 
 export interface SourceRow {
@@ -282,4 +288,17 @@ export async function findDuplicates(minSimilarity?: number): Promise<DuplicateG
   return tauriInvoke<DuplicateGroup[]>('find_duplicates', {
     min_similarity: minSimilarity ?? null,
   });
+}
+
+// ── Natural-language search ─────────────────────────────────────────────────
+
+/**
+ * Encode `query` with the on-device SigLIP text encoder and return up to
+ * `limit` (default 50) photos ordered by cosine similarity desc.
+ *
+ * Returns an empty array — not an error — when the model is absent or no
+ * embeddings have been computed yet.
+ */
+export async function searchPhotos(query: string, limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('search_photos', { query, limit: limit ?? null });
 }

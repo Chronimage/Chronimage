@@ -4,7 +4,7 @@ import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { SEARCH_SUGGESTIONS } from '../../state/fixtures';
-import { useAlbums, useOnThisDay, usePhotos, useUnseenPhotos } from '../../state/queries';
+import { useAlbums, useOnThisDay, usePhotos, useSearchPhotos, useUnseenPhotos } from '../../state/queries';
 import type { PhotoRow } from '../../tauri/invoke';
 
 export interface CatalogScreenProps {
@@ -309,16 +309,11 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const { data: albums = [] } = useAlbums();
-
-  // Resolve numeric album id for filtering — 'all' means no filter.
   const numericAlbumId = albumId !== 'all' ? Number(albumId) : null;
-
-  const { data: photos = [] } = usePhotos({
-    limit: 500,
-    albumId: numericAlbumId,
-  });
+  const { data: photos = [] } = usePhotos({ limit: 500, albumId: numericAlbumId });
   const { data: onThisDayPhotos = [] } = useOnThisDay(20);
   const { data: unseenPhotosList = [] } = useUnseenPhotos(20);
+  const { data: searchResults, isFetching: searchFetching } = useSearchPhotos(query);
 
   const album = useMemo(() => {
     if (albumId === 'all') return null;
@@ -493,14 +488,20 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 className="mono"
                 style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginBottom: 4, letterSpacing: '0.08em' }}
               >
-                SEARCH · gemma4 + CLIP · (stub)
+                {searchFetching
+                  ? 'SEARCH · encoding…'
+                  : searchResults && searchResults.length > 0
+                    ? `SEARCH · SigLIP · ${searchResults.length} result${searchResults.length === 1 ? '' : 's'}`
+                    : 'SEARCH · SigLIP · no results yet'}
               </div>
               <div className="display" style={{ fontSize: 32 }}>
                 "{query}"<em>.</em>
               </div>
-              <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-dim)', marginTop: 6 }}>
-                (Phase 1: real results come from SigLIP text encoder + sqlite-vec k-NN)
-              </div>
+              {(!searchResults || searchResults.length === 0) && !searchFetching && (
+                <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-dim)', marginTop: 6 }}>
+                  No embeddings yet — import photos and run the AI pipeline to enable search.
+                </div>
+              )}
             </div>
             <div style={{ padding: '6px 20px 0', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {SEARCH_SUGGESTIONS.slice(0, 5).map((s) => (
@@ -509,13 +510,42 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 </Chip>
               ))}
             </div>
-            <VirtualGrid
-              photos={photos.slice(0, 24)}
-              selected={selected}
-              onToggle={toggle}
-              onFocus={openDetail}
-              scrollRef={scrollRef}
-            />
+            {searchResults && searchResults.length > 0 ? (
+              <div className="libgrid">
+                {searchResults.map((p, i) => (
+                  <button
+                    type="button"
+                    key={p.id}
+                    className="cell"
+                    style={{ position: 'relative' }}
+                    onClick={() => toggle(i)}
+                    aria-label={`Select ${p.filename}`}
+                  >
+                    <Placeholder
+                      photo={{
+                        id: String(p.id),
+                        filename: p.filename,
+                        hue: (p.id * 37) % 360,
+                        scene: p.camera_make
+                          ? `${p.camera_make} · ${p.camera_model ?? ''}`.trim()
+                          : p.filename,
+                      }}
+                      idx={i}
+                      selected={selected.has(i)}
+                      subtle
+                    />
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <VirtualGrid
+                photos={photos}
+                selected={selected}
+                onToggle={toggle}
+                onFocus={openDetail}
+                scrollRef={scrollRef}
+              />
+            )}
           </div>
         )}
       </div>
