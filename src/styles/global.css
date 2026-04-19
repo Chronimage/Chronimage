@@ -133,6 +133,13 @@ select {
   font-family: var(--display-font);
   font-size: 20px;
   letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.titlebar .brand-logo {
+  display: block;
+  flex-shrink: 0;
 }
 .titlebar .brand em {
   color: var(--accent);

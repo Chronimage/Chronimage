@@ -13,6 +13,15 @@ global.ResizeObserver = class ResizeObserver {
   disconnect() {}
 };
 
+// Mock Tauri window API — getCurrentWindow().minimize/toggleMaximize/close
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: vi.fn(() => ({
+    minimize: vi.fn(() => Promise.resolve()),
+    toggleMaximize: vi.fn(() => Promise.resolve()),
+    close: vi.fn(() => Promise.resolve()),
+  })),
+}));
+
 // Mock Tauri event API — listen/emit need window.__TAURI_INTERNALS__ which
 // doesn't exist in jsdom. Return a no-op unlisten function.
 vi.mock('@tauri-apps/api/event', () => ({
