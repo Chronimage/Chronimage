@@ -9,6 +9,7 @@ import {
   type CleanupPlan,
   cleanupDryRun,
   createSource,
+  deleteSource,
   detectIcloudPath,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
@@ -117,6 +118,17 @@ export function useCreateSource() {
       createSource(name, kind, rootPath),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sources'] });
+    },
+  });
+}
+
+export function useDeleteSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sourceId: number) => deleteSource(sourceId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['cleanup'] });
     },
   });
 }

@@ -74,6 +74,8 @@ vi.mock('@tauri-apps/api/core', () => ({
         return [];
       case 'create_source':
         return { id: 1, name: 'Test', kind: 'local', status: 'idle', last_scan_at: null, photo_count: 0 };
+      case 'delete_source':
+        return undefined;
       case 'start_import':
         return { import_id: 1 };
       case 'list_imports':

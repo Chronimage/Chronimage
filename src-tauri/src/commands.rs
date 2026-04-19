@@ -231,6 +231,26 @@ pub async fn create_source(
     Ok(row)
 }
 
+/// Remove a source and all its associated source_copies and import records.
+/// Photos themselves are NOT deleted — only the source-side linkage.
+#[tauri::command]
+pub async fn delete_source(state: State<'_, AppState>, source_id: i64) -> AppResult<()> {
+    sqlx::query("DELETE FROM imports WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM source_copies WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM sources WHERE id = ?1")
+        .bind(source_id)
+        .execute(&state.pool)
+        .await?;
+    tracing::info!(source_id, "source deleted");
+    Ok(())
+}
+
 // ── Catalog read commands ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]

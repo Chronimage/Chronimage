@@ -8,6 +8,7 @@ import {
   type ImportProgressEvent,
   useCleanupDryRun,
   useCreateSource,
+  useDeleteSource,
   useDetectIcloudPath,
   useImportGoogleTakeout,
   useIphoneDevices,
@@ -115,6 +116,7 @@ function getSourceKind(sourceName: string): string {
 export function OnboardScreen() {
   const { data: sources = [] } = useSources();
   const createSource = useCreateSource();
+  const deleteSource = useDeleteSource();
   const startImport = useStartImport();
   const importTakeout = useImportGoogleTakeout();
   const { data: cleanupPlans = [] } = useCleanupDryRun();
@@ -468,6 +470,17 @@ export function OnboardScreen() {
                       {s.status}
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    className="btn2"
+                    style={{ padding: '4px 10px', fontSize: 11, color: 'var(--fg-mute)' }}
+                    onClick={() => deleteSource.mutate(s.id)}
+                    disabled={deleteSource.isPending}
+                    title="Remove source"
+                    aria-label={`Remove ${s.name}`}
+                  >
+                    <Icon name="close" size={11} />
+                  </button>
                 </div>
               ))}
             </div>

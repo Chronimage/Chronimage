@@ -5,6 +5,7 @@ import {
   cleanupDryRun,
   createSource,
   currentChannel,
+  deleteSource,
   detectHardware,
   detectIcloudPath,
   embedImage,
@@ -187,5 +188,11 @@ describe('invoke wrappers', () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await listImports(3);
     expect(tauriInvoke).toHaveBeenCalledWith('list_imports', { sourceId: 3 });
+  });
+
+  it('deleteSource calls delete_source with sourceId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await deleteSource(7);
+    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', { sourceId: 7 });
   });
 });

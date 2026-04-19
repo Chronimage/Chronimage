@@ -120,6 +120,10 @@ export async function createSource(name: string, kind: string, rootPath?: string
   });
 }
 
+export async function deleteSource(sourceId: number): Promise<void> {
+  return tauriInvoke<void>('delete_source', { sourceId });
+}
+
 // ── Import commands ─────────────────────────────────────────────────────────
 
 export interface StartImportResponse {
