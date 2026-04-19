@@ -46,7 +46,6 @@ fn main() {
                 let _ = w.set_focus();
             }
         }))
-        .plugin(tauri_plugin_log::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
@@ -59,6 +58,8 @@ fn main() {
             commands::app_version,
             commands::current_channel,
             commands::import_dry_run,
+            commands::start_import,
+            commands::list_imports,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

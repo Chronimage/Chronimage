@@ -3,7 +3,7 @@
 //! just wire arguments and serialize results.
 
 use crate::{import, state::AppState, AppError, AppResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
 
@@ -86,6 +86,108 @@ async fn dry_scan(root: String) -> AppResult<ScanReport> {
         unpaired: leftovers.len(),
         by_extension,
     })
+}
+
+// ── Phase 1 pipeline commands ─────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct StartImportResponse {
+    pub import_id: i64,
+}
+
+/// Launch the import pipeline as a detached task. Returns `{ import_id }`
+/// immediately; progress comes via `"chronimage://import-progress"` events.
+///
+/// The `sources` row for `source_id` must already exist.
+#[tauri::command]
+pub async fn start_import(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    source_id: i64,
+    root: String,
+) -> AppResult<StartImportResponse> {
+    let root_path = PathBuf::from(&root);
+    if !root_path.exists() {
+        return Err(AppError::NotFound(format!(
+            "import root does not exist: {root}"
+        )));
+    }
+
+    let pool = state.pool.clone();
+
+    // Create the imports row synchronously so the caller gets the id before
+    // the background task even starts scanning.
+    let now = chrono::Utc::now().to_rfc3339();
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (source_id, started_at, total_files, imported_count, \
+         skipped_count, error_count) VALUES (?1, ?2, 0, 0, 0, 0) RETURNING id",
+    )
+    .bind(source_id)
+    .bind(&now)
+    .fetch_one(&pool)
+    .await?;
+
+    // Detach — errors are logged inside run_pipeline_detached.
+    let pool2 = pool.clone();
+    tokio::spawn(async move {
+        if let Err(e) = import::pipeline::run_pipeline_from_import_id(
+            source_id, import_id, root_path, pool2, app_handle,
+        )
+        .await
+        {
+            tracing::error!(error = %e, import_id, "import pipeline failed");
+        }
+    });
+
+    Ok(StartImportResponse { import_id })
+}
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ImportSummary {
+    pub id: i64,
+    pub source_id: i64,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub total_files: i64,
+    pub imported_count: i64,
+    pub skipped_count: i64,
+    pub error_count: i64,
+    pub last_seen_path: Option<String>,
+}
+
+/// List imports, optionally filtered by `source_id`.
+#[tauri::command]
+pub async fn list_imports(
+    state: State<'_, AppState>,
+    source_id: Option<i64>,
+) -> AppResult<Vec<ImportSummary>> {
+    query_imports(&state.pool, source_id).await
+}
+
+async fn query_imports(
+    pool: &sqlx::SqlitePool,
+    source_id: Option<i64>,
+) -> AppResult<Vec<ImportSummary>> {
+    let rows: Vec<ImportSummary> = if let Some(sid) = source_id {
+        sqlx::query_as::<_, ImportSummary>(
+            "SELECT id, source_id, started_at, finished_at, total_files, \
+             imported_count, skipped_count, error_count, last_seen_path \
+             FROM imports WHERE source_id = ?1 ORDER BY id DESC",
+        )
+        .bind(sid)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, ImportSummary>(
+            "SELECT id, source_id, started_at, finished_at, total_files, \
+             imported_count, skipped_count, error_count, last_seen_path \
+             FROM imports ORDER BY id DESC",
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(rows)
 }
 
 #[cfg(test)]

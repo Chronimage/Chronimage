@@ -4,8 +4,10 @@ version = "0.1.0-dev"
 description = "Chronimage — on-device AI photo organizer"
 authors = ["Jay Amirineni <jay@stackular.com>"]
 license = "UNLICENSED"
+publish = false
 edition = "2021"
 rust-version = "1.88"
+default-run = "chronimage-app"
 
 [[bin]]
 name = "chronimage-app"
@@ -76,6 +78,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [dev-dependencies]
+tauri = { version = "2.2", features = ["test"] }
 tempfile = "3"
 proptest = "1"
 mockall = "0.13"
