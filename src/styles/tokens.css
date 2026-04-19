@@ -1,0 +1,76 @@
+/*
+ * Chronimage design tokens.
+ * Ported from design-handoff/chronimage/project/styles.css (:root + themes).
+ * This file should be the ONLY place where raw oklch() / color values appear.
+ * Screens reference the CSS vars exclusively.
+ */
+
+:root {
+  --display-font: "Instrument Serif", "Times New Roman", serif;
+  --ui-font: "Inter Tight", -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono-font: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Dark (default) */
+  --bg: oklch(0.17 0.008 60);
+  --bg-chrome: oklch(0.14 0.008 60);
+  --bg-elev: oklch(0.22 0.008 60);
+  --bg-hover: oklch(0.25 0.008 60);
+  --stroke: oklch(0.28 0.008 60);
+  --stroke-strong: oklch(0.38 0.008 60);
+  --fg: oklch(0.96 0.005 80);
+  --fg-dim: oklch(0.72 0.005 80);
+  --fg-mute: oklch(0.5 0.005 80);
+
+  --accent: oklch(0.88 0.18 150);
+  --accent-ink: oklch(0.2 0.04 150);
+  --warn: oklch(0.72 0.17 25);
+  --danger: oklch(0.66 0.22 27);
+  --info: oklch(0.78 0.12 230);
+
+  /* Spacing scale (Phase 0 seed; expand as screens need) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+[data-theme="light"] {
+  --bg: oklch(0.98 0.004 80);
+  --bg-chrome: oklch(0.94 0.004 80);
+  --bg-elev: oklch(1 0 0);
+  --bg-hover: oklch(0.91 0.004 80);
+  --stroke: oklch(0.88 0.004 80);
+  --stroke-strong: oklch(0.78 0.004 80);
+  --fg: oklch(0.2 0.01 60);
+  --fg-dim: oklch(0.45 0.01 60);
+  --fg-mute: oklch(0.62 0.01 60);
+  --accent: oklch(0.72 0.19 150);
+  --accent-ink: oklch(0.98 0.01 150);
+}
+
+[data-accent="mint"] {
+  --accent: oklch(0.88 0.18 150);
+  --accent-ink: oklch(0.2 0.04 150);
+}
+[data-accent="ember"] {
+  --accent: oklch(0.78 0.17 40);
+  --accent-ink: oklch(0.2 0.04 40);
+}
+[data-accent="violet"] {
+  --accent: oklch(0.78 0.17 295);
+  --accent-ink: oklch(0.99 0.01 295);
+}
+[data-accent="sky"] {
+  --accent: oklch(0.82 0.14 230);
+  --accent-ink: oklch(0.2 0.04 230);
+}
+[data-accent="gold"] {
+  --accent: oklch(0.87 0.17 85);
+  --accent-ink: oklch(0.2 0.04 85);
+}
