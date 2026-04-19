@@ -247,29 +247,16 @@ export function OnboardScreen() {
   }
 
   async function handleImportIphone(deviceId: string, deviceName: string) {
-    // iPhone import goes over WPD/MTP — no folder path needed.
-    // The device ID is passed as the root so the Rust pipeline can identify
-    // the WPD device without a filesystem path.
-    const source = await createSource.mutateAsync({
+    // Prevent duplicate source entries per device.
+    if (sources.some((s) => s.kind === 'iphone' && s.name.includes(deviceName))) return;
+
+    // Register the source. WPD/MTP file transfer is not yet implemented —
+    // startImport expects a filesystem path. The source appears in the list
+    // so it's ready when the transfer pipeline lands.
+    await createSource.mutateAsync({
       name: `iPhone · ${deviceName}`,
       kind: 'iphone',
       rootPath: deviceId,
-    });
-
-    const resp = await startImport.mutateAsync({ sourceId: source.id, root: deviceId });
-    setActiveImports((prev) => {
-      const next = new Map(prev);
-      next.set(resp.import_id, {
-        importId: resp.import_id,
-        sourceId: source.id,
-        sourceName: source.name,
-        total: 0,
-        done: 0,
-        currentFile: '',
-        etaSeconds: null,
-        finished: false,
-      });
-      return next;
     });
   }
 
@@ -408,19 +395,23 @@ export function OnboardScreen() {
             {icloudPath ? 'iCloud (detected)' : 'iCloud Photos'}
           </button>
           {iphoneDevices.length > 0 ? (
-            iphoneDevices.map((dev) => (
-              <button
-                key={dev.device_id}
-                type="button"
-                className="btn2"
-                style={{ padding: '9px 16px', fontSize: 13 }}
-                onClick={() => handleImportIphone(dev.device_id, dev.friendly_name || dev.description)}
-                disabled={busy}
-                title={`Import from ${dev.friendly_name || dev.description}`}
-              >
-                <Icon name="iphone" size={14} /> {dev.friendly_name || 'iPhone'}
-              </button>
-            ))
+            iphoneDevices.map((dev) => {
+              const label = dev.friendly_name || dev.description || 'iPhone';
+              const alreadyAdded = sources.some((s) => s.kind === 'iphone' && s.name.includes(label));
+              return (
+                <button
+                  key={dev.device_id}
+                  type="button"
+                  className="btn2"
+                  style={{ padding: '9px 16px', fontSize: 13 }}
+                  onClick={() => handleImportIphone(dev.device_id, label)}
+                  disabled={busy || alreadyAdded}
+                  title={alreadyAdded ? `${label} already added` : `Add ${label} as a source`}
+                >
+                  <Icon name="iphone" size={14} /> {label}
+                </button>
+              );
+            })
           ) : (
             <button
               type="button"
@@ -445,7 +436,7 @@ export function OnboardScreen() {
 
         {error && (
           <div className="mono" style={{ fontSize: 11, color: 'var(--destructive)', marginTop: 10 }}>
-            {String(error)}
+            {error instanceof Error ? error.message : String(error)}
           </div>
         )}
 
