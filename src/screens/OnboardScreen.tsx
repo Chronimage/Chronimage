@@ -211,8 +211,17 @@ export function OnboardScreen() {
   }
 
   async function handleAddIcloud() {
-    const root = icloudPath ?? (await openDialog({ directory: true, multiple: false }));
-    if (!root || typeof root !== 'string') return;
+    // Use auto-detected path directly; only prompt if detection failed.
+    let root = icloudPath ?? null;
+    if (!root) {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: 'Select your iCloud Photos folder',
+      });
+      if (!selected || typeof selected !== 'string') return;
+      root = selected;
+    }
 
     const source = await createSource.mutateAsync({
       name: 'iCloud Photos',
@@ -237,17 +246,17 @@ export function OnboardScreen() {
     });
   }
 
-  async function handleImportIphone(_deviceId: string, deviceName: string) {
-    const selected = await openDialog({ directory: true, multiple: false });
-    if (!selected || typeof selected !== 'string') return;
-
+  async function handleImportIphone(deviceId: string, deviceName: string) {
+    // iPhone import goes over WPD/MTP — no folder path needed.
+    // The device ID is passed as the root so the Rust pipeline can identify
+    // the WPD device without a filesystem path.
     const source = await createSource.mutateAsync({
       name: `iPhone · ${deviceName}`,
       kind: 'iphone',
-      rootPath: selected,
+      rootPath: deviceId,
     });
 
-    const resp = await startImport.mutateAsync({ sourceId: source.id, root: selected });
+    const resp = await startImport.mutateAsync({ sourceId: source.id, root: deviceId });
     setActiveImports((prev) => {
       const next = new Map(prev);
       next.set(resp.import_id, {
