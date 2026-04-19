@@ -11,6 +11,7 @@
 
 pub mod catalog;
 pub mod commands;
+pub mod dedupe;
 pub mod entitlements;
 pub mod error;
 pub mod import;

@@ -2,7 +2,7 @@
 //! logic lives in domain modules (catalog, import, ai, ...) and these handlers
 //! just wire arguments and serialize results.
 
-use crate::{import, state::AppState, AppError, AppResult};
+use crate::{dedupe::confirm::DuplicateGroup, import, state::AppState, AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
@@ -188,6 +188,29 @@ async fn query_imports(
     };
 
     Ok(rows)
+}
+
+// ── Dedupe commands ───────────────────────────────────────────────────────────
+
+/// Find groups of semantically similar photos using SigLIP cosine similarity.
+///
+/// `min_similarity` defaults to `0.90` when `None`. Pass `0.95` to restrict
+/// to exact duplicates only.
+///
+/// RAW+JPG pairs are excluded from consideration — they are intentional
+/// stacks, not duplicates.
+#[tauri::command]
+pub async fn find_duplicates(
+    state: State<'_, AppState>,
+    min_similarity: Option<f64>,
+) -> AppResult<Vec<DuplicateGroup>> {
+    let threshold = min_similarity.unwrap_or(0.90);
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(AppError::InvalidInput(format!(
+            "min_similarity must be between 0.0 and 1.0, got {threshold}"
+        )));
+    }
+    crate::dedupe::confirm::find_duplicate_groups(&state.pool, threshold).await
 }
 
 #[cfg(test)]

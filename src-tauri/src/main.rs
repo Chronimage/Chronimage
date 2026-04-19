@@ -60,6 +60,7 @@ fn main() {
             commands::import_dry_run,
             commands::start_import,
             commands::list_imports,
+            commands::find_duplicates,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
