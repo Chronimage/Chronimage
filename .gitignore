@@ -96,3 +96,4 @@ target/criterion/
 # Tauri updater private keys (signed uploads only)
 ~/.tauri/
 !tauri-pub.pem
+.claude/scheduled_tasks.lock

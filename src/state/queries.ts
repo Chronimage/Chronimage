@@ -1,33 +1,55 @@
 /**
  * TanStack Query hooks for catalog data. These replace the static fixture
  * arrays in fixtures.ts once the Rust backend has real data.
- *
- * Usage:
- *   const { data: albums = [] } = useAlbums();
- *   const { data: photos = [], fetchNextPage } = usePhotos();
- *   const { data: sources = [] } = useSources();
  */
 
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AlbumRow,
+  type CleanupPlan,
+  cleanupDryRun,
+  createSource,
+  detectIcloudPath,
+  IMPORT_PROGRESS_EVENT,
+  type ImportProgressEvent,
+  type ImportSummary,
+  importGoogleTakeout,
   type ListPhotosParams,
   listAlbums,
+  listImports,
+  listIphoneDevices,
   listPhotos,
   listSources,
+  onThisDay,
   type PhotoRow,
+  refreshSmartAlbums,
+  type SourceCleanupItem,
   type SourceRow,
+  type StartImportResponse,
+  startImport,
+  type UsbDevice,
+  unseenPhotos,
 } from '../tauri/invoke';
 
-export type { AlbumRow, PhotoRow, SourceRow };
+export type {
+  AlbumRow,
+  CleanupPlan,
+  ImportProgressEvent,
+  ImportSummary,
+  PhotoRow,
+  SourceCleanupItem,
+  SourceRow,
+  StartImportResponse,
+  UsbDevice,
+};
+export { IMPORT_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
 
+// ── Read hooks ────────────────────────────────────────────────────────────────
+
 export function useAlbums() {
-  return useQuery({
-    queryKey: ['albums'],
-    queryFn: listAlbums,
-  });
+  return useQuery({ queryKey: ['albums'], queryFn: listAlbums });
 }
 
 export function usePhotos(params?: Omit<ListPhotosParams, 'offset'>) {
@@ -44,8 +66,88 @@ export function usePhotos(params?: Omit<ListPhotosParams, 'offset'>) {
 }
 
 export function useSources() {
+  return useQuery({ queryKey: ['sources'], queryFn: listSources });
+}
+
+export function useImports(sourceId?: number) {
   return useQuery({
-    queryKey: ['sources'],
-    queryFn: listSources,
+    queryKey: ['imports', sourceId],
+    queryFn: () => listImports(sourceId),
   });
+}
+
+export function useOnThisDay(limit?: number) {
+  return useQuery({
+    queryKey: ['on_this_day', limit],
+    queryFn: () => onThisDay(limit),
+  });
+}
+
+export function useUnseenPhotos(limit?: number, minScore?: number) {
+  return useQuery({
+    queryKey: ['unseen_photos', limit, minScore],
+    queryFn: () => unseenPhotos(limit, minScore),
+  });
+}
+
+export function useCleanupDryRun(sourceId?: number) {
+  return useQuery({
+    queryKey: ['cleanup_dry_run', sourceId],
+    queryFn: () => cleanupDryRun(sourceId),
+  });
+}
+
+export function useRefreshSmartAlbums() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: refreshSmartAlbums,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
+}
+
+// ── Mutation hooks ────────────────────────────────────────────────────────────
+
+export function useCreateSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, kind, rootPath }: { name: string; kind: string; rootPath?: string }) =>
+      createSource(name, kind, rootPath),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+    },
+  });
+}
+
+export function useStartImport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sourceId, root }: { sourceId: number; root: string }) => startImport(sourceId, root),
+    onSuccess: (_data, { sourceId }) => {
+      qc.invalidateQueries({ queryKey: ['imports', sourceId] });
+      qc.invalidateQueries({ queryKey: ['imports'] });
+    },
+  });
+}
+
+export function useImportGoogleTakeout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sourceId, root }: { sourceId: number; root: string }) =>
+      importGoogleTakeout(sourceId, root),
+    onSuccess: (_data, { sourceId }) => {
+      qc.invalidateQueries({ queryKey: ['imports', sourceId] });
+      qc.invalidateQueries({ queryKey: ['imports'] });
+    },
+  });
+}
+
+export function useDetectIcloudPath() {
+  return useQuery({ queryKey: ['icloud_path'], queryFn: detectIcloudPath });
+}
+
+export function useIphoneDevices() {
+  return useQuery({ queryKey: ['iphone_devices'], queryFn: listIphoneDevices });
 }

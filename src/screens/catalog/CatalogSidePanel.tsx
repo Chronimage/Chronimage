@@ -1,19 +1,48 @@
-import { Icon } from '../../primitives/Icon';
-import { ALBUMS, PEOPLE, PHOTOS, SOURCES } from '../../state/fixtures';
+import { Icon, type IconName } from '../../primitives/Icon';
+import { PEOPLE } from '../../state/fixtures';
+import { useAlbums, useSources } from '../../state/queries';
+
+const KIND_ICON: Record<string, IconName> = {
+  local: 'disk',
+  external: 'disk',
+  nas: 'nas',
+  sd: 'card',
+  iphone: 'iphone',
+  android: 'android',
+  google_photos: 'cloud',
+  icloud: 'cloud',
+  onedrive: 'cloud',
+  dropbox: 'cloud',
+};
+
+function kindIcon(kind: string): IconName {
+  return KIND_ICON[kind] ?? 'disk';
+}
 
 export interface CatalogSidePanelProps {
   albumId: string;
   onAlbumChange: (id: string) => void;
 }
 
+function statusDot(status: string): string {
+  if (status === 'synced') return 'var(--accent)';
+  if (status === 'syncing') return 'var(--info)';
+  if (status === 'ready') return 'var(--warn)';
+  return 'var(--fg-mute)';
+}
+
 export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelProps) {
-  const nonCullAlbums = ALBUMS.filter((a) => a.tag !== 'cull').slice(0, 9);
+  const { data: albums = [] } = useAlbums();
+  const { data: sources = [] } = useSources();
+
+  const totalPhotos = sources.reduce((sum, s) => sum + s.photo_count, 0);
+  const nonCullAlbums = albums.filter((a) => a.tag !== 'cull').slice(0, 9);
 
   return (
     <div className="sidepanel">
       <div className="head">
         <h3>Catalog</h3>
-        <span className="count">851,002</span>
+        <span className="count">{totalPhotos > 0 ? totalPhotos.toLocaleString() : '—'}</span>
       </div>
 
       <div style={{ padding: '0 10px 10px' }}>
@@ -50,14 +79,16 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
             <Icon name="layers" size={14} />
           </span>
           All Photos
-          <span className="n">851K</span>
+          <span className="n">
+            {totalPhotos > 999 ? `${(totalPhotos / 1000).toFixed(0)}K` : totalPhotos || '—'}
+          </span>
         </button>
         {nonCullAlbums.map((a) => (
           <button
             type="button"
             key={a.id}
-            className={`item ${albumId === a.id ? 'active' : ''}`}
-            onClick={() => onAlbumChange(a.id)}
+            className={`item ${albumId === String(a.id) ? 'active' : ''}`}
+            onClick={() => onAlbumChange(String(a.id))}
           >
             <span className="ico">
               <Icon name={a.tag === 'faces' || a.tag === 'people' ? 'faces' : 'tag'} size={13} />
@@ -65,7 +96,9 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {a.name}
             </span>
-            <span className="n">{a.count > 999 ? `${(a.count / 1000).toFixed(1)}K` : a.count}</span>
+            <span className="n">
+              {a.photo_count > 999 ? `${(a.photo_count / 1000).toFixed(1)}K` : a.photo_count}
+            </span>
           </button>
         ))}
       </div>
@@ -77,8 +110,7 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
       <div style={{ padding: '0 10px 10px' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 4 }}>
           {PEOPLE.map((p) => {
-            const photo = PHOTOS[p.face];
-            const hue = photo?.hue ?? 0;
+            const hue = (p.face * 31) % 360;
             return (
               <div key={p.name} title={`${p.name} · ${p.count}`} style={{ textAlign: 'center' }}>
                 <div
@@ -110,10 +142,10 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
         <span>Sources</span>
       </div>
       <div className="list">
-        {SOURCES.slice(0, 7).map((s) => (
+        {sources.slice(0, 7).map((s) => (
           <button type="button" key={s.id} className="item">
             <span className="ico">
-              <Icon name={s.kind} size={13} />
+              <Icon name={kindIcon(s.kind)} size={13} />
             </span>
             <span
               style={{
@@ -131,14 +163,7 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
                 width: 6,
                 height: 6,
                 borderRadius: '50%',
-                background:
-                  s.status === 'synced'
-                    ? 'var(--accent)'
-                    : s.status === 'syncing'
-                      ? 'var(--info)'
-                      : s.status === 'ready'
-                        ? 'var(--warn)'
-                        : 'var(--fg-mute)',
+                background: statusDot(s.status),
               }}
             />
           </button>

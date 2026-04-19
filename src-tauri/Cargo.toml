@@ -72,8 +72,10 @@ clap = { version = "4", features = ["derive", "env"] }
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"
 windows = { version = "0.58", features = [
+  "Win32_Devices_PortableDevices",
   "Win32_Foundation",
   "Win32_System_Com",
+  "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -2,7 +2,7 @@
 //! logic lives in domain modules (catalog, import, ai, ...) and these handlers
 //! just wire arguments and serialize results.
 
-use crate::{import, state::AppState, AppError, AppResult};
+use crate::{catalog, import, state::AppState, AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
@@ -190,6 +190,47 @@ async fn query_imports(
     Ok(rows)
 }
 
+// ── Source management commands ────────────────────────────────────────────
+
+/// Create a new source row and return it with a zeroed photo_count.
+#[tauri::command]
+pub async fn create_source(
+    state: State<'_, AppState>,
+    name: String,
+    kind: String,
+    root_path: Option<String>,
+) -> AppResult<SourceRow> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let config = match &root_path {
+        Some(p) => serde_json::json!({ "root": p }).to_string(),
+        None => "{}".to_string(),
+    };
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, status, config_json, created_at) \
+         VALUES (?1, ?2, 'idle', ?3, ?4) RETURNING id",
+    )
+    .bind(&name)
+    .bind(&kind)
+    .bind(&config)
+    .bind(&now)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let row = sqlx::query_as::<_, SourceRow>(
+        "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+         COUNT(DISTINCT sc.photo_id) AS photo_count \
+         FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+         WHERE s.id = ?1 GROUP BY s.id",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    tracing::info!(source_id = id, kind, "source created");
+    Ok(row)
+}
+
 // ── Catalog read commands ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -235,27 +276,97 @@ pub struct PhotoRow {
     pub paired_photo_id: Option<i64>,
 }
 
-/// List photos ordered by imported_at desc, with optional pagination.
+/// List photos ordered by imported_at desc, with optional pagination and album filter.
 /// `limit` defaults to 100; `offset` defaults to 0.
+/// When `album_id` is provided the album's `rule_json` is evaluated to build a WHERE clause.
 #[tauri::command]
 pub async fn list_photos(
     state: State<'_, AppState>,
     limit: Option<i64>,
     offset: Option<i64>,
+    album_id: Option<i64>,
 ) -> AppResult<Vec<PhotoRow>> {
     let lim = limit.unwrap_or(100);
     let off = offset.unwrap_or(0);
-    let rows = sqlx::query_as::<_, PhotoRow>(
+
+    // Resolve album filter.
+    let where_clause = if let Some(aid) = album_id {
+        let rule_json: Option<String> =
+            sqlx::query_scalar("SELECT rule_json FROM smart_albums WHERE id = ?1")
+                .bind(aid)
+                .fetch_optional(&state.pool)
+                .await?;
+        match rule_json {
+            None => {
+                return Err(AppError::NotFound(format!("smart album {aid} not found")));
+            }
+            Some(rj) => match catalog::rules::parse_rule(&rj) {
+                Err(_) => {
+                    return Err(AppError::Internal(format!(
+                        "invalid rule_json for album {aid}"
+                    )))
+                }
+                Ok(rule) => catalog::rules::rule_to_sql(&rule)
+                    .map(|frag| format!("WHERE {frag}"))
+                    .unwrap_or_default(),
+            },
+        }
+    } else {
+        String::new()
+    };
+
+    let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
          camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
          paired_photo_id \
-         FROM photos ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2",
-    )
-    .bind(lim)
-    .bind(off)
-    .fetch_all(&state.pool)
-    .await?;
+         FROM photos {where_clause} ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2"
+    );
+    let rows = sqlx::query_as::<_, PhotoRow>(&sql)
+        .bind(lim)
+        .bind(off)
+        .fetch_all(&state.pool)
+        .await?;
     Ok(rows)
+}
+
+/// Re-evaluate all smart album rules and update `photo_count` + `cover_photo_ids`.
+/// Called automatically after each import and can be invoked manually.
+#[tauri::command]
+pub async fn refresh_smart_albums(state: State<'_, AppState>) -> AppResult<()> {
+    refresh_album_counts(&state.pool).await
+}
+
+pub(crate) async fn refresh_album_counts(pool: &sqlx::SqlitePool) -> AppResult<()> {
+    #[derive(sqlx::FromRow)]
+    struct AlbumMeta {
+        id: i64,
+        rule_json: String,
+    }
+
+    let albums = sqlx::query_as::<_, AlbumMeta>("SELECT id, rule_json FROM smart_albums")
+        .fetch_all(pool)
+        .await?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for album in &albums {
+        let count = catalog::rules::count_matching(pool, &album.rule_json).await;
+        let cover_ids = catalog::rules::matching_photo_ids(pool, &album.rule_json, 4).await;
+        let cover_json = serde_json::to_string(&cover_ids).unwrap_or_else(|_| "[]".to_string());
+
+        sqlx::query(
+            "UPDATE smart_albums SET photo_count = ?1, cover_photo_ids = ?2, updated_at = ?3 \
+             WHERE id = ?4",
+        )
+        .bind(count)
+        .bind(&cover_json)
+        .bind(&now)
+        .bind(album.id)
+        .execute(pool)
+        .await?;
+    }
+
+    tracing::debug!(albums = albums.len(), "smart album counts refreshed");
+    Ok(())
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -278,6 +389,254 @@ pub async fn list_sources(state: State<'_, AppState>) -> AppResult<Vec<SourceRow
          LEFT JOIN source_copies sc ON sc.source_id = s.id \
          GROUP BY s.id ORDER BY s.id",
     )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+// ── Source-side cleanup commands ─────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct SourceCleanupItem {
+    pub source_copy_id: i64,
+    pub photo_id: i64,
+    pub source_id: i64,
+    pub path: String,
+    pub size_bytes: i64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupPlan {
+    pub source_id: i64,
+    pub source_name: String,
+    pub reclaimable_bytes: i64,
+    pub item_count: i64,
+    pub items: Vec<SourceCleanupItem>,
+}
+
+/// Dry-run: returns, per source, the set of source copies that can be safely deleted.
+///
+/// Safety criteria (all must hold):
+/// 1. The source copy's `verified_sha256` matches the canonical `photos.sha256`.
+/// 2. The same photo has at least one **other** copy in a different source that is also
+///    SHA256-verified (so we're not deleting the only surviving copy).
+/// 3. The source copy has a non-null `path` (i.e. it's a local filesystem file we can
+///    actually delete).
+///
+/// If `source_id` is `Some`, only that source is evaluated.
+#[tauri::command]
+pub async fn cleanup_dry_run(
+    state: State<'_, AppState>,
+    source_id: Option<i64>,
+) -> AppResult<Vec<CleanupPlan>> {
+    let pool = &state.pool;
+
+    // Build the reclaimable items query.
+    // A copy is reclaimable when:
+    //   - sc.verified_sha256 IS NOT NULL AND sc.verified_sha256 = p.sha256
+    //   - sc.path IS NOT NULL
+    //   - There exists another source_copy for the same photo_id in a *different*
+    //     source with a verified sha256.
+    let items: Vec<(i64, i64, i64, String, i64, String, String)> = if let Some(sid) = source_id {
+        sqlx::query_as(
+            "SELECT sc.id, sc.photo_id, sc.source_id, sc.path, \
+             COALESCE(p.size_bytes, 0) AS size_bytes, p.sha256, s.name \
+             FROM source_copies sc \
+             JOIN photos p ON p.id = sc.photo_id \
+             JOIN sources s ON s.id = sc.source_id \
+             WHERE sc.source_id = ?1 \
+               AND sc.path IS NOT NULL \
+               AND sc.verified_sha256 IS NOT NULL \
+               AND sc.verified_sha256 = p.sha256 \
+               AND EXISTS ( \
+                 SELECT 1 FROM source_copies sc2 \
+                 WHERE sc2.photo_id = sc.photo_id \
+                   AND sc2.source_id != sc.source_id \
+                   AND sc2.verified_sha256 IS NOT NULL \
+                   AND sc2.verified_sha256 = p.sha256 \
+               ) \
+             ORDER BY sc.source_id, sc.id",
+        )
+        .bind(sid)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT sc.id, sc.photo_id, sc.source_id, sc.path, \
+             COALESCE(p.size_bytes, 0) AS size_bytes, p.sha256, s.name \
+             FROM source_copies sc \
+             JOIN photos p ON p.id = sc.photo_id \
+             JOIN sources s ON s.id = sc.source_id \
+             WHERE sc.path IS NOT NULL \
+               AND sc.verified_sha256 IS NOT NULL \
+               AND sc.verified_sha256 = p.sha256 \
+               AND EXISTS ( \
+                 SELECT 1 FROM source_copies sc2 \
+                 WHERE sc2.photo_id = sc.photo_id \
+                   AND sc2.source_id != sc.source_id \
+                   AND sc2.verified_sha256 IS NOT NULL \
+                   AND sc2.verified_sha256 = p.sha256 \
+               ) \
+             ORDER BY sc.source_id, sc.id",
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    // Group items by source.
+    let mut plans: std::collections::HashMap<i64, CleanupPlan> = std::collections::HashMap::new();
+    for (sc_id, photo_id, sid, path, size_bytes, sha256, source_name) in items {
+        let plan = plans.entry(sid).or_insert_with(|| CleanupPlan {
+            source_id: sid,
+            source_name: source_name.clone(),
+            reclaimable_bytes: 0,
+            item_count: 0,
+            items: Vec::new(),
+        });
+        plan.reclaimable_bytes += size_bytes;
+        plan.item_count += 1;
+        plan.items.push(SourceCleanupItem {
+            source_copy_id: sc_id,
+            photo_id,
+            source_id: sid,
+            path,
+            size_bytes,
+            sha256,
+        });
+    }
+
+    let mut result: Vec<CleanupPlan> = plans.into_values().collect();
+    result.sort_by_key(|p| p.source_id);
+    Ok(result)
+}
+
+// ── Source connector commands ─────────────────────────────────────────────
+
+/// Run the standard import pipeline over a Google Photos Takeout export root,
+/// then enrich catalog rows with metadata from the sidecar `.json` files.
+#[tauri::command]
+pub async fn import_google_takeout(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    source_id: i64,
+    root: String,
+) -> AppResult<StartImportResponse> {
+    let root_path = PathBuf::from(&root);
+    if !root_path.exists() {
+        return Err(AppError::NotFound(format!(
+            "takeout root does not exist: {root}"
+        )));
+    }
+
+    let pool = state.pool.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (source_id, started_at, total_files, imported_count, \
+         skipped_count, error_count) VALUES (?1, ?2, 0, 0, 0, 0) RETURNING id",
+    )
+    .bind(source_id)
+    .bind(&now)
+    .fetch_one(&pool)
+    .await?;
+
+    let pool2 = pool.clone();
+    let root_clone = root_path.clone();
+    tokio::spawn(async move {
+        if let Err(e) = import::pipeline::run_pipeline_from_import_id(
+            source_id,
+            import_id,
+            root_clone.clone(),
+            pool2.clone(),
+            app_handle,
+        )
+        .await
+        {
+            tracing::error!(error = %e, import_id, "google takeout pipeline failed");
+            return;
+        }
+
+        match import::google_takeout::enrich_from_sidecars(&pool2, &root_clone).await {
+            Ok(n) => tracing::info!(enriched = n, import_id, "takeout sidecar enrichment done"),
+            Err(e) => tracing::warn!(error = %e, import_id, "takeout sidecar enrichment failed"),
+        }
+    });
+
+    Ok(StartImportResponse { import_id })
+}
+
+/// Detect the iCloud-for-Windows Photos folder, if installed.
+/// Returns the path as a string, or `null` when not found.
+#[tauri::command]
+pub async fn detect_icloud_path() -> AppResult<Option<String>> {
+    Ok(import::icloud::detect_icloud_path().map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// List Apple devices connected via USB (WPD/MTP). Returns `[]` when none.
+#[tauri::command]
+pub async fn list_iphone_devices() -> AppResult<Vec<import::iphone_usb::UsbDevice>> {
+    tokio::task::spawn_blocking(import::iphone_usb::list_iphone_devices)
+        .await
+        .map_err(|e| AppError::Internal(format!("iphone usb task join: {e}")))?
+}
+
+// ── Rediscovery commands ──────────────────────────────────────────────────
+
+/// Photos taken on today's month+day in any prior year.
+/// Returns at most `limit` rows (default 20), ordered by captured_at desc.
+#[tauri::command]
+pub async fn on_this_day(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(20);
+    // strftime('%m-%d', captured_at) matches the month-day portion regardless of year.
+    // captured_at is stored as RFC3339 which starts with YYYY-MM-DDTHH:MM:SS…
+    let today_md = chrono::Utc::now().format("%m-%d").to_string();
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+         paired_photo_id \
+         FROM photos \
+         WHERE captured_at IS NOT NULL \
+           AND strftime('%m-%d', captured_at) = ?1 \
+           AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
+         ORDER BY captured_at DESC \
+         LIMIT ?2",
+    )
+    .bind(&today_md)
+    .bind(lim)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Photos that have never been viewed or were last viewed more than two years ago,
+/// with an aesthetic_score >= `min_score` (default 0.0).
+/// Returns at most `limit` rows (default 20), ordered by aesthetic_score desc.
+#[tauri::command]
+pub async fn unseen_photos(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    min_score: Option<f64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(20);
+    let score = min_score.unwrap_or(0.0);
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
+         p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+         p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+         FROM photos p \
+         LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+         WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
+           AND (pv.photo_id IS NULL \
+                OR pv.last_viewed_at IS NULL \
+                OR pv.last_viewed_at < datetime('now', '-2 years')) \
+         ORDER BY p.aesthetic_score DESC NULLS LAST \
+         LIMIT ?2",
+    )
+    .bind(score)
+    .bind(lim)
     .fetch_all(&state.pool)
     .await?;
     Ok(rows)
@@ -331,6 +690,62 @@ mod tests {
         assert_eq!(report.total_files, 3);
         assert_eq!(report.raw_jpg_pairs, 1);
         assert_eq!(report.unpaired, 1);
+    }
+
+    // ── create_source tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_source_inserts_row_and_returns_it() {
+        let (_tmp, pool) = make_pool().await;
+
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES ('Local D:', 'local', 'idle', '{\"root\":\"D:/Photos\"}', ?1) RETURNING id",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .fetch_one(&pool)
+        .await
+        .expect("insert");
+
+        let row = sqlx::query_as::<_, SourceRow>(
+            "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+             COUNT(DISTINCT sc.photo_id) AS photo_count \
+             FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+             WHERE s.id = ?1 GROUP BY s.id",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch");
+
+        assert_eq!(row.name, "Local D:");
+        assert_eq!(row.kind, "local");
+        assert_eq!(row.status, "idle");
+        assert_eq!(row.photo_count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_source_config_json_stored_correctly() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES ('iCloud', 'icloud', 'idle', '{\"root\":\"/iCloud\"}', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert");
+
+        let config: String = sqlx::query_scalar("SELECT config_json FROM sources WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("config");
+
+        let v: serde_json::Value = serde_json::from_str(&config).expect("valid json");
+        assert_eq!(v["root"], "/iCloud");
     }
 
     // ── Catalog read command tests ─────────────────────────────────────────────
@@ -424,6 +839,103 @@ mod tests {
         assert_eq!(rows.len(), 3);
     }
 
+    // list_photos album_id filter + refresh_smart_albums ──────────────────────
+
+    async fn insert_photo_with_iso(pool: &sqlx::SqlitePool, sha_prefix: char, iso: i64) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, iso) \
+             VALUES (?1, ?2, 0, 0, ?3, 0, ?4) RETURNING id",
+        )
+        .bind(format!("{sha_prefix:0>64}"))
+        .bind(format!("{sha_prefix}.jpg"))
+        .bind(&now)
+        .bind(iso)
+        .fetch_one(pool)
+        .await
+        .expect("insert photo")
+    }
+
+    async fn insert_night_album(pool: &sqlx::SqlitePool) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar(
+            "INSERT INTO smart_albums \
+             (name, rule_json, cover_photo_ids, tag, is_system, created_at, updated_at) \
+             VALUES ('Night', '{\"type\":\"exif\",\"field\":\"iso\",\"op\":\"gte\",\"value\":3200}', \
+             '[]', 'lighting', 1, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("insert album")
+    }
+
+    #[tokio::test]
+    async fn list_photos_album_filter_iso_gte_3200() {
+        let (_tmp, pool) = make_pool().await;
+        insert_photo_with_iso(&pool, 'a', 6400).await;
+        insert_photo_with_iso(&pool, 'b', 100).await;
+        let album_id = insert_night_album(&pool).await;
+
+        // Build the where clause directly via the rule engine.
+        let rule_json = r#"{"type":"exif","field":"iso","op":"gte","value":3200}"#;
+        let rule = crate::catalog::rules::parse_rule(rule_json).unwrap();
+        let frag = crate::catalog::rules::rule_to_sql(&rule).unwrap();
+        let sql = format!(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
+        );
+        let rows = sqlx::query_as::<_, PhotoRow>(&sql)
+            .fetch_all(&pool)
+            .await
+            .expect("query");
+
+        assert_eq!(rows.len(), 1, "only high-ISO photo should match");
+        assert_eq!(rows[0].iso, Some(6400));
+        let _ = album_id;
+    }
+
+    #[tokio::test]
+    async fn refresh_smart_albums_updates_photo_count() {
+        let (_tmp, pool) = make_pool().await;
+        insert_photo_with_iso(&pool, 'c', 6400).await;
+        insert_photo_with_iso(&pool, 'd', 100).await;
+        let album_id = insert_night_album(&pool).await;
+
+        refresh_album_counts(&pool).await.expect("refresh");
+
+        let (count,): (i64,) = sqlx::query_as("SELECT photo_count FROM smart_albums WHERE id = ?1")
+            .bind(album_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query");
+
+        assert_eq!(count, 1, "only high-ISO photo counts");
+    }
+
+    #[tokio::test]
+    async fn refresh_smart_albums_sets_cover_photo_ids() {
+        let (_tmp, pool) = make_pool().await;
+        let photo_id = insert_photo_with_iso(&pool, 'e', 5000).await;
+        let album_id = insert_night_album(&pool).await;
+
+        refresh_album_counts(&pool).await.expect("refresh");
+
+        let cover: String =
+            sqlx::query_scalar("SELECT cover_photo_ids FROM smart_albums WHERE id = ?1")
+                .bind(album_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query");
+
+        let ids: Vec<i64> = serde_json::from_str(&cover).expect("json");
+        assert!(
+            ids.contains(&photo_id),
+            "cover should include the matching photo"
+        );
+    }
+
     // list_sources ────────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -439,6 +951,371 @@ mod tests {
         .await
         .expect("query");
         assert!(rows.is_empty());
+    }
+
+    // cleanup_dry_run ─────────────────────────────────────────────────────────
+
+    async fn setup_cleanup_scenario(pool: &sqlx::SqlitePool) -> (i64, i64, i64) {
+        // Returns (source_a_id, source_b_id, photo_id)
+        let now = chrono::Utc::now().to_rfc3339();
+        let sha = "a".repeat(64);
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, size_bytes) \
+             VALUES (?1, 'test.jpg', 100, 100, ?2, 0, 2048) RETURNING id",
+        )
+        .bind(&sha)
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("photo");
+
+        let source_a: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, created_at) \
+             VALUES ('Google Photos', 'google_photos', 'idle', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("source_a");
+
+        let source_b: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, created_at) \
+             VALUES ('Local D:', 'local', 'idle', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("source_b");
+
+        // source_a copy: verified
+        sqlx::query(
+            "INSERT INTO source_copies \
+             (photo_id, source_id, path, is_primary, verified_sha256, last_seen_at) \
+             VALUES (?1, ?2, '/gp/test.jpg', 0, ?3, ?4)",
+        )
+        .bind(photo_id)
+        .bind(source_a)
+        .bind(&sha)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("copy_a");
+
+        // source_b copy: verified (the retained copy)
+        sqlx::query(
+            "INSERT INTO source_copies \
+             (photo_id, source_id, path, is_primary, verified_sha256, last_seen_at) \
+             VALUES (?1, ?2, 'D:/Photos/test.jpg', 1, ?3, ?4)",
+        )
+        .bind(photo_id)
+        .bind(source_b)
+        .bind(&sha)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("copy_b");
+
+        (source_a, source_b, photo_id)
+    }
+
+    #[tokio::test]
+    async fn cleanup_dry_run_returns_reclaimable_item_when_both_verified() {
+        let (_tmp, pool) = make_pool().await;
+        let (source_a, _source_b, photo_id) = setup_cleanup_scenario(&pool).await;
+
+        let items: Vec<(i64, i64, i64, String, i64, String, String)> = sqlx::query_as(
+            "SELECT sc.id, sc.photo_id, sc.source_id, sc.path, \
+             COALESCE(p.size_bytes, 0), p.sha256, s.name \
+             FROM source_copies sc \
+             JOIN photos p ON p.id = sc.photo_id \
+             JOIN sources s ON s.id = sc.source_id \
+             WHERE sc.source_id = ?1 \
+               AND sc.path IS NOT NULL \
+               AND sc.verified_sha256 IS NOT NULL \
+               AND sc.verified_sha256 = p.sha256 \
+               AND EXISTS ( \
+                 SELECT 1 FROM source_copies sc2 \
+                 WHERE sc2.photo_id = sc.photo_id \
+                   AND sc2.source_id != sc.source_id \
+                   AND sc2.verified_sha256 IS NOT NULL \
+                   AND sc2.verified_sha256 = p.sha256 \
+               )",
+        )
+        .bind(source_a)
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1, photo_id);
+        assert_eq!(items[0].4, 2048); // size_bytes
+    }
+
+    #[tokio::test]
+    async fn cleanup_dry_run_excludes_unverified_copies() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let sha = "b".repeat(64);
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'unver.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind(&sha)
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        let source_a: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, created_at) \
+             VALUES ('GP', 'google_photos', 'idle', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("src");
+
+        // unverified copy (verified_sha256 IS NULL)
+        sqlx::query(
+            "INSERT INTO source_copies \
+             (photo_id, source_id, path, is_primary, last_seen_at) \
+             VALUES (?1, ?2, '/gp/unver.jpg', 0, ?3)",
+        )
+        .bind(photo_id)
+        .bind(source_a)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("copy");
+
+        let items: Vec<(i64,)> = sqlx::query_as(
+            "SELECT sc.id FROM source_copies sc \
+             JOIN photos p ON p.id = sc.photo_id \
+             WHERE sc.verified_sha256 IS NOT NULL AND sc.verified_sha256 = p.sha256",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert!(
+            items.is_empty(),
+            "unverified copy must not appear in reclaimable set"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_dry_run_excludes_sole_copy() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let sha = "c".repeat(64);
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'sole.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind(&sha)
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        let source_a: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, created_at) \
+             VALUES ('GP', 'google_photos', 'idle', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("src");
+
+        // Only one copy — verified, but no other copy exists
+        sqlx::query(
+            "INSERT INTO source_copies \
+             (photo_id, source_id, path, is_primary, verified_sha256, last_seen_at) \
+             VALUES (?1, ?2, '/gp/sole.jpg', 1, ?3, ?4)",
+        )
+        .bind(photo_id)
+        .bind(source_a)
+        .bind(&sha)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("copy");
+
+        let _ = photo_id; // used above
+
+        let items: Vec<(i64,)> = sqlx::query_as(
+            "SELECT sc.id FROM source_copies sc \
+             JOIN photos p ON p.id = sc.photo_id \
+             WHERE sc.verified_sha256 IS NOT NULL \
+               AND sc.verified_sha256 = p.sha256 \
+               AND EXISTS ( \
+                 SELECT 1 FROM source_copies sc2 \
+                 WHERE sc2.photo_id = sc.photo_id \
+                   AND sc2.source_id != sc.source_id \
+                   AND sc2.verified_sha256 IS NOT NULL \
+               )",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert!(items.is_empty(), "sole copy must never be reclaimable");
+    }
+
+    // on_this_day ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_this_day_returns_empty_when_no_photos() {
+        let (_tmp, pool) = make_pool().await;
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos \
+             WHERE captured_at IS NOT NULL \
+               AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
+               AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
+             ORDER BY captured_at DESC LIMIT 20",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn on_this_day_matches_same_month_day_in_prior_year() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        use chrono::Datelike as _;
+        let now_dt = chrono::Utc::now();
+        let prior_year = now_dt
+            .with_year(now_dt.year() - 1)
+            .expect("prior year")
+            .to_rfc3339();
+
+        // Insert one photo from prior year (should match) and one from now (should NOT match).
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, captured_at) \
+             VALUES (?1, 'prior.jpg', 0, 0, ?2, 0, ?3)",
+        )
+        .bind("a".repeat(64))
+        .bind(&now)
+        .bind(&prior_year)
+        .execute(&pool)
+        .await
+        .expect("insert prior");
+
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, captured_at) \
+             VALUES (?1, 'current.jpg', 0, 0, ?2, 0, ?2)",
+        )
+        .bind("b".repeat(64))
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert current");
+
+        let today_md = chrono::Utc::now().format("%m-%d").to_string();
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos \
+             WHERE captured_at IS NOT NULL \
+               AND strftime('%m-%d', captured_at) = ?1 \
+               AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
+             ORDER BY captured_at DESC LIMIT 20",
+        )
+        .bind(&today_md)
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "prior.jpg");
+    }
+
+    // unseen_photos ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unseen_photos_returns_never_viewed_photos() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Insert 2 photos — neither has a photo_views row.
+        for i in 0u8..2 {
+            sqlx::query(
+                "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+                 VALUES (?1, ?2, 0, 0, ?3, 0)",
+            )
+            .bind(format!("{:0>64}", i))
+            .bind(format!("unseen{i}.jpg"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("insert");
+        }
+
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
+             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+             FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+             WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
+               AND (pv.photo_id IS NULL \
+                    OR pv.last_viewed_at IS NULL \
+                    OR pv.last_viewed_at < datetime('now', '-2 years')) \
+             ORDER BY p.aesthetic_score DESC NULLS LAST LIMIT 20",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unseen_photos_excludes_recently_viewed() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'seen.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind("c".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        sqlx::query(
+            "INSERT INTO photo_views (photo_id, last_viewed_at, view_count) VALUES (?1, ?2, 5)",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("view");
+
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
+             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+             FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+             WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
+               AND (pv.photo_id IS NULL \
+                    OR pv.last_viewed_at IS NULL \
+                    OR pv.last_viewed_at < datetime('now', '-2 years')) \
+             ORDER BY p.aesthetic_score DESC NULLS LAST LIMIT 20",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert!(rows.is_empty(), "recently-viewed photo must be excluded");
     }
 
     #[tokio::test]

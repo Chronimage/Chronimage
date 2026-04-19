@@ -308,6 +308,11 @@ async fn execute_pipeline(
         eta_seconds: Some(0),
     });
 
+    // Refresh smart album counts so the UI reflects newly imported photos.
+    if let Err(e) = crate::commands::refresh_album_counts(&pool).await {
+        tracing::warn!(error = %e, "smart album refresh failed after import");
+    }
+
     Ok(ImportResult {
         import_id,
         imported_count,

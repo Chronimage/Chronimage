@@ -6,6 +6,7 @@
 
 pub mod db;
 pub mod models;
+pub mod rules;
 pub mod seed;
 
 pub use db::{open_pool, PoolOptions};

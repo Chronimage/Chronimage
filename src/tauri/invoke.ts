@@ -93,15 +93,128 @@ export async function listAlbums(): Promise<AlbumRow[]> {
 export interface ListPhotosParams {
   limit?: number;
   offset?: number;
+  albumId?: number | null;
 }
 
 export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]> {
   return tauriInvoke<PhotoRow[]>('list_photos', {
     limit: params?.limit ?? null,
     offset: params?.offset ?? null,
+    albumId: params?.albumId ?? null,
   });
+}
+
+export async function refreshSmartAlbums(): Promise<void> {
+  return tauriInvoke<void>('refresh_smart_albums');
 }
 
 export async function listSources(): Promise<SourceRow[]> {
   return tauriInvoke<SourceRow[]>('list_sources');
 }
+
+export async function createSource(name: string, kind: string, rootPath?: string): Promise<SourceRow> {
+  return tauriInvoke<SourceRow>('create_source', {
+    name,
+    kind,
+    rootPath: rootPath ?? null,
+  });
+}
+
+// ── Import commands ─────────────────────────────────────────────────────────
+
+export interface StartImportResponse {
+  import_id: number;
+}
+
+export async function startImport(sourceId: number, root: string): Promise<StartImportResponse> {
+  return tauriInvoke<StartImportResponse>('start_import', { sourceId, root });
+}
+
+export interface ImportSummary {
+  id: number;
+  source_id: number;
+  started_at: string;
+  finished_at: string | null;
+  total_files: number;
+  imported_count: number;
+  skipped_count: number;
+  error_count: number;
+  last_seen_path: string | null;
+}
+
+export async function listImports(sourceId?: number): Promise<ImportSummary[]> {
+  return tauriInvoke<ImportSummary[]>('list_imports', { sourceId: sourceId ?? null });
+}
+
+// ── Source-side cleanup ─────────────────────────────────────────────────────
+
+export interface SourceCleanupItem {
+  source_copy_id: number;
+  photo_id: number;
+  source_id: number;
+  path: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export interface CleanupPlan {
+  source_id: number;
+  source_name: string;
+  reclaimable_bytes: number;
+  item_count: number;
+  items: SourceCleanupItem[];
+}
+
+export async function cleanupDryRun(sourceId?: number): Promise<CleanupPlan[]> {
+  return tauriInvoke<CleanupPlan[]>('cleanup_dry_run', { sourceId: sourceId ?? null });
+}
+
+// ── Rediscovery commands ────────────────────────────────────────────────────
+
+export async function onThisDay(limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('on_this_day', { limit: limit ?? null });
+}
+
+export async function unseenPhotos(limit?: number, minScore?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('unseen_photos', {
+    limit: limit ?? null,
+    minScore: minScore ?? null,
+  });
+}
+
+// ── Source connectors ───────────────────────────────────────────────────────
+
+/** Run the full import pipeline over a Google Photos Takeout export, then enrich with sidecar metadata. */
+export async function importGoogleTakeout(sourceId: number, root: string): Promise<StartImportResponse> {
+  return tauriInvoke<StartImportResponse>('import_google_takeout', { sourceId, root });
+}
+
+/** Detect the iCloud-for-Windows Photos folder path, or null if not installed. */
+export async function detectIcloudPath(): Promise<string | null> {
+  return tauriInvoke<string | null>('detect_icloud_path');
+}
+
+export interface UsbDevice {
+  device_id: string;
+  friendly_name: string;
+  manufacturer: string;
+  description: string;
+}
+
+/** List Apple USB devices connected via WPD/MTP. Returns [] when none. */
+export async function listIphoneDevices(): Promise<UsbDevice[]> {
+  return tauriInvoke<UsbDevice[]>('list_iphone_devices');
+}
+
+// ── Import progress event ───────────────────────────────────────────────────
+
+export interface ImportProgressEvent {
+  source_id: number;
+  import_id: number;
+  total: number;
+  done: number;
+  current_file: string;
+  eta_seconds: number | null;
+}
+
+export const IMPORT_PROGRESS_EVENT = 'chronimage://import-progress';
