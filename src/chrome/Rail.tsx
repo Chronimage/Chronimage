@@ -15,6 +15,7 @@ interface RailItem {
 const ITEMS: RailItem[] = [
   { id: 'onboard', icon: 'link', label: 'Sources' },
   { id: 'catalog', icon: 'grid', label: 'Catalog' },
+  { id: 'people', icon: 'faces', label: 'People' },
   { id: 'cull', icon: 'cull', label: 'Cull' },
   { id: 'cullbin', icon: 'flag', label: 'Cull Bin' },
   { id: 'develop', icon: 'brush', label: 'Develop' },

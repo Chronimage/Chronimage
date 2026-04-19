@@ -251,9 +251,11 @@ mod tests {
     /// After seeding + inserting a matching photo, `reevaluate_all` must write
     /// a non-zero `photo_count` and a valid `cover_photo_ids` JSON array.
     ///
-    /// Uses the "Night & Low Light" album (ISO >= 3200, EXIF rule — no tag
-    /// insert needed) to avoid triggering the FTS5 contentless-table UPDATE
-    /// constraint that fires when inserting rows into `tags`.
+    /// Inserts a tag so the `Tag` rule variant is exercised end-to-end.
+    /// Resolved by migration 20260424000000 — the broken `UPDATE photos_fts`
+    /// triggers were replaced with delete-then-reinsert, so inserting into
+    /// `tags` no longer raises "cannot UPDATE contentless fts5 table".
+    // resolved by migration 20260424000000
     #[tokio::test]
     async fn reevaluate_updates_photo_count_and_cover_ids() {
         let (_tmp, pool) = make_pool().await;
@@ -261,7 +263,9 @@ mod tests {
 
         let now = Utc::now().to_rfc3339();
 
-        // Insert a high-ISO photo so it matches the "Night & Low Light" album (ISO >= 3200).
+        // Insert a high-ISO photo so it matches the "Night & Low Light" album
+        // (ISO >= 3200, EXIF rule). Also insert a tag to exercise the fixed
+        // FTS5 trigger path (migration 20260424000000).
         sqlx::query(
             "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, iso) \
              VALUES (?1, 'night.jpg', 0, 0, ?2, 0, 6400)",
@@ -277,6 +281,17 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
+
+        // Tag insert exercises the fixed tags_fts_insert trigger.
+        sqlx::query(
+            "INSERT INTO tags (photo_id, label, kind, confidence, created_at) \
+             VALUES (?1, 'nightscape', 'auto_scene', 0.9, ?2)",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap(); // Must not error after migration 20260424000000.
 
         let albums_updated = reevaluate_all(&pool).await.unwrap();
         assert!(albums_updated > 0, "expected at least one album updated");
@@ -372,7 +387,7 @@ mod tests {
         seed_default_smart_albums(&pool).await.unwrap();
 
         let count = reevaluate_all(&pool).await.unwrap();
-        // 12 static + 3 rediscovery = 15 albums seeded.
-        assert_eq!(count, 15, "expected 15 albums evaluated, got {count}");
+        // 12 static + 4 rediscovery = 16 albums seeded.
+        assert_eq!(count, 16, "expected 16 albums evaluated, got {count}");
     }
 }

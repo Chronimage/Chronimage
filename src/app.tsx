@@ -5,7 +5,9 @@ import { StatusBar } from './chrome/StatusBar';
 import { Titlebar } from './chrome/Titlebar';
 import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
 import { OnboardScreen } from './screens/OnboardScreen';
+import { PeopleScreen } from './screens/PeopleScreen';
 import { PlaceholderScreen } from './screens/PlaceholderScreen';
+import { SettingsScreen } from './screens/SettingsScreen';
 import { useUi } from './state/ui';
 import { appVersion, currentChannel } from './tauri/invoke';
 import { error as logError } from './util/log';
@@ -76,14 +78,11 @@ export function App() {
         />
       );
       break;
+    case 'people':
+      mainPanel = <PeopleScreen />;
+      break;
     case 'settings':
-      mainPanel = (
-        <PlaceholderScreen
-          title="Settings"
-          phase="Phase 1+ · partial"
-          description="Model picker, storage location, cull thresholds, release channel. Wires up as Phase 1 features land."
-        />
-      );
+      mainPanel = <SettingsScreen />;
       break;
   }
 

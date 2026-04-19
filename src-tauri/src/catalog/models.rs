@@ -105,6 +105,21 @@ pub struct SmartAlbum {
     pub cover_photo_ids: Vec<i64>,
 }
 
+/// A face-cluster summary row returned by [`face_clusters_list`].
+///
+/// `face_count` is the number of faces assigned to this cluster.
+/// `cover_photo_id` is the photo that contains the cluster's `cover_face_id`
+/// (NULL when the cluster has no faces or `cover_face_id` is not set).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterRow {
+    pub id: i64,
+    pub name: Option<String>,
+    pub is_named: bool,
+    pub face_count: i64,
+    pub cover_photo_id: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

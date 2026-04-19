@@ -6,14 +6,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chronimage::{
+    ai::{budget, caption::CaptionSession, faces::FacesSession},
     catalog::{
         db::{open_pool, PoolOptions},
         seed_default_smart_albums,
     },
     commands,
     state::AppState,
-    util::paths::catalog_db_path,
+    util::paths::{catalog_db_path, models_dir},
 };
+use std::sync::Arc;
 use tauri::Manager;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -111,9 +113,14 @@ fn main() {
             commands::download_models,
             commands::find_duplicates,
             commands::search_photos,
+            commands::ai_models_status,
             commands::cleanup_execute,
             commands::lift_shift_dry_run,
             commands::lift_shift_execute,
+            commands::face_clusters_list,
+            commands::face_cluster_name,
+            commands::face_cluster_merge,
+            commands::record_photo_view,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -138,7 +145,30 @@ fn main() {
                             // JoinHandle dropped intentionally — the task runs until process exit.
                             std::mem::drop(spawn_reevaluator(pool.clone()));
                         }
-                        handle.manage(AppState { pool });
+                        // Build AI sessions (stub when model files absent).
+                        let md = models_dir().ok();
+
+                        let retina_path = md.as_deref().map(|d| d.join("retinaface-r50.onnx"));
+                        let arcface_path = md.as_deref().map(|d| d.join("arcface-r100.onnx"));
+                        let faces = Arc::new(FacesSession::load_or_stub(
+                            retina_path.as_deref().filter(|p| p.exists()),
+                            arcface_path.as_deref().filter(|p| p.exists()),
+                        ));
+
+                        let gguf_path = md.as_deref().map(|d| d.join("gemma-4-9b-it-q4_k_m.gguf"));
+                        let tier = budget::detect().tier;
+                        let caption = Arc::new(CaptionSession::load_or_stub(
+                            gguf_path.as_deref().filter(|p| p.exists()),
+                            // TODO(cc): resolve sidecar binary path from bundled dir in phase-1b
+                            None,
+                            tier,
+                        ));
+
+                        handle.manage(AppState {
+                            pool,
+                            faces,
+                            caption,
+                        });
                     }
                     Err(e) => tracing::error!(error = %e, "failed to open catalog pool"),
                 }

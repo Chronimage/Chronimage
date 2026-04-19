@@ -174,4 +174,111 @@ mod tests {
             assert!(found.is_some(), "missing phase 1 table: {tbl}");
         }
     }
+
+    /// Regression test: inserting a tag must NOT produce
+    /// "cannot UPDATE contentless fts5 table: photos_fts".
+    ///
+    /// The broken triggers in 20260420000000_phase1_catalog.sql used
+    /// `UPDATE photos_fts SET tags = …` which SQLite rejects on contentless
+    /// tables. Migration 20260424000000_fts5_triggers_fix.sql drops those and
+    /// replaces them with the correct delete-then-reinsert pattern. This test
+    /// proves the fix is in place and that FTS5 search finds the tag value.
+    #[tokio::test]
+    async fn fts5_tag_insert_does_not_error_and_is_searchable() {
+        let tmp = TempDir::new().expect("tempdir");
+        let db = tmp.path().join("catalog.db");
+        let pool = open_pool(PoolOptions::new(db)).await.expect("pool");
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Insert a photo — this fires photos_fts_insert (should succeed).
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'golden.jpg', 100, 100, ?2, 0) RETURNING id",
+        )
+        .bind("a".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo insert");
+
+        // Insert a tag — this fires tags_fts_insert.
+        // Before the fix this would return "cannot UPDATE contentless fts5 table".
+        sqlx::query(
+            "INSERT INTO tags (photo_id, label, kind, confidence, created_at) \
+             VALUES (?1, 'golden', 'auto_scene', 1.0, ?2)",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("tag insert must not error — migration 20260424000000 applied");
+
+        // FTS5 must now find the photo by the tag label.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM photos_fts WHERE photos_fts MATCH 'golden'")
+                .fetch_one(&pool)
+                .await
+                .expect("fts5 match query");
+
+        assert_eq!(count, 1, "FTS5 must find the photo after tag insert");
+    }
+
+    /// Deleting a tag must rebuild the FTS row without error, and the deleted
+    /// label must no longer be discoverable by the FTS index.
+    #[tokio::test]
+    async fn fts5_tag_delete_rebuilds_row() {
+        let tmp = TempDir::new().expect("tempdir");
+        let db = tmp.path().join("catalog.db");
+        let pool = open_pool(PoolOptions::new(db)).await.expect("pool");
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Use a filename that does NOT contain the tag label word to avoid
+        // FTS filename-column contamination in the MATCH query.
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'img00042.jpg', 100, 100, ?2, 0) RETURNING id",
+        )
+        .bind("b".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo insert");
+
+        sqlx::query(
+            "INSERT INTO tags (photo_id, label, kind, confidence, created_at) \
+             VALUES (?1, 'crimsonsky', 'auto_scene', 1.0, ?2)",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("tag insert");
+
+        // Confirm it is searchable before deletion.
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM photos_fts WHERE photos_fts MATCH 'crimsonsky'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fts match before");
+        assert_eq!(before, 1, "expected match before delete");
+
+        // Delete the tag — fires tags_fts_before_delete + tags_fts_after_delete.
+        sqlx::query("DELETE FROM tags WHERE photo_id = ?1")
+            .bind(photo_id)
+            .execute(&pool)
+            .await
+            .expect("tag delete must not error");
+
+        // After deletion the photo row has empty tags — must not match 'crimsonsky'.
+        let after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM photos_fts WHERE photos_fts MATCH 'crimsonsky'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fts match after");
+        assert_eq!(after, 0, "FTS must not find deleted tag label");
+    }
 }

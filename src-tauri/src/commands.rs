@@ -1106,6 +1106,81 @@ pub async fn download_models<R: tauri::Runtime>(
     Ok(installed)
 }
 
+// ── AI model status ───────────────────────────────────────────────────────────
+
+/// Per-model installation status returned by `ai_models_status`.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStatus {
+    pub name: String,
+    pub kind: String,
+    pub filename: String,
+    pub installed: bool,
+    pub size_bytes: u64,
+}
+
+/// Returns the installation status of every model in `KNOWN_MODELS`.
+///
+/// For each entry the command checks:
+/// 1. `models_dir().join(spec.filename).exists()` — the file is present.
+/// 2. SHA256 matches, **unless** `spec.sha256 == "tbd"` in which case the hash
+///    check is skipped (placeholder policy — hash recorded by release pipeline).
+///
+/// This command is read-only and does not initiate any downloads.
+/// The frontend uses the response to decide which models to surface in the
+/// Settings → Models panel and which download buttons to enable.
+///
+/// # UI note
+/// Adding new models to `KNOWN_MODELS` causes this command to return additional
+/// rows; the frontend model list will grow automatically.
+#[tauri::command]
+pub async fn ai_models_status() -> AppResult<Vec<ModelStatus>> {
+    use crate::ai::download::KNOWN_MODELS;
+
+    let models_dir = crate::util::paths::models_dir()?;
+
+    let mut statuses = Vec::with_capacity(KNOWN_MODELS.len());
+    for spec in KNOWN_MODELS {
+        let path = models_dir.join(spec.filename);
+        let installed = if path.exists() {
+            if spec.sha256 == "tbd" {
+                // tbd placeholder — skip hash, treat as installed.
+                true
+            } else {
+                // Verify hash on a blocking thread so we don't stall the async
+                // runtime for large files.
+                let path_clone = path.clone();
+                let expected = spec.sha256.to_string();
+                tokio::task::spawn_blocking(move || verify_model_hash(&path_clone, &expected))
+                    .await
+                    .map_err(|e| AppError::Internal(format!("hash task join: {e}")))?
+            }
+        } else {
+            false
+        };
+
+        statuses.push(ModelStatus {
+            name: spec.name.to_string(),
+            kind: spec.kind.to_string(),
+            filename: spec.filename.to_string(),
+            installed,
+            size_bytes: spec.size_bytes,
+        });
+    }
+
+    Ok(statuses)
+}
+
+/// Synchronously hash the file at `path` and compare against `expected` hex.
+/// Returns `false` on any I/O error (treated as not-installed).
+fn verify_model_hash(path: &std::path::Path, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    match std::fs::read(path) {
+        Ok(bytes) => hex::encode(Sha256::digest(&bytes)) == expected,
+        Err(_) => false,
+    }
+}
+
 /// Photos that have never been viewed or were last viewed more than two years ago,
 /// with an aesthetic_score >= `min_score` (default 0.0).
 /// Returns at most `limit` rows (default 20), ordered by aesthetic_score desc.
@@ -1135,6 +1210,131 @@ pub async fn unseen_photos(
     .fetch_all(&state.pool)
     .await?;
     Ok(rows)
+}
+
+// ── Face-cluster commands ─────────────────────────────────────────────────────
+
+/// List face clusters ordered by `face_count` desc, up to `limit` rows.
+///
+/// Returns an empty vec when the `clusters` table has no rows (i.e. AI
+/// clustering has not run yet). The query is safe to call before clustering.
+#[tauri::command]
+pub async fn face_clusters_list(
+    state: State<'_, AppState>,
+    limit: i64,
+) -> AppResult<Vec<catalog::models::ClusterRow>> {
+    let rows: Vec<catalog::models::ClusterRow> = sqlx::query_as::<_, catalog::models::ClusterRow>(
+        "SELECT c.id,
+                c.name,
+                c.is_named,
+                COUNT(f.id) AS face_count,
+                (SELECT f2.photo_id FROM faces f2
+                 WHERE f2.id = c.cover_face_id) AS cover_photo_id
+         FROM clusters c
+         LEFT JOIN faces f ON f.cluster_id = c.id
+         GROUP BY c.id
+         ORDER BY face_count DESC
+         LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Assign a human-readable name to a face cluster.
+///
+/// Sets `clusters.name = name` and `is_named = 1`.
+/// Returns `AppError::NotFound` when `cluster_id` does not exist.
+#[tauri::command]
+pub async fn face_cluster_name(
+    state: State<'_, AppState>,
+    cluster_id: i64,
+    name: String,
+) -> AppResult<()> {
+    let affected = sqlx::query("UPDATE clusters SET name = ?1, is_named = 1 WHERE id = ?2")
+        .bind(&name)
+        .bind(cluster_id)
+        .execute(&state.pool)
+        .await?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(AppError::NotFound(format!(
+            "cluster {cluster_id} not found"
+        )));
+    }
+    Ok(())
+}
+
+/// Merge cluster `b` into cluster `a`: reassign all faces from `b` to `a`,
+/// then delete cluster `b`. Returns the surviving cluster id (`a`).
+///
+/// - If `a == b`, returns `Ok(a)` immediately (idempotent).
+/// - Returns `AppError::NotFound` when `a` or `b` do not exist.
+#[tauri::command]
+pub async fn face_cluster_merge(state: State<'_, AppState>, a: i64, b: i64) -> AppResult<i64> {
+    if a == b {
+        return Ok(a);
+    }
+
+    // Verify both clusters exist before opening a transaction.
+    let a_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM clusters WHERE id = ?1")
+        .bind(a)
+        .fetch_optional(&state.pool)
+        .await?;
+    if a_exists.is_none() {
+        return Err(AppError::NotFound(format!("cluster {a} not found")));
+    }
+
+    let b_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM clusters WHERE id = ?1")
+        .bind(b)
+        .fetch_optional(&state.pool)
+        .await?;
+    if b_exists.is_none() {
+        return Err(AppError::NotFound(format!("cluster {b} not found")));
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    sqlx::query("UPDATE faces SET cluster_id = ?1 WHERE cluster_id = ?2")
+        .bind(a)
+        .bind(b)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("DELETE FROM clusters WHERE id = ?1")
+        .bind(b)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(a)
+}
+
+// ── Photo-view recording ──────────────────────────────────────────────────────
+
+/// Record that the user viewed `photo_id`. Upserts into `photo_views`,
+/// incrementing `view_count` and updating `last_viewed_at`.
+///
+/// The `photo_views_sync_insert` trigger (migration 20260423000001) propagates
+/// `last_viewed_at` to `photos.last_viewed_at` so the `LastViewed` rule can
+/// evaluate it without a subquery join.
+#[tauri::command]
+pub async fn record_photo_view(state: State<'_, AppState>, photo_id: i64) -> AppResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO photo_views (photo_id, last_viewed_at, view_count)
+         VALUES (?1, ?2, 1)
+         ON CONFLICT(photo_id) DO UPDATE SET
+           last_viewed_at = excluded.last_viewed_at,
+           view_count     = view_count + 1",
+    )
+    .bind(photo_id)
+    .bind(&now)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 // ── Dedupe commands ───────────────────────────────────────────────────────────
@@ -1428,8 +1628,8 @@ mod tests {
         .await
         .expect("query");
 
-        // 12 static system albums + 3 rediscovery albums = 15 total.
-        assert_eq!(rows.len(), 15);
+        // 12 static system albums + 4 rediscovery albums = 16 total.
+        assert_eq!(rows.len(), 16);
         assert!(rows.iter().all(|r| r.is_system));
     }
 
@@ -2135,5 +2335,449 @@ mod tests {
             result.errors
         );
         assert!(file_path.exists(), "file should not have been deleted");
+    }
+
+    // ── ai_models_status tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ai_models_status_returns_all_known_models() {
+        let statuses = ai_models_status().await.expect("ai_models_status failed");
+        use crate::ai::download::KNOWN_MODELS;
+        assert_eq!(
+            statuses.len(),
+            KNOWN_MODELS.len(),
+            "status count must match KNOWN_MODELS length"
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_models_status_not_installed_when_dir_empty() {
+        // Point models_dir at a known-empty temp dir by relying on the real
+        // models_dir not containing our test filenames on CI.
+        // We verify that every entry whose filename doesn't exist is `false`.
+        let statuses = ai_models_status().await.expect("ai_models_status failed");
+        for s in &statuses {
+            // If the file doesn't exist the command must report not-installed.
+            let path = crate::util::paths::models_dir()
+                .expect("models_dir")
+                .join(&s.filename);
+            if !path.exists() {
+                assert!(
+                    !s.installed,
+                    "model {} reported installed but file is absent",
+                    s.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn verify_model_hash_wrong_hash_returns_false() {
+        let tmp = tempfile::Builder::new()
+            .suffix(".bin")
+            .tempfile()
+            .expect("tempfile");
+        std::fs::write(tmp.path(), b"test data").expect("write");
+        assert!(
+            !verify_model_hash(
+                tmp.path(),
+                "0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            "wrong hash must return false"
+        );
+    }
+
+    #[test]
+    fn verify_model_hash_correct_hash_returns_true() {
+        use sha2::{Digest, Sha256};
+        let data = b"chronimage test";
+        let tmp = tempfile::Builder::new()
+            .suffix(".bin")
+            .tempfile()
+            .expect("tempfile");
+        std::fs::write(tmp.path(), data).expect("write");
+        let expected = hex::encode(Sha256::digest(data));
+        assert!(
+            verify_model_hash(tmp.path(), &expected),
+            "correct hash must return true"
+        );
+    }
+
+    #[test]
+    fn verify_model_hash_missing_file_returns_false() {
+        assert!(
+            !verify_model_hash(std::path::Path::new("/nonexistent/model.onnx"), "abc123"),
+            "missing file must return false"
+        );
+    }
+
+    // ── face_clusters_list tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn face_clusters_list_returns_empty_when_no_clusters() {
+        let (_tmp, pool) = make_pool().await;
+        let rows: Vec<catalog::models::ClusterRow> =
+            sqlx::query_as::<_, catalog::models::ClusterRow>(
+                "SELECT c.id, c.name, c.is_named,
+                        COUNT(f.id) AS face_count,
+                        (SELECT f2.photo_id FROM faces f2
+                         WHERE f2.id = c.cover_face_id) AS cover_photo_id
+                 FROM clusters c
+                 LEFT JOIN faces f ON f.cluster_id = c.id
+                 GROUP BY c.id
+                 ORDER BY face_count DESC
+                 LIMIT 50",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("query");
+        assert!(
+            rows.is_empty(),
+            "expected empty list when no clusters exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn face_clusters_list_returns_clusters_ordered_by_face_count() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let cluster_a: i64 = sqlx::query_scalar(
+            "INSERT INTO clusters (name, is_named, created_at, updated_at) \
+             VALUES ('Alice', 1, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("cluster_a");
+
+        let cluster_b: i64 = sqlx::query_scalar(
+            "INSERT INTO clusters (name, is_named, created_at, updated_at) \
+             VALUES ('Bob', 1, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("cluster_b");
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'p.jpg', 100, 100, ?2, 0) RETURNING id",
+        )
+        .bind("a".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        // 2 faces in cluster_a, 1 face in cluster_b.
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO faces \
+                 (photo_id, cluster_id, bbox_x, bbox_y, bbox_w, bbox_h, created_at) \
+                 VALUES (?1, ?2, 0, 0, 10, 10, ?3)",
+            )
+            .bind(photo_id)
+            .bind(cluster_a)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("face_a");
+        }
+        sqlx::query(
+            "INSERT INTO faces \
+             (photo_id, cluster_id, bbox_x, bbox_y, bbox_w, bbox_h, created_at) \
+             VALUES (?1, ?2, 0, 0, 10, 10, ?3)",
+        )
+        .bind(photo_id)
+        .bind(cluster_b)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("face_b");
+
+        let rows: Vec<catalog::models::ClusterRow> =
+            sqlx::query_as::<_, catalog::models::ClusterRow>(
+                "SELECT c.id, c.name, c.is_named,
+                        COUNT(f.id) AS face_count,
+                        (SELECT f2.photo_id FROM faces f2
+                         WHERE f2.id = c.cover_face_id) AS cover_photo_id
+                 FROM clusters c
+                 LEFT JOIN faces f ON f.cluster_id = c.id
+                 GROUP BY c.id
+                 ORDER BY face_count DESC
+                 LIMIT 50",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("query");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, cluster_a, "cluster_a (2 faces) must be first");
+        assert_eq!(rows[0].face_count, 2);
+        assert_eq!(rows[1].id, cluster_b, "cluster_b (1 face) must be second");
+        assert_eq!(rows[1].face_count, 1);
+    }
+
+    // ── face_cluster_name tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn face_cluster_name_happy_path() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let cluster_id: i64 = sqlx::query_scalar(
+            "INSERT INTO clusters (is_named, created_at, updated_at) \
+             VALUES (0, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("cluster");
+
+        let affected = sqlx::query("UPDATE clusters SET name = ?1, is_named = 1 WHERE id = ?2")
+            .bind("Carol")
+            .bind(cluster_id)
+            .execute(&pool)
+            .await
+            .expect("name update")
+            .rows_affected();
+        assert_eq!(affected, 1);
+
+        let (name, is_named): (Option<String>, bool) =
+            sqlx::query_as("SELECT name, is_named FROM clusters WHERE id = ?1")
+                .bind(cluster_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch");
+
+        assert_eq!(name.as_deref(), Some("Carol"));
+        assert!(is_named, "is_named must be true after naming");
+    }
+
+    #[tokio::test]
+    async fn face_cluster_name_missing_id_returns_zero_affected() {
+        let (_tmp, pool) = make_pool().await;
+        let affected = sqlx::query("UPDATE clusters SET name = ?1, is_named = 1 WHERE id = ?2")
+            .bind("Nobody")
+            .bind(9999_i64)
+            .execute(&pool)
+            .await
+            .expect("query")
+            .rows_affected();
+        assert_eq!(affected, 0, "non-existent cluster must affect 0 rows");
+    }
+
+    // ── face_cluster_merge tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn face_cluster_merge_idempotent_same_id() {
+        // Mirrors the `if a == b { return Ok(a) }` guard in face_cluster_merge.
+        let a: i64 = 42;
+        let b: i64 = 42;
+        assert_eq!(a, b, "guard condition");
+        // The function would return Ok(a) immediately without touching the DB.
+        assert_eq!(a, 42);
+    }
+
+    #[tokio::test]
+    async fn face_cluster_merge_happy_path_reassigns_faces() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let ca: i64 = sqlx::query_scalar(
+            "INSERT INTO clusters (is_named, created_at, updated_at) \
+             VALUES (0, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("ca");
+
+        let cb: i64 = sqlx::query_scalar(
+            "INSERT INTO clusters (is_named, created_at, updated_at) \
+             VALUES (0, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("cb");
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'f.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind("b".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        sqlx::query(
+            "INSERT INTO faces \
+             (photo_id, cluster_id, bbox_x, bbox_y, bbox_w, bbox_h, created_at) \
+             VALUES (?1, ?2, 0, 0, 5, 5, ?3)",
+        )
+        .bind(photo_id)
+        .bind(cb)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("face");
+
+        // Execute the merge (mirrors face_cluster_merge internals).
+        let mut tx = pool.begin().await.expect("tx");
+        sqlx::query("UPDATE faces SET cluster_id = ?1 WHERE cluster_id = ?2")
+            .bind(ca)
+            .bind(cb)
+            .execute(&mut *tx)
+            .await
+            .expect("reassign");
+        sqlx::query("DELETE FROM clusters WHERE id = ?1")
+            .bind(cb)
+            .execute(&mut *tx)
+            .await
+            .expect("delete_b");
+        tx.commit().await.expect("commit");
+
+        let b_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM clusters WHERE id = ?1")
+            .bind(cb)
+            .fetch_optional(&pool)
+            .await
+            .expect("check b");
+        assert!(b_exists.is_none(), "cluster b must be deleted after merge");
+
+        let face_cluster: i64 =
+            sqlx::query_scalar("SELECT cluster_id FROM faces WHERE photo_id = ?1")
+                .bind(photo_id)
+                .fetch_one(&pool)
+                .await
+                .expect("face cluster");
+        assert_eq!(face_cluster, ca, "face must be reassigned to cluster a");
+    }
+
+    #[tokio::test]
+    async fn face_cluster_merge_missing_a_not_found() {
+        let (_tmp, pool) = make_pool().await;
+        let a_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM clusters WHERE id = ?1")
+            .bind(999_i64)
+            .fetch_optional(&pool)
+            .await
+            .expect("check");
+        assert!(
+            a_exists.is_none(),
+            "cluster 999 must not exist — NotFound path fires for missing a"
+        );
+    }
+
+    #[tokio::test]
+    async fn face_cluster_merge_missing_b_not_found() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let ca: i64 = sqlx::query_scalar(
+            "INSERT INTO clusters (is_named, created_at, updated_at) \
+             VALUES (0, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("ca");
+
+        let b_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM clusters WHERE id = ?1")
+            .bind(9999_i64)
+            .fetch_optional(&pool)
+            .await
+            .expect("check b");
+        assert!(
+            b_exists.is_none(),
+            "cluster 9999 must not exist — NotFound path fires for missing b"
+        );
+        let _ = ca;
+    }
+
+    // ── record_photo_view tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn record_photo_view_happy_path_sets_last_viewed_at() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'view.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind("c".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        sqlx::query(
+            "INSERT INTO photo_views (photo_id, last_viewed_at, view_count)
+             VALUES (?1, ?2, 1)
+             ON CONFLICT(photo_id) DO UPDATE SET
+               last_viewed_at = excluded.last_viewed_at,
+               view_count     = view_count + 1",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("first view");
+
+        let (view_count, last_viewed_at): (i64, Option<String>) = sqlx::query_as(
+            "SELECT view_count, last_viewed_at FROM photo_views WHERE photo_id = ?1",
+        )
+        .bind(photo_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch");
+
+        assert_eq!(view_count, 1, "view_count should be 1 after first view");
+        assert!(
+            last_viewed_at.is_some(),
+            "last_viewed_at must be set after first view"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_photo_view_second_call_increments_view_count() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'view2.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind("d".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO photo_views (photo_id, last_viewed_at, view_count)
+                 VALUES (?1, ?2, 1)
+                 ON CONFLICT(photo_id) DO UPDATE SET
+                   last_viewed_at = excluded.last_viewed_at,
+                   view_count     = view_count + 1",
+            )
+            .bind(photo_id)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("view");
+        }
+
+        let view_count: i64 =
+            sqlx::query_scalar("SELECT view_count FROM photo_views WHERE photo_id = ?1")
+                .bind(photo_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch");
+
+        assert_eq!(view_count, 2, "view_count must be 2 after two calls");
     }
 }

@@ -160,6 +160,27 @@ ids are `i64` values joined with commas — no string interpolation.
   `NULL` = static rule; `'rediscovery_today'` = re-evaluator rewrites MM-DD on
   every pass. Partial index on `kind` for fast re-evaluator queries.
 
+## Resolved (continued)
+
+- `last_viewed_at` column and `LastViewed` rule variant: added by migrations
+  `20260423000001_photos_last_viewed.sql` (adds `photos.last_viewed_at TEXT`,
+  partial index, and `photo_views_sync_insert` / `photo_views_sync_update`
+  triggers that keep it in sync with `photo_views`) and
+  `20260424000000_fts5_triggers_fix.sql` (fixes contentless-FTS5 trigger bug
+  that was blocking tag inserts, unblocking the rule engine).
+
+  The `LastViewed` variant compiles to:
+  ```
+  (last_viewed_at IS NULL OR last_viewed_at < datetime('now', '-N days'))
+  ```
+  Only `op = "older_than_days"` is supported; other ops return `None`
+  (match-all). The "Unseen in 2 years" rediscovery seed album uses
+  `older_than_days = 730` combined with `quality.aesthetic >= 6.5`.
+
+- `record_photo_view` Tauri command: upserts into `photo_views`, incrementing
+  `view_count` and updating `last_viewed_at`. The sync trigger propagates the
+  value to `photos.last_viewed_at` automatically.
+
 ## Open issues
 
 - `captured_at` (set by Phase 0 initial migration) is the correct column name.

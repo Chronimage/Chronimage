@@ -92,6 +92,29 @@ vi.mock('@tauri-apps/api/core', () => ({
         return new Array(768).fill(0);
       case 'score_aesthetic':
         return 5.5;
+      case 'face_clusters_list':
+        return [];
+      case 'face_cluster_name':
+        return undefined;
+      case 'face_cluster_merge':
+        return 1;
+      case 'ai_models_status':
+        return [
+          {
+            name: 'siglip-b16-image',
+            kind: 'embedding',
+            filename: 'siglip-b16-image.onnx',
+            installed: false,
+            sizeBytes: 350_000_000,
+          },
+          {
+            name: 'retinaface-r50',
+            kind: 'face-detect',
+            filename: 'retinaface-r50.onnx',
+            installed: false,
+            sizeBytes: 110_000_000,
+          },
+        ];
       default:
         throw new Error(`mock invoke: unknown command ${cmd}`);
     }
