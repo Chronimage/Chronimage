@@ -29,7 +29,7 @@ fn install_tracing() {
     #[cfg(debug_assertions)]
     {
         let loki_url =
-            std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3100".to_string());
+            std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3101".to_string());
         let builder_result = tracing_loki::builder()
             .label("app", "chronimage")
             .and_then(|b| b.label("env", "dev"))

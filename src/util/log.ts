@@ -7,7 +7,7 @@
  */
 
 const IS_DEV = import.meta.env.DEV;
-const LOKI_URL = 'http://localhost:3100/loki/api/v1/push';
+const LOKI_URL = 'http://localhost:3101/loki/api/v1/push';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
