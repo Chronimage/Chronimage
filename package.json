@@ -34,7 +34,8 @@
     "changelog": "git-cliff --output CHANGELOG.md",
     "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "fmt": "biome check --write . && cargo fmt --manifest-path src-tauri/Cargo.toml",
-    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm clippy"
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm clippy",
+    "ci": "pnpm typecheck && pnpm lint && pnpm test:cov && pnpm clippy && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.4",
