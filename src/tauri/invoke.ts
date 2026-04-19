@@ -140,6 +140,19 @@ export async function listImports(sourceId?: number): Promise<ImportSummary[]> {
   return tauriInvoke<ImportSummary[]>('list_imports', { sourceId: sourceId ?? null });
 }
 
+// ── Rediscovery commands ────────────────────────────────────────────────────
+
+export async function onThisDay(limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('on_this_day', { limit: limit ?? null });
+}
+
+export async function unseenPhotos(limit?: number, minScore?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('unseen_photos', {
+    limit: limit ?? null,
+    minScore: minScore ?? null,
+  });
+}
+
 // ── Import progress event ───────────────────────────────────────────────────
 
 export interface ImportProgressEvent {

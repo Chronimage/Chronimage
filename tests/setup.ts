@@ -29,6 +29,10 @@ vi.mock('@tauri-apps/api/core', () => ({
         return [];
       case 'list_photos':
         return [];
+      case 'on_this_day':
+        return [];
+      case 'unseen_photos':
+        return [];
       case 'list_sources':
         return [];
       case 'create_source':

@@ -2,7 +2,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import React from 'react';
 import { describe, expect, it } from 'vitest';
-import { useAlbums, useCreateSource, useImports, usePhotos, useSources, useStartImport } from './queries';
+import {
+  useAlbums,
+  useCreateSource,
+  useImports,
+  useOnThisDay,
+  usePhotos,
+  useSources,
+  useStartImport,
+  useUnseenPhotos,
+} from './queries';
 
 function wrapper({ children }: { children: React.ReactNode }) {
   const client = new QueryClient({
@@ -57,5 +66,17 @@ describe('catalog query hooks', () => {
       const resp = await result.current.mutateAsync({ sourceId: 1, root: '/tmp/photos' });
       expect(resp.import_id).toBe(1);
     });
+  });
+
+  it('useOnThisDay returns empty array from mock', async () => {
+    const { result } = renderHook(() => useOnThisDay(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+  });
+
+  it('useUnseenPhotos returns empty array from mock', async () => {
+    const { result } = renderHook(() => useUnseenPhotos(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
   });
 });

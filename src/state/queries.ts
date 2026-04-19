@@ -15,10 +15,12 @@ import {
   listImports,
   listPhotos,
   listSources,
+  onThisDay,
   type PhotoRow,
   type SourceRow,
   type StartImportResponse,
   startImport,
+  unseenPhotos,
 } from '../tauri/invoke';
 
 export type { AlbumRow, ImportProgressEvent, ImportSummary, PhotoRow, SourceRow, StartImportResponse };
@@ -53,6 +55,20 @@ export function useImports(sourceId?: number) {
   return useQuery({
     queryKey: ['imports', sourceId],
     queryFn: () => listImports(sourceId),
+  });
+}
+
+export function useOnThisDay(limit?: number) {
+  return useQuery({
+    queryKey: ['on_this_day', limit],
+    queryFn: () => onThisDay(limit),
+  });
+}
+
+export function useUnseenPhotos(limit?: number, minScore?: number) {
+  return useQuery({
+    queryKey: ['unseen_photos', limit, minScore],
+    queryFn: () => unseenPhotos(limit, minScore),
   });
 }
 

@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { SEARCH_SUGGESTIONS } from '../../state/fixtures';
-import { useAlbums, usePhotos } from '../../state/queries';
+import { useAlbums, useOnThisDay, usePhotos, useUnseenPhotos } from '../../state/queries';
+import type { PhotoRow } from '../../tauri/invoke';
 
 export interface CatalogScreenProps {
   albumId: string;
@@ -11,13 +13,159 @@ export interface CatalogScreenProps {
 
 const FACETS = ['All', 'People', 'Places', 'Objects', 'Events', 'Colors', 'Cameras'];
 
+const ROW_HEIGHT = 190;
+const MIN_CELL_WIDTH = 170;
+
+function useColumnCount(containerRef: React.RefObject<HTMLDivElement | null>) {
+  const [cols, setCols] = useState(4);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = entry.contentRect.width;
+      setCols(Math.max(1, Math.floor(w / MIN_CELL_WIDTH)));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [containerRef]);
+  return cols;
+}
+
+interface VirtualGridProps {
+  photos: PhotoRow[];
+  selected: Set<number>;
+  onToggle: (id: number) => void;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+}
+
+function VirtualGrid({ photos, selected, onToggle, scrollRef }: VirtualGridProps) {
+  const gridRef = useRef<HTMLDivElement>(null);
+  const cols = useColumnCount(gridRef);
+
+  const rows = useMemo(() => {
+    const result: PhotoRow[][] = [];
+    for (let i = 0; i < photos.length; i += cols) {
+      result.push(photos.slice(i, i + cols));
+    }
+    return result;
+  }, [photos, cols]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT,
+    overscan: 3,
+  });
+
+  return (
+    <div ref={gridRef} style={{ position: 'relative', height: rowVirtualizer.getTotalSize() }}>
+      {rowVirtualizer.getVirtualItems().map((vrow) => {
+        const rowPhotos = rows[vrow.index] ?? [];
+        return (
+          <div
+            key={vrow.key}
+            data-index={vrow.index}
+            ref={rowVirtualizer.measureElement}
+            style={{
+              position: 'absolute',
+              top: vrow.start,
+              left: 0,
+              right: 0,
+              display: 'flex',
+              gap: 3,
+              padding: '0 3px',
+            }}
+          >
+            {rowPhotos.map((p) => {
+              const hue = (p.id * 31) % 360;
+              return (
+                <button
+                  type="button"
+                  key={p.id}
+                  className="cell"
+                  style={{ flex: 1, minWidth: 0 }}
+                  onClick={() => onToggle(p.id)}
+                  aria-pressed={selected.has(p.id)}
+                  aria-label={`Select ${p.filename}`}
+                >
+                  <Placeholder
+                    photo={{ hue, filename: p.filename, id: String(p.id) }}
+                    selected={selected.has(p.id)}
+                    subtle
+                  />
+                </button>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+interface RediscoveryRowProps {
+  title: string;
+  photos: PhotoRow[];
+  selected: Set<number>;
+  onToggle: (id: number) => void;
+}
+
+function RediscoveryRow({ title, photos, selected, onToggle }: RediscoveryRowProps) {
+  if (photos.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 2 }}>
+      <div
+        className="mono"
+        style={{ fontSize: 10, color: 'var(--fg-mute)', letterSpacing: '0.08em', padding: '10px 18px 4px' }}
+      >
+        {title}
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          gap: 3,
+          padding: '0 18px 10px',
+          overflowX: 'auto',
+          scrollbarWidth: 'none',
+        }}
+      >
+        {photos.map((p) => {
+          const hue = (p.id * 31) % 360;
+          return (
+            <button
+              type="button"
+              key={p.id}
+              className="cell"
+              style={{ flex: '0 0 160px', height: 160 }}
+              onClick={() => onToggle(p.id)}
+              aria-pressed={selected.has(p.id)}
+              aria-label={`Select ${p.filename}`}
+            >
+              <Placeholder
+                photo={{ hue, filename: p.filename, id: String(p.id) }}
+                selected={selected.has(p.id)}
+                subtle
+              />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const searching = query.trim().length > 0;
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const { data: albums = [] } = useAlbums();
-  const { data: photos = [] } = usePhotos({ limit: 48 });
+  const { data: photos = [] } = usePhotos({ limit: 500 });
+  const { data: onThisDayPhotos = [] } = useOnThisDay(20);
+  const { data: unseenPhotosList = [] } = useUnseenPhotos(20);
 
   const album = useMemo(() => {
     if (albumId === 'all') return null;
@@ -30,12 +178,14 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
     description: 'Everything, everywhere',
   };
 
-  const toggle = (id: number) => {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelected(next);
-  };
+  const toggle = useCallback((id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="canvas">
@@ -79,7 +229,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
         )}
       </div>
 
-      <div className="canvas-scroll">
+      <div className="canvas-scroll" ref={scrollRef}>
         {!searching ? (
           <>
             <div className="catalog-hero">
@@ -120,27 +270,19 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               ))}
             </div>
 
-            <div className="libgrid">
-              {photos.map((p) => {
-                const hue = (p.id * 31) % 360;
-                return (
-                  <button
-                    type="button"
-                    key={p.id}
-                    className="cell"
-                    onClick={() => toggle(p.id)}
-                    aria-pressed={selected.has(p.id)}
-                    aria-label={`Select ${p.filename}`}
-                  >
-                    <Placeholder
-                      photo={{ hue, filename: p.filename, id: String(p.id) }}
-                      selected={selected.has(p.id)}
-                      subtle
-                    />
-                  </button>
-                );
-              })}
-            </div>
+            <RediscoveryRow
+              title="ON THIS DAY"
+              photos={onThisDayPhotos}
+              selected={selected}
+              onToggle={toggle}
+            />
+            <RediscoveryRow
+              title="UNSEEN · WORTH ANOTHER LOOK"
+              photos={unseenPhotosList}
+              selected={selected}
+              onToggle={toggle}
+            />
+            <VirtualGrid photos={photos} selected={selected} onToggle={toggle} scrollRef={scrollRef} />
             <div
               style={{
                 padding: '8px 18px 20px',
@@ -175,27 +317,12 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 </Chip>
               ))}
             </div>
-            <div className="libgrid">
-              {photos.slice(0, 24).map((p) => {
-                const hue = (p.id * 31) % 360;
-                return (
-                  <button
-                    type="button"
-                    key={p.id}
-                    className="cell"
-                    style={{ position: 'relative' }}
-                    onClick={() => toggle(p.id)}
-                    aria-label={`Select ${p.filename}`}
-                  >
-                    <Placeholder
-                      photo={{ hue, filename: p.filename, id: String(p.id) }}
-                      selected={selected.has(p.id)}
-                      subtle
-                    />
-                  </button>
-                );
-              })}
-            </div>
+            <VirtualGrid
+              photos={photos.slice(0, 24)}
+              selected={selected}
+              onToggle={toggle}
+              scrollRef={scrollRef}
+            />
           </div>
         )}
       </div>

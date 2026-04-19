@@ -8,8 +8,10 @@ import {
   listImports,
   listPhotos,
   listSources,
+  onThisDay,
   ping,
   startImport,
+  unseenPhotos,
 } from './invoke';
 
 describe('invoke wrappers', () => {
@@ -76,6 +78,28 @@ describe('invoke wrappers', () => {
     const resp = await startImport(1, 'D:/Photos');
     expect(resp.import_id).toBe(1);
     expect(tauriInvoke).toHaveBeenCalledWith('start_import', { sourceId: 1, root: 'D:/Photos' });
+  });
+
+  it('onThisDay calls on_this_day and returns array', async () => {
+    expect(Array.isArray(await onThisDay())).toBe(true);
+    expect(tauriInvoke).toHaveBeenCalledWith('on_this_day', { limit: null });
+  });
+
+  it('onThisDay forwards limit', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await onThisDay(10);
+    expect(tauriInvoke).toHaveBeenCalledWith('on_this_day', { limit: 10 });
+  });
+
+  it('unseenPhotos calls unseen_photos and returns array', async () => {
+    expect(Array.isArray(await unseenPhotos())).toBe(true);
+    expect(tauriInvoke).toHaveBeenCalledWith('unseen_photos', { limit: null, minScore: null });
+  });
+
+  it('unseenPhotos forwards limit and minScore', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await unseenPhotos(15, 6.5);
+    expect(tauriInvoke).toHaveBeenCalledWith('unseen_photos', { limit: 15, minScore: 6.5 });
   });
 
   it('listImports calls list_imports with optional sourceId', async () => {

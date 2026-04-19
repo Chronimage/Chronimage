@@ -324,6 +324,68 @@ pub async fn list_sources(state: State<'_, AppState>) -> AppResult<Vec<SourceRow
     Ok(rows)
 }
 
+// ── Rediscovery commands ──────────────────────────────────────────────────
+
+/// Photos taken on today's month+day in any prior year.
+/// Returns at most `limit` rows (default 20), ordered by captured_at desc.
+#[tauri::command]
+pub async fn on_this_day(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(20);
+    // strftime('%m-%d', captured_at) matches the month-day portion regardless of year.
+    // captured_at is stored as RFC3339 which starts with YYYY-MM-DDTHH:MM:SS…
+    let today_md = chrono::Utc::now().format("%m-%d").to_string();
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+         paired_photo_id \
+         FROM photos \
+         WHERE captured_at IS NOT NULL \
+           AND strftime('%m-%d', captured_at) = ?1 \
+           AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
+         ORDER BY captured_at DESC \
+         LIMIT ?2",
+    )
+    .bind(&today_md)
+    .bind(lim)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Photos that have never been viewed or were last viewed more than two years ago,
+/// with an aesthetic_score >= `min_score` (default 0.0).
+/// Returns at most `limit` rows (default 20), ordered by aesthetic_score desc.
+#[tauri::command]
+pub async fn unseen_photos(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    min_score: Option<f64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(20);
+    let score = min_score.unwrap_or(0.0);
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
+         p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+         p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+         FROM photos p \
+         LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+         WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
+           AND (pv.photo_id IS NULL \
+                OR pv.last_viewed_at IS NULL \
+                OR pv.last_viewed_at < datetime('now', '-2 years')) \
+         ORDER BY p.aesthetic_score DESC NULLS LAST \
+         LIMIT ?2",
+    )
+    .bind(score)
+    .bind(lim)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +598,159 @@ mod tests {
         .await
         .expect("query");
         assert!(rows.is_empty());
+    }
+
+    // on_this_day ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn on_this_day_returns_empty_when_no_photos() {
+        let (_tmp, pool) = make_pool().await;
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos \
+             WHERE captured_at IS NOT NULL \
+               AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
+               AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
+             ORDER BY captured_at DESC LIMIT 20",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn on_this_day_matches_same_month_day_in_prior_year() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        use chrono::Datelike as _;
+        let now_dt = chrono::Utc::now();
+        let prior_year = now_dt
+            .with_year(now_dt.year() - 1)
+            .expect("prior year")
+            .to_rfc3339();
+
+        // Insert one photo from prior year (should match) and one from now (should NOT match).
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, captured_at) \
+             VALUES (?1, 'prior.jpg', 0, 0, ?2, 0, ?3)",
+        )
+        .bind("a".repeat(64))
+        .bind(&now)
+        .bind(&prior_year)
+        .execute(&pool)
+        .await
+        .expect("insert prior");
+
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, captured_at) \
+             VALUES (?1, 'current.jpg', 0, 0, ?2, 0, ?2)",
+        )
+        .bind("b".repeat(64))
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert current");
+
+        let today_md = chrono::Utc::now().format("%m-%d").to_string();
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos \
+             WHERE captured_at IS NOT NULL \
+               AND strftime('%m-%d', captured_at) = ?1 \
+               AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
+             ORDER BY captured_at DESC LIMIT 20",
+        )
+        .bind(&today_md)
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filename, "prior.jpg");
+    }
+
+    // unseen_photos ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unseen_photos_returns_never_viewed_photos() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Insert 2 photos — neither has a photo_views row.
+        for i in 0u8..2 {
+            sqlx::query(
+                "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+                 VALUES (?1, ?2, 0, 0, ?3, 0)",
+            )
+            .bind(format!("{:0>64}", i))
+            .bind(format!("unseen{i}.jpg"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("insert");
+        }
+
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
+             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+             FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+             WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
+               AND (pv.photo_id IS NULL \
+                    OR pv.last_viewed_at IS NULL \
+                    OR pv.last_viewed_at < datetime('now', '-2 years')) \
+             ORDER BY p.aesthetic_score DESC NULLS LAST LIMIT 20",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unseen_photos_excludes_recently_viewed() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'seen.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind("c".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("photo");
+
+        sqlx::query(
+            "INSERT INTO photo_views (photo_id, last_viewed_at, view_count) VALUES (?1, ?2, 5)",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("view");
+
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
+             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+             FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+             WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
+               AND (pv.photo_id IS NULL \
+                    OR pv.last_viewed_at IS NULL \
+                    OR pv.last_viewed_at < datetime('now', '-2 years')) \
+             ORDER BY p.aesthetic_score DESC NULLS LAST LIMIT 20",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert!(rows.is_empty(), "recently-viewed photo must be excluded");
     }
 
     #[tokio::test]
