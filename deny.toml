@@ -34,6 +34,9 @@ allow = [
   "0BSD",
   "MPL-2.0",
   "Unlicense",
+  # webpki-roots / webpki-root-certs ship Mozilla's CA bundle under this
+  # permissive data license. Transitive via reqwest/rustls.
+  "CDLA-Permissive-2.0",
 ]
 # Ignore license checks for private (non-published) workspace crates.
 [licenses.private]
