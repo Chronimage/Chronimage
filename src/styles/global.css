@@ -1042,7 +1042,7 @@ select {
   color: var(--fg);
 }
 
-/* Onboarding */
+/* Onboarding — legacy class (kept for reference) */
 .onboard {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1078,6 +1078,228 @@ select {
 .onboard .right {
   padding: 40px;
   overflow: auto;
+}
+
+/* Onboarding stepper (onb-* classes used by OnboardScreen.tsx) */
+.onb-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+.onb-left {
+  padding: 56px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  border-right: 1px solid var(--stroke);
+  min-height: 0;
+}
+.onb-left h1 {
+  font-family: var(--display-font);
+  font-size: 88px;
+  line-height: 0.92;
+  margin: 0 0 18px;
+  letter-spacing: -0.02em;
+  font-weight: 400;
+}
+.onb-left h1 em {
+  color: var(--accent);
+  font-style: italic;
+}
+.caption {
+  color: var(--fg-dim);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.caption em {
+  font-style: italic;
+}
+.onb-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 36px;
+}
+.onb-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--fg-mute);
+  font-size: 13px;
+  transition: background 0.12s;
+}
+.onb-step .n {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--stroke);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.onb-step .t {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-dim);
+}
+.onb-step .s {
+  font-size: 11px;
+  color: var(--fg-mute);
+  font-family: var(--mono-font);
+}
+.onb-step.on {
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+.onb-step.on .n {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 700;
+}
+.onb-step.on .t {
+  color: var(--fg);
+}
+.onb-step.done .n {
+  background: color-mix(in oklch, var(--accent) 20%, var(--bg-elev));
+  color: var(--accent);
+  border-color: color-mix(in oklch, var(--accent) 40%, var(--stroke));
+}
+.onb-step.done .t {
+  color: var(--fg-dim);
+}
+.onb-right {
+  padding: 40px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.onb-title {
+  font-family: var(--display-font);
+  font-size: 40px;
+  line-height: 1.05;
+  margin: 0 0 14px;
+  letter-spacing: -0.02em;
+  font-weight: 400;
+}
+.onb-title em {
+  color: var(--accent);
+  font-style: italic;
+}
+.onb-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 24px;
+  margin-top: auto;
+  border-top: 1px solid var(--stroke);
+}
+
+/* Preset card (used in Step 1 — catalog mode picker) */
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s;
+}
+.preset-card:hover {
+  border-color: var(--stroke-strong);
+}
+.preset-card.on {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 8%, var(--bg-elev));
+}
+.preset-card .name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.preset-card .sub {
+  font-size: 11px;
+  color: var(--fg-mute);
+  font-family: var(--mono-font);
+}
+
+/* Progress card (used in Step 3 — import overview) */
+.progress-card {
+  padding: 12px 14px;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: var(--fg);
+}
+.pc-stats {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono-font);
+  font-size: 11px;
+  color: var(--fg-mute);
+}
+
+/* Person grid (used in Step 5 — face naming) */
+.person-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+.person-card {
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+.person-card .faces {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.person-card .face {
+  aspect-ratio: 1;
+  border-radius: 4px;
+}
+.person-card .meta input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--fg);
+  outline: none;
+}
+.person-card .meta input:focus {
+  border-color: var(--accent);
 }
 .source-row {
   display: flex;
