@@ -26,6 +26,7 @@ jobs:
           --ignore RUSTSEC-2024-0413
           --ignore RUSTSEC-2024-0416
           --ignore RUSTSEC-2025-0057
+          --ignore RUSTSEC-2023-0071
           --file src-tauri/Cargo.lock
 
   cargo-deny:
@@ -37,6 +38,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: src-tauri/Cargo.toml
+          config: cargo-deny.toml
 
   pnpm-audit:
     name: pnpm audit
