@@ -267,3 +267,19 @@ export interface ImportProgressEvent {
 }
 
 export const IMPORT_PROGRESS_EVENT = 'chronimage://import-progress';
+
+// ── Dedupe ─────────────────────────────────────────────────────────────────
+
+export type DupeKind = 'Exact' | 'Near';
+
+export interface DuplicateGroup {
+  photo_ids: number[];
+  max_similarity: number;
+  kind: DupeKind;
+}
+
+export async function findDuplicates(minSimilarity?: number): Promise<DuplicateGroup[]> {
+  return tauriInvoke<DuplicateGroup[]>('find_duplicates', {
+    min_similarity: minSimilarity ?? null,
+  });
+}

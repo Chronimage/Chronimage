@@ -2,7 +2,9 @@
 //! logic lives in domain modules (catalog, import, ai, ...) and these handlers
 //! just wire arguments and serialize results.
 
-use crate::{catalog, import, state::AppState, AppError, AppResult};
+use crate::{
+    catalog, dedupe::confirm::DuplicateGroup, import, state::AppState, AppError, AppResult,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
@@ -758,6 +760,22 @@ pub async fn unseen_photos(
     .fetch_all(&state.pool)
     .await?;
     Ok(rows)
+}
+
+// ── Dedupe commands ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn find_duplicates(
+    state: State<'_, AppState>,
+    min_similarity: Option<f64>,
+) -> AppResult<Vec<DuplicateGroup>> {
+    let threshold = min_similarity.unwrap_or(0.90);
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(AppError::InvalidInput(format!(
+            "min_similarity must be between 0.0 and 1.0, got {threshold}"
+        )));
+    }
+    crate::dedupe::confirm::find_duplicate_groups(&state.pool, threshold).await
 }
 
 #[cfg(test)]

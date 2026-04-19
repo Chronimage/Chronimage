@@ -109,6 +109,7 @@ fn main() {
             commands::embed_image,
             commands::score_aesthetic,
             commands::download_models,
+            commands::find_duplicates,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

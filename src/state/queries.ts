@@ -9,9 +9,11 @@ import {
   type CleanupPlan,
   cleanupDryRun,
   createSource,
+  type DuplicateGroup,
   deleteSource,
   detectIcloudPath,
   downloadModels,
+  findDuplicates,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
   type ImportSummary,
@@ -36,6 +38,7 @@ import {
 export type {
   AlbumRow,
   CleanupPlan,
+  DuplicateGroup,
   ImportProgressEvent,
   ImportSummary,
   PhotoRow,
@@ -172,5 +175,12 @@ export function useDownloadModels() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['models'] });
     },
+  });
+}
+
+export function useDuplicates(minSimilarity?: number) {
+  return useQuery({
+    queryKey: ['duplicates', minSimilarity] as const,
+    queryFn: () => findDuplicates(minSimilarity),
   });
 }
