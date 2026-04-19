@@ -190,6 +190,99 @@ async fn query_imports(
     Ok(rows)
 }
 
+// ── Catalog read commands ─────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct AlbumRow {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub tag: Option<String>,
+    pub photo_count: i64,
+    pub cover_photo_ids: String,
+    pub is_system: bool,
+}
+
+/// List all smart albums ordered by id.
+#[tauri::command]
+pub async fn list_albums(state: State<'_, AppState>) -> AppResult<Vec<AlbumRow>> {
+    let rows = sqlx::query_as::<_, AlbumRow>(
+        "SELECT id, name, description, tag, photo_count, cover_photo_ids, is_system \
+         FROM smart_albums ORDER BY id",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct PhotoRow {
+    pub id: i64,
+    pub sha256: String,
+    pub filename: String,
+    pub width: i64,
+    pub height: i64,
+    pub captured_at: Option<String>,
+    pub is_raw: bool,
+    pub size_bytes: Option<i64>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub aperture: Option<f64>,
+    pub shutter: Option<String>,
+    pub iso: Option<i64>,
+    pub focal_mm: Option<f64>,
+    pub aesthetic_score: Option<f64>,
+    pub paired_photo_id: Option<i64>,
+}
+
+/// List photos ordered by imported_at desc, with optional pagination.
+/// `limit` defaults to 100; `offset` defaults to 0.
+#[tauri::command]
+pub async fn list_photos(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(100);
+    let off = offset.unwrap_or(0);
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+         paired_photo_id \
+         FROM photos ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2",
+    )
+    .bind(lim)
+    .bind(off)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct SourceRow {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub status: String,
+    pub last_scan_at: Option<String>,
+    pub photo_count: i64,
+}
+
+/// List sources with derived photo count (distinct photos via source_copies).
+#[tauri::command]
+pub async fn list_sources(state: State<'_, AppState>) -> AppResult<Vec<SourceRow>> {
+    let rows = sqlx::query_as::<_, SourceRow>(
+        "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+         COUNT(DISTINCT sc.photo_id) AS photo_count \
+         FROM sources s \
+         LEFT JOIN source_copies sc ON sc.source_id = s.id \
+         GROUP BY s.id ORDER BY s.id",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +331,165 @@ mod tests {
         assert_eq!(report.total_files, 3);
         assert_eq!(report.raw_jpg_pairs, 1);
         assert_eq!(report.unpaired, 1);
+    }
+
+    // ── Catalog read command tests ─────────────────────────────────────────────
+
+    async fn make_pool() -> (tempfile::TempDir, sqlx::SqlitePool) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let pool = crate::catalog::db::open_pool(crate::catalog::db::PoolOptions::new(
+            tmp.path().join("catalog.db"),
+        ))
+        .await
+        .expect("open_pool");
+        (tmp, pool)
+    }
+
+    // list_albums ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_albums_returns_empty_on_fresh_catalog() {
+        let (_tmp, pool) = make_pool().await;
+        let rows = sqlx::query_as::<_, AlbumRow>(
+            "SELECT id, name, description, tag, photo_count, cover_photo_ids, is_system \
+             FROM smart_albums ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_albums_returns_seeded_albums() {
+        let (_tmp, pool) = make_pool().await;
+        crate::catalog::seed::seed_default_smart_albums(&pool)
+            .await
+            .expect("seed");
+
+        let rows = sqlx::query_as::<_, AlbumRow>(
+            "SELECT id, name, description, tag, photo_count, cover_photo_ids, is_system \
+             FROM smart_albums ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 12);
+        assert!(rows.iter().all(|r| r.is_system));
+    }
+
+    // list_photos ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_photos_returns_empty_on_fresh_catalog() {
+        let (_tmp, pool) = make_pool().await;
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_photos_pagination_limit_is_respected() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        for i in 0u8..5 {
+            sqlx::query(
+                "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+                 VALUES (?1, ?2, 0, 0, ?3, 0)",
+            )
+            .bind(format!("{i:064x}"))
+            .bind(format!("img{i}.jpg"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("insert");
+        }
+
+        let rows = sqlx::query_as::<_, PhotoRow>(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 3);
+    }
+
+    // list_sources ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_sources_returns_empty_on_fresh_catalog() {
+        let (_tmp, pool) = make_pool().await;
+        let rows = sqlx::query_as::<_, SourceRow>(
+            "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+             COUNT(DISTINCT sc.photo_id) AS photo_count \
+             FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+             GROUP BY s.id ORDER BY s.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_sources_counts_photos_per_source() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let source_id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, created_at) \
+             VALUES ('Test', 'local', 'idle', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("source");
+
+        for i in 0u8..3 {
+            let photo_id: i64 = sqlx::query_scalar(
+                "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+                 VALUES (?1, ?2, 0, 0, ?3, 0) RETURNING id",
+            )
+            .bind(format!("{i:064x}"))
+            .bind(format!("p{i}.jpg"))
+            .bind(&now)
+            .fetch_one(&pool)
+            .await
+            .expect("photo");
+
+            sqlx::query(
+                "INSERT INTO source_copies (photo_id, source_id, is_primary, last_seen_at) \
+                 VALUES (?1, ?2, 1, ?3)",
+            )
+            .bind(photo_id)
+            .bind(source_id)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("copy");
+        }
+
+        let rows = sqlx::query_as::<_, SourceRow>(
+            "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+             COUNT(DISTINCT sc.photo_id) AS photo_count \
+             FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+             GROUP BY s.id ORDER BY s.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].photo_count, 3);
     }
 }
