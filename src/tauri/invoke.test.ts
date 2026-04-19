@@ -6,6 +6,7 @@ import {
   createSource,
   currentChannel,
   detectIcloudPath,
+  importDryRun,
   importGoogleTakeout,
   listAlbums,
   listImports,
@@ -128,6 +129,13 @@ describe('invoke wrappers', () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await cleanupDryRun(5);
     expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run', { sourceId: 5 });
+  });
+
+  it('importDryRun calls import_dry_run and returns scan report', async () => {
+    const report = await importDryRun('/photos');
+    expect(report.root).toBe('/mock');
+    expect(typeof report.total_files).toBe('number');
+    expect(tauriInvoke).toHaveBeenCalledWith('import_dry_run', { root: '/photos' });
   });
 
   it('importGoogleTakeout calls import_google_takeout and returns import_id', async () => {

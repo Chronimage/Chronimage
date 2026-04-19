@@ -6,11 +6,23 @@
 import '@testing-library/jest-dom/vitest';
 import { vi } from 'vitest';
 
+// jsdom doesn't ship ResizeObserver; stub it so components that use it don't throw.
+global.ResizeObserver = class ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+
 // Mock Tauri event API — listen/emit need window.__TAURI_INTERNALS__ which
 // doesn't exist in jsdom. Return a no-op unlisten function.
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(() => Promise.resolve(() => undefined)),
   emit: vi.fn(() => Promise.resolve()),
+}));
+
+// Mock Tauri dialog plugin — openDialog is invoked by OnboardScreen handlers.
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(() => Promise.resolve(null)),
 }));
 
 // Mock Tauri's invoke so React tests run without a live bridge.

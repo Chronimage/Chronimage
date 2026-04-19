@@ -6,9 +6,13 @@ import {
   useAlbums,
   useCleanupDryRun,
   useCreateSource,
+  useDetectIcloudPath,
+  useImportGoogleTakeout,
   useImports,
+  useIphoneDevices,
   useOnThisDay,
   usePhotos,
+  useRefreshSmartAlbums,
   useSources,
   useStartImport,
   useUnseenPhotos,
@@ -83,6 +87,34 @@ describe('catalog query hooks', () => {
 
   it('useCleanupDryRun returns empty array from mock', async () => {
     const { result } = renderHook(() => useCleanupDryRun(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+  });
+
+  it('useRefreshSmartAlbums mutation calls refresh_smart_albums', async () => {
+    const { result } = renderHook(() => useRefreshSmartAlbums(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync();
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  });
+
+  it('useImportGoogleTakeout mutation succeeds and returns import_id', async () => {
+    const { result } = renderHook(() => useImportGoogleTakeout(), { wrapper });
+    await act(async () => {
+      const resp = await result.current.mutateAsync({ sourceId: 1, root: '/takeout' });
+      expect(resp.import_id).toBe(2);
+    });
+  });
+
+  it('useDetectIcloudPath returns null from mock', async () => {
+    const { result } = renderHook(() => useDetectIcloudPath(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeNull();
+  });
+
+  it('useIphoneDevices returns empty array from mock', async () => {
+    const { result } = renderHook(() => useIphoneDevices(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual([]);
   });
