@@ -112,6 +112,8 @@ fn main() {
             commands::find_duplicates,
             commands::search_photos,
             commands::cleanup_execute,
+            commands::lift_shift_dry_run,
+            commands::lift_shift_execute,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

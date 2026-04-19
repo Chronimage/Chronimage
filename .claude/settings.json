@@ -1,5 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "RUST_BACKTRACE": "1",
+    "RUST_LOG": "chronimage=debug,sqlx=warn,tauri=info",
+    "TAURI_DEV_WINDOW_LABEL": "main"
+  },
   "permissions": {
     "allow": [
       "Bash(pnpm *)",
@@ -97,7 +102,8 @@
       "Write(.gitignore)",
       "Write(.gitattributes)",
       "Write(.npmrc)",
-      "Write(LICENSE)"
+      "Write(LICENSE)",
+      "PowerShell(Remove-Item -Path \"C:\\\\Users\\\\jayas\\\\OneDrive\\\\Documents\\\\GitHub\\\\halide\\\\.claude\\\\worktrees\\\\agent-a5a2e8e3\" -Recurse -Force -Confirm:$false 2>&1; Write-Host \"exit: $LASTEXITCODE\")"
     ],
     "deny": [
       "Bash(git commit --no-verify*)",
@@ -123,11 +129,6 @@
       "Bash(pnpm install *)",
       "Bash(cargo install *)"
     ]
-  },
-  "env": {
-    "RUST_BACKTRACE": "1",
-    "RUST_LOG": "chronimage=debug,sqlx=warn,tauri=info",
-    "TAURI_DEV_WINDOW_LABEL": "main"
   },
   "hooks": {
     "PostToolUse": [

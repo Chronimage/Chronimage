@@ -16,6 +16,7 @@ pub mod dedupe;
 pub mod entitlements;
 pub mod error;
 pub mod import;
+pub mod lift_and_shift;
 pub mod state;
 pub mod telemetry;
 pub mod util;

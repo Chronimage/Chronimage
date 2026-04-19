@@ -453,6 +453,46 @@ async fn execute_cleanup_plan(
     })
 }
 
+// ── Lift & Shift commands ─────────────────────────────────────────────────────
+//
+// SAFETY INVARIANTS (mirrors source-side cleanup):
+//  1. Two-step: dry-run issues a signed confirm_token; execute rejects anything
+//     that doesn't match.
+//  2. SHA256 pre-verify: source file re-hashed before copy; mismatch → skip.
+//  3. SHA256 post-verify: destination re-hashed after copy; mismatch → remove
+//     dest + append to errors.
+//  4. ≥ 1.5× free-space gate: reported in `LiftPlan.free_space_ok`.
+//  5. Lift does NOT delete source copies — that is source-side cleanup's job.
+//
+// See docs/prds/phase-1.md §11 and CLAUDE.md § Security/privacy for rationale.
+
+/// Compute a lift-and-shift plan for all source photos not already under
+/// `target_root`.  Returns a `LiftPlan` with a one-time `confirm_token` that
+/// must be supplied to `lift_shift_execute` to proceed.
+///
+/// This is a dry-run: no files are moved or created.
+#[tauri::command]
+pub async fn lift_shift_dry_run(
+    state: State<'_, AppState>,
+    target_root: String,
+) -> AppResult<crate::lift_and_shift::LiftPlan> {
+    let target = std::path::PathBuf::from(target_root);
+    crate::lift_and_shift::plan_lift(&state.pool, target).await
+}
+
+/// Execute a previously issued lift plan.
+///
+/// `plan_id` + `confirm_token` must match the values returned by
+/// `lift_shift_dry_run`.  Plans are single-use.
+#[tauri::command]
+pub async fn lift_shift_execute(
+    state: State<'_, AppState>,
+    plan_id: String,
+    confirm_token: String,
+) -> AppResult<crate::lift_and_shift::LiftReceipt> {
+    crate::lift_and_shift::execute_lift(&state.pool, &plan_id, &confirm_token).await
+}
+
 /// Smoke command used by the frontend at boot to verify the IPC bridge.
 #[tauri::command]
 pub fn ping() -> &'static str {

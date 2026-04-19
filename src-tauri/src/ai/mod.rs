@@ -5,7 +5,9 @@
 
 pub mod aesthetic;
 pub mod budget;
+pub mod cluster;
 pub mod download;
+pub mod faces;
 pub mod siglip;
 
 pub use siglip::{dot_product, l2_normalise, SigLipSession, EMBED_DIM};
