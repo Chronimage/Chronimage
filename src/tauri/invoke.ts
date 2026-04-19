@@ -93,13 +93,19 @@ export async function listAlbums(): Promise<AlbumRow[]> {
 export interface ListPhotosParams {
   limit?: number;
   offset?: number;
+  albumId?: number | null;
 }
 
 export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]> {
   return tauriInvoke<PhotoRow[]>('list_photos', {
     limit: params?.limit ?? null,
     offset: params?.offset ?? null,
+    albumId: params?.albumId ?? null,
   });
+}
+
+export async function refreshSmartAlbums(): Promise<void> {
+  return tauriInvoke<void>('refresh_smart_albums');
 }
 
 export async function listSources(): Promise<SourceRow[]> {

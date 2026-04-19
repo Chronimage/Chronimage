@@ -2,7 +2,7 @@
 //! logic lives in domain modules (catalog, import, ai, ...) and these handlers
 //! just wire arguments and serialize results.
 
-use crate::{import, state::AppState, AppError, AppResult};
+use crate::{catalog, import, state::AppState, AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
@@ -276,27 +276,97 @@ pub struct PhotoRow {
     pub paired_photo_id: Option<i64>,
 }
 
-/// List photos ordered by imported_at desc, with optional pagination.
+/// List photos ordered by imported_at desc, with optional pagination and album filter.
 /// `limit` defaults to 100; `offset` defaults to 0.
+/// When `album_id` is provided the album's `rule_json` is evaluated to build a WHERE clause.
 #[tauri::command]
 pub async fn list_photos(
     state: State<'_, AppState>,
     limit: Option<i64>,
     offset: Option<i64>,
+    album_id: Option<i64>,
 ) -> AppResult<Vec<PhotoRow>> {
     let lim = limit.unwrap_or(100);
     let off = offset.unwrap_or(0);
-    let rows = sqlx::query_as::<_, PhotoRow>(
+
+    // Resolve album filter.
+    let where_clause = if let Some(aid) = album_id {
+        let rule_json: Option<String> =
+            sqlx::query_scalar("SELECT rule_json FROM smart_albums WHERE id = ?1")
+                .bind(aid)
+                .fetch_optional(&state.pool)
+                .await?;
+        match rule_json {
+            None => {
+                return Err(AppError::NotFound(format!("smart album {aid} not found")));
+            }
+            Some(rj) => match catalog::rules::parse_rule(&rj) {
+                Err(_) => {
+                    return Err(AppError::Internal(format!(
+                        "invalid rule_json for album {aid}"
+                    )))
+                }
+                Ok(rule) => catalog::rules::rule_to_sql(&rule)
+                    .map(|frag| format!("WHERE {frag}"))
+                    .unwrap_or_default(),
+            },
+        }
+    } else {
+        String::new()
+    };
+
+    let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
          camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
          paired_photo_id \
-         FROM photos ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2",
-    )
-    .bind(lim)
-    .bind(off)
-    .fetch_all(&state.pool)
-    .await?;
+         FROM photos {where_clause} ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2"
+    );
+    let rows = sqlx::query_as::<_, PhotoRow>(&sql)
+        .bind(lim)
+        .bind(off)
+        .fetch_all(&state.pool)
+        .await?;
     Ok(rows)
+}
+
+/// Re-evaluate all smart album rules and update `photo_count` + `cover_photo_ids`.
+/// Called automatically after each import and can be invoked manually.
+#[tauri::command]
+pub async fn refresh_smart_albums(state: State<'_, AppState>) -> AppResult<()> {
+    refresh_album_counts(&state.pool).await
+}
+
+pub(crate) async fn refresh_album_counts(pool: &sqlx::SqlitePool) -> AppResult<()> {
+    #[derive(sqlx::FromRow)]
+    struct AlbumMeta {
+        id: i64,
+        rule_json: String,
+    }
+
+    let albums = sqlx::query_as::<_, AlbumMeta>("SELECT id, rule_json FROM smart_albums")
+        .fetch_all(pool)
+        .await?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for album in &albums {
+        let count = catalog::rules::count_matching(pool, &album.rule_json).await;
+        let cover_ids = catalog::rules::matching_photo_ids(pool, &album.rule_json, 4).await;
+        let cover_json = serde_json::to_string(&cover_ids).unwrap_or_else(|_| "[]".to_string());
+
+        sqlx::query(
+            "UPDATE smart_albums SET photo_count = ?1, cover_photo_ids = ?2, updated_at = ?3 \
+             WHERE id = ?4",
+        )
+        .bind(count)
+        .bind(&cover_json)
+        .bind(&now)
+        .bind(album.id)
+        .execute(pool)
+        .await?;
+    }
+
+    tracing::debug!(albums = albums.len(), "smart album counts refreshed");
+    Ok(())
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -698,6 +768,103 @@ mod tests {
         .expect("query");
 
         assert_eq!(rows.len(), 3);
+    }
+
+    // list_photos album_id filter + refresh_smart_albums ──────────────────────
+
+    async fn insert_photo_with_iso(pool: &sqlx::SqlitePool, sha_prefix: char, iso: i64) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, iso) \
+             VALUES (?1, ?2, 0, 0, ?3, 0, ?4) RETURNING id",
+        )
+        .bind(format!("{sha_prefix:0>64}"))
+        .bind(format!("{sha_prefix}.jpg"))
+        .bind(&now)
+        .bind(iso)
+        .fetch_one(pool)
+        .await
+        .expect("insert photo")
+    }
+
+    async fn insert_night_album(pool: &sqlx::SqlitePool) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar(
+            "INSERT INTO smart_albums \
+             (name, rule_json, cover_photo_ids, tag, is_system, created_at, updated_at) \
+             VALUES ('Night', '{\"type\":\"exif\",\"field\":\"iso\",\"op\":\"gte\",\"value\":3200}', \
+             '[]', 'lighting', 1, ?1, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("insert album")
+    }
+
+    #[tokio::test]
+    async fn list_photos_album_filter_iso_gte_3200() {
+        let (_tmp, pool) = make_pool().await;
+        insert_photo_with_iso(&pool, 'a', 6400).await;
+        insert_photo_with_iso(&pool, 'b', 100).await;
+        let album_id = insert_night_album(&pool).await;
+
+        // Build the where clause directly via the rule engine.
+        let rule_json = r#"{"type":"exif","field":"iso","op":"gte","value":3200}"#;
+        let rule = crate::catalog::rules::parse_rule(rule_json).unwrap();
+        let frag = crate::catalog::rules::rule_to_sql(&rule).unwrap();
+        let sql = format!(
+            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
+             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
+             paired_photo_id FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
+        );
+        let rows = sqlx::query_as::<_, PhotoRow>(&sql)
+            .fetch_all(&pool)
+            .await
+            .expect("query");
+
+        assert_eq!(rows.len(), 1, "only high-ISO photo should match");
+        assert_eq!(rows[0].iso, Some(6400));
+        let _ = album_id;
+    }
+
+    #[tokio::test]
+    async fn refresh_smart_albums_updates_photo_count() {
+        let (_tmp, pool) = make_pool().await;
+        insert_photo_with_iso(&pool, 'c', 6400).await;
+        insert_photo_with_iso(&pool, 'd', 100).await;
+        let album_id = insert_night_album(&pool).await;
+
+        refresh_album_counts(&pool).await.expect("refresh");
+
+        let (count,): (i64,) = sqlx::query_as("SELECT photo_count FROM smart_albums WHERE id = ?1")
+            .bind(album_id)
+            .fetch_one(&pool)
+            .await
+            .expect("query");
+
+        assert_eq!(count, 1, "only high-ISO photo counts");
+    }
+
+    #[tokio::test]
+    async fn refresh_smart_albums_sets_cover_photo_ids() {
+        let (_tmp, pool) = make_pool().await;
+        let photo_id = insert_photo_with_iso(&pool, 'e', 5000).await;
+        let album_id = insert_night_album(&pool).await;
+
+        refresh_album_counts(&pool).await.expect("refresh");
+
+        let cover: String =
+            sqlx::query_scalar("SELECT cover_photo_ids FROM smart_albums WHERE id = ?1")
+                .bind(album_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query");
+
+        let ids: Vec<i64> = serde_json::from_str(&cover).expect("json");
+        assert!(
+            ids.contains(&photo_id),
+            "cover should include the matching photo"
+        );
     }
 
     // list_sources ────────────────────────────────────────────────────────────

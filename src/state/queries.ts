@@ -19,6 +19,7 @@ import {
   listSources,
   onThisDay,
   type PhotoRow,
+  refreshSmartAlbums,
   type SourceCleanupItem,
   type SourceRow,
   type StartImportResponse,
@@ -88,6 +89,17 @@ export function useCleanupDryRun(sourceId?: number) {
   return useQuery({
     queryKey: ['cleanup_dry_run', sourceId],
     queryFn: () => cleanupDryRun(sourceId),
+  });
+}
+
+export function useRefreshSmartAlbums() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: refreshSmartAlbums,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
   });
 }
 

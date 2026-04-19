@@ -309,7 +309,14 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const { data: albums = [] } = useAlbums();
-  const { data: photos = [] } = usePhotos({ limit: 500 });
+
+  // Resolve numeric album id for filtering — 'all' means no filter.
+  const numericAlbumId = albumId !== 'all' ? Number(albumId) : null;
+
+  const { data: photos = [] } = usePhotos({
+    limit: 500,
+    albumId: numericAlbumId,
+  });
   const { data: onThisDayPhotos = [] } = useOnThisDay(20);
   const { data: unseenPhotosList = [] } = useUnseenPhotos(20);
 

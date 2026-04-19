@@ -11,6 +11,7 @@ import {
   listSources,
   onThisDay,
   ping,
+  refreshSmartAlbums,
   startImport,
   unseenPhotos,
 } from './invoke';
@@ -35,13 +36,25 @@ describe('invoke wrappers', () => {
 
   it('listPhotos calls list_photos with default params', async () => {
     expect(Array.isArray(await listPhotos())).toBe(true);
-    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: null, offset: null });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: null, offset: null, albumId: null });
   });
 
   it('listPhotos forwards limit and offset', async () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await listPhotos({ limit: 50, offset: 200 });
-    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: 50, offset: 200 });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: 50, offset: 200, albumId: null });
+  });
+
+  it('listPhotos forwards albumId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await listPhotos({ albumId: 3 });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: null, offset: null, albumId: 3 });
+  });
+
+  it('refreshSmartAlbums calls refresh_smart_albums', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await refreshSmartAlbums();
+    expect(tauriInvoke).toHaveBeenCalledWith('refresh_smart_albums');
   });
 
   it('listSources calls list_sources and returns array', async () => {
