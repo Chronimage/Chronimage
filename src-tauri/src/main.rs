@@ -63,6 +63,7 @@ fn main() {
             commands::list_albums,
             commands::list_photos,
             commands::list_sources,
+            commands::create_source,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

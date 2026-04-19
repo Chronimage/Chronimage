@@ -6,6 +6,13 @@
 import '@testing-library/jest-dom/vitest';
 import { vi } from 'vitest';
 
+// Mock Tauri event API — listen/emit need window.__TAURI_INTERNALS__ which
+// doesn't exist in jsdom. Return a no-op unlisten function.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(() => Promise.resolve(() => undefined)),
+  emit: vi.fn(() => Promise.resolve()),
+}));
+
 // Mock Tauri's invoke so React tests run without a live bridge.
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(async (cmd: string) => {
@@ -23,6 +30,12 @@ vi.mock('@tauri-apps/api/core', () => ({
       case 'list_photos':
         return [];
       case 'list_sources':
+        return [];
+      case 'create_source':
+        return { id: 1, name: 'Test', kind: 'local', status: 'idle', last_scan_at: null, photo_count: 0 };
+      case 'start_import':
+        return { import_id: 1 };
+      case 'list_imports':
         return [];
       default:
         throw new Error(`mock invoke: unknown command ${cmd}`);

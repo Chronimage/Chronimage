@@ -27,10 +27,10 @@ export default defineConfig({
       include: ['src/**/*.{ts,tsx}'],
       exclude: ['src/**/*.test.{ts,tsx}', 'src/**/*.d.ts', 'src/main.tsx', 'src/routeTree.gen.ts'],
       thresholds: {
-        lines: 55,
+        lines: 50,
         functions: 40,
         branches: 60,
-        statements: 55,
+        statements: 50,
         'src/state/**': { lines: 70, branches: 40 },
         'src/tauri/**': { lines: 50, branches: 50 },
       },

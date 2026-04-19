@@ -190,6 +190,47 @@ async fn query_imports(
     Ok(rows)
 }
 
+// ── Source management commands ────────────────────────────────────────────
+
+/// Create a new source row and return it with a zeroed photo_count.
+#[tauri::command]
+pub async fn create_source(
+    state: State<'_, AppState>,
+    name: String,
+    kind: String,
+    root_path: Option<String>,
+) -> AppResult<SourceRow> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let config = match &root_path {
+        Some(p) => serde_json::json!({ "root": p }).to_string(),
+        None => "{}".to_string(),
+    };
+
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO sources (name, kind, status, config_json, created_at) \
+         VALUES (?1, ?2, 'idle', ?3, ?4) RETURNING id",
+    )
+    .bind(&name)
+    .bind(&kind)
+    .bind(&config)
+    .bind(&now)
+    .fetch_one(&state.pool)
+    .await?;
+
+    let row = sqlx::query_as::<_, SourceRow>(
+        "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+         COUNT(DISTINCT sc.photo_id) AS photo_count \
+         FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+         WHERE s.id = ?1 GROUP BY s.id",
+    )
+    .bind(id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    tracing::info!(source_id = id, kind, "source created");
+    Ok(row)
+}
+
 // ── Catalog read commands ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -331,6 +372,62 @@ mod tests {
         assert_eq!(report.total_files, 3);
         assert_eq!(report.raw_jpg_pairs, 1);
         assert_eq!(report.unpaired, 1);
+    }
+
+    // ── create_source tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_source_inserts_row_and_returns_it() {
+        let (_tmp, pool) = make_pool().await;
+
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES ('Local D:', 'local', 'idle', '{\"root\":\"D:/Photos\"}', ?1) RETURNING id",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .fetch_one(&pool)
+        .await
+        .expect("insert");
+
+        let row = sqlx::query_as::<_, SourceRow>(
+            "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+             COUNT(DISTINCT sc.photo_id) AS photo_count \
+             FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+             WHERE s.id = ?1 GROUP BY s.id",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch");
+
+        assert_eq!(row.name, "Local D:");
+        assert_eq!(row.kind, "local");
+        assert_eq!(row.status, "idle");
+        assert_eq!(row.photo_count, 0);
+    }
+
+    #[tokio::test]
+    async fn create_source_config_json_stored_correctly() {
+        let (_tmp, pool) = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES ('iCloud', 'icloud', 'idle', '{\"root\":\"/iCloud\"}', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert");
+
+        let config: String = sqlx::query_scalar("SELECT config_json FROM sources WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("config");
+
+        let v: serde_json::Value = serde_json::from_str(&config).expect("valid json");
+        assert_eq!(v["root"], "/iCloud");
     }
 
     // ── Catalog read command tests ─────────────────────────────────────────────

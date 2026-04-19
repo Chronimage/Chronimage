@@ -1,6 +1,16 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { describe, expect, it, vi } from 'vitest';
-import { appVersion, currentChannel, listAlbums, listPhotos, listSources, ping } from './invoke';
+import {
+  appVersion,
+  createSource,
+  currentChannel,
+  listAlbums,
+  listImports,
+  listPhotos,
+  listSources,
+  ping,
+  startImport,
+} from './invoke';
 
 describe('invoke wrappers', () => {
   it('ping calls ping command', async () => {
@@ -17,13 +27,11 @@ describe('invoke wrappers', () => {
   });
 
   it('listAlbums calls list_albums and returns array', async () => {
-    const result = await listAlbums();
-    expect(Array.isArray(result)).toBe(true);
+    expect(Array.isArray(await listAlbums())).toBe(true);
   });
 
   it('listPhotos calls list_photos with default params', async () => {
-    const result = await listPhotos();
-    expect(Array.isArray(result)).toBe(true);
+    expect(Array.isArray(await listPhotos())).toBe(true);
     expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: null, offset: null });
   });
 
@@ -34,7 +42,48 @@ describe('invoke wrappers', () => {
   });
 
   it('listSources calls list_sources and returns array', async () => {
-    const result = await listSources();
-    expect(Array.isArray(result)).toBe(true);
+    expect(Array.isArray(await listSources())).toBe(true);
+  });
+
+  it('createSource calls create_source with correct args', async () => {
+    const row = await createSource('Local D:', 'local', 'D:/Photos');
+    expect(row.id).toBe(1);
+    expect(tauriInvoke).toHaveBeenCalledWith('create_source', {
+      name: 'Local D:',
+      kind: 'local',
+      rootPath: 'D:/Photos',
+    });
+  });
+
+  it('createSource passes null rootPath when omitted', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      id: 2,
+      name: 'iCloud',
+      kind: 'icloud',
+      status: 'idle',
+      last_scan_at: null,
+      photo_count: 0,
+    });
+    await createSource('iCloud', 'icloud');
+    expect(tauriInvoke).toHaveBeenCalledWith('create_source', {
+      name: 'iCloud',
+      kind: 'icloud',
+      rootPath: null,
+    });
+  });
+
+  it('startImport calls start_import and returns import_id', async () => {
+    const resp = await startImport(1, 'D:/Photos');
+    expect(resp.import_id).toBe(1);
+    expect(tauriInvoke).toHaveBeenCalledWith('start_import', { sourceId: 1, root: 'D:/Photos' });
+  });
+
+  it('listImports calls list_imports with optional sourceId', async () => {
+    expect(Array.isArray(await listImports())).toBe(true);
+    expect(tauriInvoke).toHaveBeenCalledWith('list_imports', { sourceId: null });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await listImports(3);
+    expect(tauriInvoke).toHaveBeenCalledWith('list_imports', { sourceId: 3 });
   });
 });

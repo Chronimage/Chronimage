@@ -1,33 +1,35 @@
 /**
  * TanStack Query hooks for catalog data. These replace the static fixture
  * arrays in fixtures.ts once the Rust backend has real data.
- *
- * Usage:
- *   const { data: albums = [] } = useAlbums();
- *   const { data: photos = [], fetchNextPage } = usePhotos();
- *   const { data: sources = [] } = useSources();
  */
 
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AlbumRow,
+  createSource,
+  IMPORT_PROGRESS_EVENT,
+  type ImportProgressEvent,
+  type ImportSummary,
   type ListPhotosParams,
   listAlbums,
+  listImports,
   listPhotos,
   listSources,
   type PhotoRow,
   type SourceRow,
+  type StartImportResponse,
+  startImport,
 } from '../tauri/invoke';
 
-export type { AlbumRow, PhotoRow, SourceRow };
+export type { AlbumRow, ImportProgressEvent, ImportSummary, PhotoRow, SourceRow, StartImportResponse };
+export { IMPORT_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
 
+// ── Read hooks ────────────────────────────────────────────────────────────────
+
 export function useAlbums() {
-  return useQuery({
-    queryKey: ['albums'],
-    queryFn: listAlbums,
-  });
+  return useQuery({ queryKey: ['albums'], queryFn: listAlbums });
 }
 
 export function usePhotos(params?: Omit<ListPhotosParams, 'offset'>) {
@@ -44,8 +46,36 @@ export function usePhotos(params?: Omit<ListPhotosParams, 'offset'>) {
 }
 
 export function useSources() {
+  return useQuery({ queryKey: ['sources'], queryFn: listSources });
+}
+
+export function useImports(sourceId?: number) {
   return useQuery({
-    queryKey: ['sources'],
-    queryFn: listSources,
+    queryKey: ['imports', sourceId],
+    queryFn: () => listImports(sourceId),
+  });
+}
+
+// ── Mutation hooks ────────────────────────────────────────────────────────────
+
+export function useCreateSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, kind, rootPath }: { name: string; kind: string; rootPath?: string }) =>
+      createSource(name, kind, rootPath),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+    },
+  });
+}
+
+export function useStartImport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sourceId, root }: { sourceId: number; root: string }) => startImport(sourceId, root),
+    onSuccess: (_data, { sourceId }) => {
+      qc.invalidateQueries({ queryKey: ['imports', sourceId] });
+      qc.invalidateQueries({ queryKey: ['imports'] });
+    },
   });
 }

@@ -105,3 +105,50 @@ export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]>
 export async function listSources(): Promise<SourceRow[]> {
   return tauriInvoke<SourceRow[]>('list_sources');
 }
+
+export async function createSource(name: string, kind: string, rootPath?: string): Promise<SourceRow> {
+  return tauriInvoke<SourceRow>('create_source', {
+    name,
+    kind,
+    rootPath: rootPath ?? null,
+  });
+}
+
+// ── Import commands ─────────────────────────────────────────────────────────
+
+export interface StartImportResponse {
+  import_id: number;
+}
+
+export async function startImport(sourceId: number, root: string): Promise<StartImportResponse> {
+  return tauriInvoke<StartImportResponse>('start_import', { sourceId, root });
+}
+
+export interface ImportSummary {
+  id: number;
+  source_id: number;
+  started_at: string;
+  finished_at: string | null;
+  total_files: number;
+  imported_count: number;
+  skipped_count: number;
+  error_count: number;
+  last_seen_path: string | null;
+}
+
+export async function listImports(sourceId?: number): Promise<ImportSummary[]> {
+  return tauriInvoke<ImportSummary[]>('list_imports', { sourceId: sourceId ?? null });
+}
+
+// ── Import progress event ───────────────────────────────────────────────────
+
+export interface ImportProgressEvent {
+  source_id: number;
+  import_id: number;
+  total: number;
+  done: number;
+  current_file: string;
+  eta_seconds: number | null;
+}
+
+export const IMPORT_PROGRESS_EVENT = 'chronimage://import-progress';

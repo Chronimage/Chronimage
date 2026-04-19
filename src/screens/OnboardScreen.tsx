@@ -1,15 +1,98 @@
-import { Chip } from '../primitives/Chip';
+import { listen } from '@tauri-apps/api/event';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../primitives/Icon';
-import { SOURCES } from '../state/fixtures';
+import {
+  IMPORT_PROGRESS_EVENT,
+  type ImportProgressEvent,
+  useCreateSource,
+  useSources,
+  useStartImport,
+} from '../state/queries';
+import { useUi } from '../state/ui';
 
-/**
- * Phase 1 stub onboarding. The full 5-step flow (Welcome → Sources → Import
- * → Models → People) lands in a dedicated session after the import pipeline
- * is wired. Here we render the Sources landing so the screen isn't dead.
- */
+interface ActiveImport {
+  importId: number;
+  sourceId: number;
+  sourceName: string;
+  total: number;
+  done: number;
+  currentFile: string;
+  etaSeconds: number | null;
+  finished: boolean;
+}
+
 export function OnboardScreen() {
-  const connected = SOURCES.filter((s) => s.kind === 'iphone' || s.kind === 'android' || s.kind === 'card');
-  const rest = SOURCES.filter((s) => !['iphone', 'android', 'card'].includes(s.kind)).slice(0, 6);
+  const { data: sources = [] } = useSources();
+  const createSource = useCreateSource();
+  const startImport = useStartImport();
+  const setScreen = useUi((s) => s.setScreen);
+
+  const [activeImports, setActiveImports] = useState<Map<number, ActiveImport>>(new Map());
+  const unlistenRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listen<ImportProgressEvent>(IMPORT_PROGRESS_EVENT, (event) => {
+      const p = event.payload;
+      setActiveImports((prev) => {
+        const next = new Map(prev);
+        next.set(p.import_id, {
+          importId: p.import_id,
+          sourceId: p.source_id,
+          sourceName: prev.get(p.import_id)?.sourceName ?? '',
+          total: p.total,
+          done: p.done,
+          currentFile: p.current_file,
+          etaSeconds: p.eta_seconds,
+          finished: p.done >= p.total && p.total > 0,
+        });
+        return next;
+      });
+    }).then((unlisten) => {
+      if (cancelled) unlisten();
+      else unlistenRef.current = unlisten;
+    });
+    return () => {
+      cancelled = true;
+      unlistenRef.current?.();
+    };
+  }, []);
+
+  async function handleAddLocalFolder() {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (!selected || typeof selected !== 'string') return;
+
+    const folderName = selected.split(/[\\/]/).pop() ?? selected;
+    const source = await createSource.mutateAsync({
+      name: `Local · ${folderName}`,
+      kind: 'local',
+      rootPath: selected,
+    });
+
+    const resp = await startImport.mutateAsync({ sourceId: source.id, root: selected });
+
+    setActiveImports((prev) => {
+      const next = new Map(prev);
+      next.set(resp.import_id, {
+        importId: resp.import_id,
+        sourceId: source.id,
+        sourceName: source.name,
+        total: 0,
+        done: 0,
+        currentFile: '',
+        etaSeconds: null,
+        finished: false,
+      });
+      return next;
+    });
+  }
+
+  const hasAnySources = sources.length > 0;
+  const runningImports = [...activeImports.values()].filter((i) => !i.finished);
+  const finishedImports = [...activeImports.values()].filter((i) => i.finished);
+  const busy = createSource.isPending || startImport.isPending;
+  const error = createSource.error ?? startImport.error;
 
   return (
     <div className="canvas" style={{ gridColumn: '2 / -1' }}>
@@ -26,102 +109,189 @@ export function OnboardScreen() {
           <em>in one light.</em>
         </h1>
         <p style={{ color: 'var(--fg-dim)', fontSize: 14, lineHeight: 1.55, maxWidth: 560, marginTop: 18 }}>
-          Chronimage unifies your fragmented library (Google Photos, iCloud, iPhone, local disks) into one
-          owned catalog. On-device AI tags, clusters faces, detects duplicates (including RAW+JPG pairs), and
-          safely frees up source storage once local copies are verified.
+          Chronimage unifies your fragmented library into one owned catalog. On-device AI tags, clusters
+          faces, detects duplicates, and safely frees source storage once copies are verified.
         </p>
 
-        {connected.length > 0 && (
+        {/* ── Active imports ── */}
+        {runningImports.length > 0 && (
+          <div style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {runningImports.map((imp) => {
+              const pct = imp.total > 0 ? Math.round((imp.done / imp.total) * 100) : 0;
+              return (
+                <div
+                  key={imp.importId}
+                  style={{
+                    padding: 14,
+                    border: '1px solid var(--accent)',
+                    borderRadius: 10,
+                    background: 'color-mix(in oklch, var(--accent) 8%, var(--bg-elev))',
+                  }}
+                >
+                  <div
+                    className="mono"
+                    style={{
+                      fontSize: 10.5,
+                      color: 'var(--accent)',
+                      marginBottom: 8,
+                      letterSpacing: '0.08em',
+                    }}
+                  >
+                    IMPORTING · {imp.sourceName || 'local folder'}
+                  </div>
+                  <div className="progress" style={{ height: 3, marginBottom: 6 }}>
+                    <div style={{ width: `${pct}%`, transition: 'width 0.3s ease' }} />
+                  </div>
+                  <div
+                    className="mono"
+                    style={{
+                      fontSize: 11,
+                      color: 'var(--fg-dim)',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <span
+                      style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}
+                    >
+                      {imp.currentFile || 'Scanning…'}
+                    </span>
+                    <span style={{ marginLeft: 12, flexShrink: 0 }}>
+                      {imp.done.toLocaleString()} / {imp.total.toLocaleString()}
+                      {imp.etaSeconds != null && imp.etaSeconds > 0 ? ` · ~${imp.etaSeconds}s left` : ''}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── Finished import toasts ── */}
+        {finishedImports.map((imp) => (
           <div
+            key={imp.importId}
             style={{
-              marginTop: 24,
-              padding: 14,
-              border: '1px solid var(--accent)',
-              borderRadius: 10,
-              background: 'color-mix(in oklch, var(--accent) 8%, var(--bg-elev))',
+              marginTop: 10,
+              padding: '10px 14px',
+              border: '1px solid var(--stroke)',
+              borderRadius: 8,
+              background: 'var(--bg-elev)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
             }}
           >
+            <Icon name="keep" size={13} />
+            <span className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
+              {imp.sourceName} — {imp.done.toLocaleString()} photos imported
+            </span>
+          </div>
+        ))}
+
+        {/* ── Add source actions ── */}
+        <div style={{ marginTop: 28, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="btn2 primary"
+            style={{ padding: '9px 16px', fontSize: 13 }}
+            onClick={handleAddLocalFolder}
+            disabled={busy}
+          >
+            <Icon name="disk" size={14} />
+            {busy ? 'Adding…' : 'Add local folder'}
+          </button>
+          <button
+            type="button"
+            className="btn2"
+            style={{ padding: '9px 16px', fontSize: 13 }}
+            disabled
+            title="Phase 1b"
+          >
+            <Icon name="cloud" size={14} /> Google Photos
+          </button>
+          <button
+            type="button"
+            className="btn2"
+            style={{ padding: '9px 16px', fontSize: 13 }}
+            disabled
+            title="Phase 1b"
+          >
+            <Icon name="iphone" size={14} /> iPhone USB
+          </button>
+          <button
+            type="button"
+            className="btn2"
+            style={{ padding: '9px 16px', fontSize: 13 }}
+            disabled
+            title="Phase 1b"
+          >
+            <Icon name="nas" size={14} /> NAS
+          </button>
+        </div>
+
+        {error && (
+          <div className="mono" style={{ fontSize: 11, color: 'var(--destructive)', marginTop: 10 }}>
+            {String(error)}
+          </div>
+        )}
+
+        {/* ── Existing sources ── */}
+        {hasAnySources && (
+          <>
             <div
               className="mono"
-              style={{ fontSize: 10.5, color: 'var(--accent)', marginBottom: 10, letterSpacing: '0.08em' }}
+              style={{
+                fontSize: 10.5,
+                color: 'var(--fg-mute)',
+                marginTop: 32,
+                marginBottom: 10,
+                letterSpacing: '0.08em',
+              }}
             >
-              <Icon name="usb" size={11} /> CONNECTED NOW · USB
+              CONNECTED SOURCES
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {connected.map((s) => (
-                <div
-                  key={s.id}
-                  className="source-row"
-                  style={{ padding: '10px 12px', marginBottom: 0, background: 'var(--bg)' }}
-                >
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {sources.map((s) => (
+                <div key={s.id} className="source-row" style={{ padding: '10px 12px', marginBottom: 0 }}>
                   <div className="ico">
-                    <Icon name={s.kind} size={18} />
+                    <Icon name={SOURCE_KIND_ICON[s.kind] ?? 'disk'} size={18} />
                   </div>
                   <div style={{ flex: 1 }}>
                     <div className="name">{s.name}</div>
                     <div className="sub">
-                      {s.count} photos · {s.sub}
+                      {s.photo_count > 0 ? `${s.photo_count.toLocaleString()} photos` : 'No photos yet'} ·{' '}
+                      {s.status}
                     </div>
                   </div>
-                  <button type="button" className="btn2 primary" style={{ padding: '6px 12px' }}>
-                    Import new
-                  </button>
                 </div>
               ))}
             </div>
-          </div>
+
+            <button
+              type="button"
+              className="btn2 primary"
+              style={{ marginTop: 24, padding: '9px 20px', fontSize: 13 }}
+              onClick={() => setScreen('catalog')}
+            >
+              Open Catalog <Icon name="chevR" size={12} />
+            </button>
+          </>
         )}
-
-        <div
-          className="mono"
-          style={{
-            fontSize: 10.5,
-            color: 'var(--fg-mute)',
-            marginTop: 24,
-            marginBottom: 10,
-            letterSpacing: '0.08em',
-          }}
-        >
-          ALL SOURCES
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {rest.map((s) => (
-            <div key={s.id} className="source-row" style={{ padding: '10px 12px', marginBottom: 0 }}>
-              <div className="ico">
-                <Icon name={s.kind} size={18} />
-              </div>
-              <div style={{ flex: 1 }}>
-                <div className="name">{s.name}</div>
-                <div className="sub">
-                  {s.count} photos · {s.sub}
-                </div>
-              </div>
-              <Chip
-                {...(s.status === 'ready' ? ({ variant: 'solid' } as const) : {})}
-                {...(s.status === 'syncing'
-                  ? ({ tone: 'info' } as const)
-                  : s.status === 'paused'
-                    ? ({ tone: 'warn' } as const)
-                    : {})}
-              >
-                {s.status === 'synced'
-                  ? 'Connected'
-                  : s.status === 'syncing'
-                    ? 'Syncing'
-                    : s.status === 'paused'
-                      ? 'Paused'
-                      : s.status === 'ready'
-                        ? 'Ready'
-                        : 'Idle'}
-              </Chip>
-            </div>
-          ))}
-        </div>
-
-        <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 32 }}>
-          Phase 1 in progress — real source connectors + import pipeline land in the next session.
-        </div>
       </div>
     </div>
   );
 }
+
+const SOURCE_KIND_ICON: Record<string, 'disk' | 'cloud' | 'nas' | 'card' | 'iphone' | 'android'> = {
+  local: 'disk',
+  external: 'disk',
+  nas: 'nas',
+  sd: 'card',
+  iphone: 'iphone',
+  android: 'android',
+  google_photos: 'cloud',
+  icloud: 'cloud',
+  onedrive: 'cloud',
+  dropbox: 'cloud',
+};

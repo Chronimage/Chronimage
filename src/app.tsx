@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Rail } from './chrome/Rail';
 import { StatusBar } from './chrome/StatusBar';
@@ -8,6 +9,10 @@ import { PlaceholderScreen } from './screens/PlaceholderScreen';
 import { useUi } from './state/ui';
 import { appVersion, currentChannel } from './tauri/invoke';
 import { error as logError } from './util/log';
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+});
 
 export function App() {
   const screen = useUi((s) => s.screen);
@@ -83,22 +88,24 @@ export function App() {
   }
 
   return (
-    <div
-      className="app compact"
-      data-theme={tweaks.theme}
-      data-accent={tweaks.accent}
-      data-density={tweaks.gridDensity}
-      data-facet={tweaks.facetPlacement}
-      data-editor={tweaks.editorLayout}
-      style={{ ['--display-font' as string]: `'${tweaks.displayFont}', serif` }}
-    >
-      <Titlebar screen={screen} appName={tweaks.appName} />
-      <div className="body">
-        <Rail screen={screen} onScreenChange={setScreen} />
-        {sidePanel}
-        {mainPanel}
+    <QueryClientProvider client={queryClient}>
+      <div
+        className="app compact"
+        data-theme={tweaks.theme}
+        data-accent={tweaks.accent}
+        data-density={tweaks.gridDensity}
+        data-facet={tweaks.facetPlacement}
+        data-editor={tweaks.editorLayout}
+        style={{ ['--display-font' as string]: `'${tweaks.displayFont}', serif` }}
+      >
+        <Titlebar screen={screen} appName={tweaks.appName} />
+        <div className="body">
+          <Rail screen={screen} onScreenChange={setScreen} />
+          {sidePanel}
+          {mainPanel}
+        </div>
+        <StatusBar screen={screen} version={version} channel={channel} />
       </div>
-      <StatusBar screen={screen} version={version} channel={channel} />
-    </div>
+    </QueryClientProvider>
   );
 }
