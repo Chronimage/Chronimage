@@ -3,6 +3,7 @@ import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { ALBUMS, PHOTOS, SEARCH_SUGGESTIONS } from '../../state/fixtures';
+import { useSearchPhotos } from '../../state/queries';
 
 export interface CatalogScreenProps {
   albumId: string;
@@ -15,6 +16,9 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [selected, setSelected] = useState<Set<number>>(new Set([2, 5, 12]));
   const searching = query.trim().length > 0;
   const photos = useMemo(() => PHOTOS.slice(0, 48), []);
+
+  // Natural-language search via SigLIP text encoder (Rust backend).
+  const { data: searchResults, isFetching: searchFetching } = useSearchPhotos(query);
   const album = ALBUMS.find((a) => a.id === albumId) ?? {
     id: 'all',
     name: 'All Photos',
@@ -146,14 +150,20 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 className="mono"
                 style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginBottom: 4, letterSpacing: '0.08em' }}
               >
-                SEARCH · gemma4 + CLIP · (stub)
+                {searchFetching
+                  ? 'SEARCH · encoding…'
+                  : searchResults && searchResults.length > 0
+                    ? `SEARCH · SigLIP · ${searchResults.length} result${searchResults.length === 1 ? '' : 's'}`
+                    : 'SEARCH · SigLIP · no results yet'}
               </div>
               <div className="display" style={{ fontSize: 32 }}>
                 "{query}"<em>.</em>
               </div>
-              <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-dim)', marginTop: 6 }}>
-                (Phase 1: real results come from SigLIP text encoder + sqlite-vec k-NN)
-              </div>
+              {(!searchResults || searchResults.length === 0) && !searchFetching && (
+                <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-dim)', marginTop: 6 }}>
+                  No embeddings yet — import photos and run the AI pipeline to enable search.
+                </div>
+              )}
             </div>
             <div style={{ padding: '6px 20px 0', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {SEARCH_SUGGESTIONS.slice(0, 5).map((s) => (
@@ -162,20 +172,54 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 </Chip>
               ))}
             </div>
-            <div className="libgrid">
-              {photos.slice(0, 24).map((p, i) => (
-                <button
-                  type="button"
-                  key={p.id}
-                  className="cell"
-                  style={{ position: 'relative' }}
-                  onClick={() => toggle(i)}
-                  aria-label={`Select ${p.filename}`}
-                >
-                  <Placeholder photo={p} idx={i} selected={selected.has(i)} subtle />
-                </button>
-              ))}
-            </div>
+            {searchResults && searchResults.length > 0 ? (
+              // Real results from the SigLIP vector search.
+              <div className="libgrid">
+                {searchResults.map((p, i) => (
+                  <button
+                    type="button"
+                    key={p.id}
+                    className="cell"
+                    style={{ position: 'relative' }}
+                    onClick={() => toggle(i)}
+                    aria-label={`Select ${p.filename}`}
+                  >
+                    {/* Use Placeholder with only the fields PlaceholderPhoto accepts.
+                        The hue is derived deterministically from the photo id so the
+                        same photo always renders with the same tint. */}
+                    <Placeholder
+                      photo={{
+                        id: String(p.id),
+                        filename: p.filename,
+                        hue: (p.id * 37) % 360,
+                        scene: p.camera_make
+                          ? `${p.camera_make} · ${p.camera_model ?? ''}`.trim()
+                          : p.filename,
+                      }}
+                      idx={i}
+                      selected={selected.has(i)}
+                      subtle
+                    />
+                  </button>
+                ))}
+              </div>
+            ) : (
+              // Fallback: show fixture grid while no real embeddings exist.
+              <div className="libgrid">
+                {photos.slice(0, 24).map((p, i) => (
+                  <button
+                    type="button"
+                    key={p.id}
+                    className="cell"
+                    style={{ position: 'relative' }}
+                    onClick={() => toggle(i)}
+                    aria-label={`Select ${p.filename}`}
+                  >
+                    <Placeholder photo={p} idx={i} selected={selected.has(i)} subtle />
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -60,6 +60,7 @@ fn main() {
             commands::import_dry_run,
             commands::start_import,
             commands::list_imports,
+            commands::search_photos,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

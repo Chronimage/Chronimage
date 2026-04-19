@@ -44,3 +44,37 @@ export interface ScanReport {
 export async function importDryRun(root: string): Promise<ScanReport> {
   return tauriInvoke<ScanReport>('import_dry_run', { root });
 }
+
+// ── Search ──────────────────────────────────────────────────────────────────
+
+/**
+ * A photo row as returned by `search_photos` and (eventually) the catalog
+ * grid query. Field names mirror the `photos` SQLite table.
+ */
+export interface PhotoRow {
+  id: number;
+  sha256: string;
+  filename: string;
+  width: number;
+  height: number;
+  captured_at: string | null;
+  imported_at: string;
+  is_raw: boolean;
+  paired_photo_id: number | null;
+  camera_make: string | null;
+  camera_model: string | null;
+  aesthetic_score: number | null;
+  size_bytes: number | null;
+  raw_format: string | null;
+}
+
+/**
+ * Encode `query` with the on-device SigLIP text encoder and return up to
+ * `limit` (default 50) photos ordered by cosine similarity desc.
+ *
+ * Returns an empty array — not an error — when the model is absent or no
+ * embeddings have been computed yet.
+ */
+export async function searchPhotos(query: string, limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('search_photos', { query, limit: limit ?? null });
+}
