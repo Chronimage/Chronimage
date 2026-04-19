@@ -92,7 +92,7 @@ importers:
         version: 1.9.4
       '@commitlint/cli':
         specifier: ^19.6.1
-        version: 19.8.1(@types/node@22.19.17)(typescript@5.7.3)
+        version: 19.8.1(@types/node@22.19.17)(typescript@6.0.3)
       '@commitlint/config-conventional':
         specifier: ^19.6.0
         version: 19.8.1
@@ -160,8 +160,8 @@ importers:
         specifier: ^4.0.0
         version: 4.2.2
       typescript:
-        specifier: ~5.7.2
-        version: 5.7.3
+        specifier: ~6.0.3
+        version: 6.0.3
       vite:
         specifier: ^6.0.7
         version: 6.4.2(@types/node@22.19.17)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.21.0)
@@ -3132,8 +3132,8 @@ packages:
     engines: {node: '>=18.0.0'}
     hasBin: true
 
-  typescript@5.7.3:
-    resolution: {integrity: sha512-84MVSjMEHP+FQRPy3pX9sTVV/INIex71s9TL2Gm5FG/WG1SqXeKyZ0k7/blY/4FdOzI12CBy1vGc4og/eus0fw==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -3572,11 +3572,11 @@ snapshots:
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
 
-  '@commitlint/cli@19.8.1(@types/node@22.19.17)(typescript@5.7.3)':
+  '@commitlint/cli@19.8.1(@types/node@22.19.17)(typescript@6.0.3)':
     dependencies:
       '@commitlint/format': 19.8.1
       '@commitlint/lint': 19.8.1
-      '@commitlint/load': 19.8.1(@types/node@22.19.17)(typescript@5.7.3)
+      '@commitlint/load': 19.8.1(@types/node@22.19.17)(typescript@6.0.3)
       '@commitlint/read': 19.8.1
       '@commitlint/types': 19.8.1
       tinyexec: 1.1.1
@@ -3623,15 +3623,15 @@ snapshots:
       '@commitlint/rules': 19.8.1
       '@commitlint/types': 19.8.1
 
-  '@commitlint/load@19.8.1(@types/node@22.19.17)(typescript@5.7.3)':
+  '@commitlint/load@19.8.1(@types/node@22.19.17)(typescript@6.0.3)':
     dependencies:
       '@commitlint/config-validator': 19.8.1
       '@commitlint/execute-rule': 19.8.1
       '@commitlint/resolve-extends': 19.8.1
       '@commitlint/types': 19.8.1
       chalk: 5.6.2
-      cosmiconfig: 9.0.1(typescript@5.7.3)
-      cosmiconfig-typescript-loader: 6.3.0(@types/node@22.19.17)(cosmiconfig@9.0.1(typescript@5.7.3))(typescript@5.7.3)
+      cosmiconfig: 9.0.1(typescript@6.0.3)
+      cosmiconfig-typescript-loader: 6.3.0(@types/node@22.19.17)(cosmiconfig@9.0.1(typescript@6.0.3))(typescript@6.0.3)
       lodash.isplainobject: 4.0.6
       lodash.merge: 4.6.2
       lodash.uniq: 4.5.0
@@ -5071,21 +5071,21 @@ snapshots:
 
   cookie-es@3.1.1: {}
 
-  cosmiconfig-typescript-loader@6.3.0(@types/node@22.19.17)(cosmiconfig@9.0.1(typescript@5.7.3))(typescript@5.7.3):
+  cosmiconfig-typescript-loader@6.3.0(@types/node@22.19.17)(cosmiconfig@9.0.1(typescript@6.0.3))(typescript@6.0.3):
     dependencies:
       '@types/node': 22.19.17
-      cosmiconfig: 9.0.1(typescript@5.7.3)
+      cosmiconfig: 9.0.1(typescript@6.0.3)
       jiti: 2.6.1
-      typescript: 5.7.3
+      typescript: 6.0.3
 
-  cosmiconfig@9.0.1(typescript@5.7.3):
+  cosmiconfig@9.0.1(typescript@6.0.3):
     dependencies:
       env-paths: 2.2.1
       import-fresh: 3.3.1
       js-yaml: 4.1.1
       parse-json: 5.2.0
     optionalDependencies:
-      typescript: 5.7.3
+      typescript: 6.0.3
 
   cross-spawn@7.0.6:
     dependencies:
@@ -6071,7 +6071,7 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
 
-  typescript@5.7.3: {}
+  typescript@6.0.3: {}
 
   undici-types@6.21.0: {}
 
