@@ -13,6 +13,27 @@ global.ResizeObserver = class ResizeObserver {
   disconnect() {}
 };
 
+// Mock Tauri window API — getCurrentWindow().minimize/toggleMaximize/close
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: vi.fn(() => ({
+    minimize: vi.fn(() => Promise.resolve()),
+    toggleMaximize: vi.fn(() => Promise.resolve()),
+    maximize: vi.fn(() => Promise.resolve()),
+    unmaximize: vi.fn(() => Promise.resolve()),
+    isMaximized: vi.fn(() => Promise.resolve(false)),
+    setSize: vi.fn(() => Promise.resolve()),
+    center: vi.fn(() => Promise.resolve()),
+    close: vi.fn(() => Promise.resolve()),
+  })),
+  currentMonitor: vi.fn(() => Promise.resolve({ size: { width: 1920, height: 1080 }, scaleFactor: 1 })),
+  LogicalSize: class LogicalSize {
+    constructor(
+      public width: number,
+      public height: number,
+    ) {}
+  },
+}));
+
 // Mock Tauri event API — listen/emit need window.__TAURI_INTERNALS__ which
 // doesn't exist in jsdom. Return a no-op unlisten function.
 vi.mock('@tauri-apps/api/event', () => ({
@@ -53,6 +74,8 @@ vi.mock('@tauri-apps/api/core', () => ({
         return [];
       case 'create_source':
         return { id: 1, name: 'Test', kind: 'local', status: 'idle', last_scan_at: null, photo_count: 0 };
+      case 'delete_source':
+        return undefined;
       case 'start_import':
         return { import_id: 1 };
       case 'list_imports':
@@ -63,6 +86,12 @@ vi.mock('@tauri-apps/api/core', () => ({
         return null;
       case 'list_iphone_devices':
         return [];
+      case 'detect_hardware':
+        return { tier: 'CpuOnly', vram_mb: 0, adapter_name: 'stub' };
+      case 'embed_image':
+        return new Array(768).fill(0);
+      case 'score_aesthetic':
+        return 5.5;
       default:
         throw new Error(`mock invoke: unknown command ${cmd}`);
     }

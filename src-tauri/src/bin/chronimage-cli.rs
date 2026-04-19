@@ -54,7 +54,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Cmd::Migrate => {
-            println!("chronimage-cli migrate — Phase 0 stub (no migrations yet)");
+            let db_path = chronimage::util::paths::catalog_db_path()?;
+            println!(
+                "chronimage-cli migrate — applying migrations to {}",
+                db_path.display()
+            );
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                let pool = chronimage::catalog::db::open_pool(
+                    chronimage::catalog::db::PoolOptions::new(db_path),
+                )
+                .await?;
+                pool.close().await;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+            println!("chronimage-cli migrate — done");
             Ok(())
         }
         Cmd::Import { path, dry_run } => {

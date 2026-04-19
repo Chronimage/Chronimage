@@ -2,10 +2,496 @@
 //! logic lives in domain modules (catalog, import, ai, ...) and these handlers
 //! just wire arguments and serialize results.
 
-use crate::{catalog, import, state::AppState, AppError, AppResult};
+use crate::{
+    ai::{dot_product, l2_normalise, SigLipSession},
+    catalog,
+    dedupe::confirm::DuplicateGroup,
+    import,
+    state::AppState,
+    AppError, AppResult,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
+
+// ── Source-side cleanup commands ──────────────────────────────────────────────
+//
+// SAFETY INVARIANTS (enforced at runtime, not just by convention):
+//  1. Two-step: dry-run issues a signed confirm_token; execute rejects anything
+//     that doesn't match.
+//  2. SHA256 re-verify: every file is re-hashed just before deletion. A mismatch
+//     skips that file and appends to `errors`; it does NOT abort the whole plan.
+//  3. ≥2× free-space gate: after deletion the drive must still have at least 2×
+//     the freed bytes free. Evaluated per source-root; failure skips the entire
+//     source (non-fatal).
+//  4. Cloud sources (icloud, iphone, google_photos) are stubbed — they append
+//     a "not yet implemented" error rather than silently skipping.
+//
+// See docs/prds/phase-1.md and CLAUDE.md § Security/privacy for rationale.
+
+/// A single file that a cleanup plan proposes to delete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupItem {
+    /// `source_copies.id`
+    pub copy_id: i64,
+    /// `photos.id`
+    pub photo_id: i64,
+    /// `sources.id`
+    pub source_id: i64,
+    /// `sources.kind` — e.g. "local", "external", "nas", "sd", "icloud"
+    pub source_kind: String,
+    /// Absolute path on the local filesystem (NULL for cloud-only items)
+    pub path: Option<String>,
+    /// SHA256 recorded at import time
+    pub verified_sha256: String,
+    /// File size in bytes at import time
+    pub size_bytes: i64,
+}
+
+/// Per-source summary inside a CleanupPlan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCleanupItem {
+    pub source_id: i64,
+    pub source_name: String,
+    pub source_kind: String,
+    pub reclaimable_bytes: u64,
+    pub file_count: usize,
+    pub items: Vec<CleanupItem>,
+}
+
+/// The result of `cleanup_dry_run`: a plan that can be executed by passing its
+/// `plan_id` + `confirm_token` to `cleanup_execute`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleanupPlan {
+    pub plan_id: String,
+    /// Single-use token that must be echoed back in `cleanup_execute`.
+    pub confirm_token: String,
+    pub total_reclaimable_bytes: u64,
+    pub total_file_count: usize,
+    pub sources: Vec<SourceCleanupItem>,
+}
+
+/// Result of a successful (or partially-successful) `cleanup_execute`.
+#[derive(Debug, Serialize)]
+pub struct CleanupExecuteResult {
+    pub deleted_count: usize,
+    pub freed_bytes: u64,
+    /// Non-fatal per-file errors (SHA256 mismatch, cloud stub, free-space failure, etc.)
+    pub errors: Vec<String>,
+}
+
+// In-process store for plans that have been issued but not yet executed.
+// A production implementation would use the DB; for now a static DashMap is
+// fine because plans are short-lived (seconds) and single-process.
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+static PENDING_PLANS: Lazy<Mutex<HashMap<String, CleanupPlan>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Returns how many free bytes remain on the volume containing `path`.
+///
+/// On Windows we use `GetDiskFreeSpaceExW`; on other platforms `statvfs` via
+/// `std::fs::metadata` is not available in stable so we use the `nix` crate
+/// pattern — but since Chronimage is Windows-first we cfg it away for now and
+/// return `u64::MAX` as a safe sentinel on non-Windows.
+fn free_bytes_for_path(path: &std::path::Path) -> std::io::Result<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+        // Build a null-terminated wide string from the path.
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0u16))
+            .collect();
+        let mut free_bytes_caller: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut free_bytes_total: u64 = 0;
+        // SAFETY: `wide` is a valid null-terminated wide string.
+        unsafe {
+            GetDiskFreeSpaceExW(
+                PCWSTR(wide.as_ptr()),
+                Some(&mut free_bytes_caller),
+                Some(&mut total_bytes),
+                Some(&mut free_bytes_total),
+            )
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        Ok(free_bytes_caller)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Non-Windows: return sentinel so the free-space gate always passes in
+        // dev/test environments running on Linux/macOS CI runners.
+        let _ = path;
+        Ok(u64::MAX)
+    }
+}
+
+/// Compute the cleanup plan for all sources that have verified local copies.
+///
+/// Produces a `CleanupPlan` with a one-time `confirm_token` that must be
+/// supplied to `cleanup_execute` to proceed. The plan is held in memory until
+/// executed or the process restarts.
+#[tauri::command]
+pub async fn cleanup_dry_run(state: State<'_, AppState>) -> AppResult<CleanupPlan> {
+    build_cleanup_plan(&state.pool).await
+}
+
+async fn build_cleanup_plan(pool: &sqlx::SqlitePool) -> AppResult<CleanupPlan> {
+    // Fetch all source_copies that have a verified_sha256 and a local path,
+    // joined with source kind and size from photos.
+    #[derive(sqlx::FromRow)]
+    struct CopyRow {
+        copy_id: i64,
+        photo_id: i64,
+        source_id: i64,
+        source_name: String,
+        source_kind: String,
+        path: Option<String>,
+        verified_sha256: Option<String>,
+        size_bytes: Option<i64>,
+    }
+
+    let rows: Vec<CopyRow> = sqlx::query_as::<_, CopyRow>(
+        "SELECT sc.id AS copy_id, sc.photo_id, sc.source_id,
+                s.name AS source_name, s.kind AS source_kind,
+                sc.path, sc.verified_sha256, p.size_bytes
+         FROM source_copies sc
+         JOIN sources s ON s.id = sc.source_id
+         JOIN photos p  ON p.id = sc.photo_id
+         WHERE sc.verified_sha256 IS NOT NULL
+           AND sc.path IS NOT NULL
+           AND sc.last_seen_at IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Group by source.
+    let mut by_source: std::collections::BTreeMap<i64, SourceCleanupItem> =
+        std::collections::BTreeMap::new();
+
+    for row in rows {
+        let sha = match row.verified_sha256 {
+            Some(s) => s,
+            None => continue,
+        };
+        let path = match row.path {
+            Some(p) => p,
+            None => continue,
+        };
+        let size = row.size_bytes.unwrap_or(0) as u64;
+
+        let entry = by_source
+            .entry(row.source_id)
+            .or_insert_with(|| SourceCleanupItem {
+                source_id: row.source_id,
+                source_name: row.source_name.clone(),
+                source_kind: row.source_kind.clone(),
+                reclaimable_bytes: 0,
+                file_count: 0,
+                items: Vec::new(),
+            });
+
+        entry.reclaimable_bytes += size;
+        entry.file_count += 1;
+        entry.items.push(CleanupItem {
+            copy_id: row.copy_id,
+            photo_id: row.photo_id,
+            source_id: row.source_id,
+            source_kind: row.source_kind,
+            path: Some(path),
+            verified_sha256: sha,
+            size_bytes: row.size_bytes.unwrap_or(0),
+        });
+    }
+
+    let sources: Vec<SourceCleanupItem> = by_source.into_values().collect();
+    let total_reclaimable_bytes: u64 = sources.iter().map(|s| s.reclaimable_bytes).sum();
+    let total_file_count: usize = sources.iter().map(|s| s.file_count).sum();
+
+    let plan_id = uuid::Uuid::new_v4().to_string();
+    let confirm_token = uuid::Uuid::new_v4().to_string();
+
+    let plan = CleanupPlan {
+        plan_id: plan_id.clone(),
+        confirm_token,
+        total_reclaimable_bytes,
+        total_file_count,
+        sources,
+    };
+
+    // Store plan for later validation in cleanup_execute.
+    let mut guard = PENDING_PLANS
+        .lock()
+        .map_err(|_| AppError::Internal("plan store lock poisoned".into()))?;
+    guard.insert(plan_id, plan.clone());
+
+    // Re-serialize via clone — CleanupPlan derives Clone.
+    Ok(plan)
+}
+
+/// Execute a previously issued cleanup plan.
+///
+/// Safety gates (in order):
+///  1. confirm_token must match the stored plan.
+///  2. Source kind must be local/external/nas/sd (cloud = stub error).
+///  3. Drive must have ≥ 2× freed bytes free after deletion (per source root).
+///  4. SHA256 is re-verified just before deletion.
+#[tauri::command]
+pub async fn cleanup_execute(
+    plan_id: String,
+    confirm_token: String,
+    state: State<'_, AppState>,
+) -> AppResult<CleanupExecuteResult> {
+    execute_cleanup_plan(plan_id, confirm_token, &state.pool).await
+}
+
+async fn execute_cleanup_plan(
+    plan_id: String,
+    confirm_token: String,
+    pool: &sqlx::SqlitePool,
+) -> AppResult<CleanupExecuteResult> {
+    // ── Gate 1: confirm token ────────────────────────────────────────────────
+    let plan = {
+        let mut guard = PENDING_PLANS
+            .lock()
+            .map_err(|_| AppError::Internal("plan store lock poisoned".into()))?;
+        // Remove — plans are single-use.
+        guard
+            .remove(&plan_id)
+            .ok_or_else(|| AppError::NotFound(format!("cleanup plan not found: {plan_id}")))?
+    };
+
+    if plan.confirm_token != confirm_token {
+        return Err(AppError::PermissionDenied(
+            "confirm_token does not match the issued plan".into(),
+        ));
+    }
+
+    let mut deleted_count: usize = 0;
+    let mut freed_bytes: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+
+    for source in &plan.sources {
+        // ── Gate 2: local-only sources ───────────────────────────────────────
+        let local_kinds = ["local", "external", "nas", "sd"];
+        if !local_kinds.contains(&source.source_kind.as_str()) {
+            errors.push(format!(
+                "source {} (kind={}) not yet implemented for source-side deletion",
+                source.source_id, source.source_kind
+            ));
+            continue;
+        }
+
+        // ── Gate 3: free-space check ─────────────────────────────────────────
+        // Use the path of the first item as the representative volume.
+        let representative_path = source
+            .items
+            .iter()
+            .find_map(|item| item.path.as_deref().map(std::path::Path::new))
+            .and_then(|p| p.parent());
+
+        let space_ok = if let Some(root) = representative_path {
+            match free_bytes_for_path(root) {
+                Ok(free) => {
+                    // After deleting source.reclaimable_bytes the drive must
+                    // still have ≥ 2× that amount free.
+                    let required = source.reclaimable_bytes.saturating_mul(2);
+                    let remaining = free.saturating_sub(source.reclaimable_bytes);
+                    if remaining < required {
+                        errors.push(format!(
+                            "source {} ({}): insufficient free space — need ≥{}B post-deletion, \
+                             have {}B free",
+                            source.source_id, source.source_kind, required, free
+                        ));
+                        false
+                    } else {
+                        true
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "source {} ({}): could not check free space: {}",
+                        source.source_id, source.source_kind, e
+                    ));
+                    false
+                }
+            }
+        } else {
+            errors.push(format!(
+                "source {} ({}): no valid path to check free space",
+                source.source_id, source.source_kind
+            ));
+            false
+        };
+
+        if !space_ok {
+            continue;
+        }
+
+        // ── Per-file deletion ─────────────────────────────────────────────────
+        for item in &source.items {
+            let path_str = match &item.path {
+                Some(p) => p.clone(),
+                None => {
+                    errors.push(format!(
+                        "photo {}: no local path recorded, skipping",
+                        item.photo_id
+                    ));
+                    continue;
+                }
+            };
+
+            let path = PathBuf::from(&path_str);
+
+            // ── Gate 4: SHA256 re-verify ──────────────────────────────────────
+            let actual_sha = match import::sha256_file(&path) {
+                Ok(h) => h,
+                Err(e) => {
+                    errors.push(format!(
+                        "photo {}: could not hash {}: {}",
+                        item.photo_id,
+                        path.display(),
+                        e
+                    ));
+                    continue;
+                }
+            };
+
+            if actual_sha != item.verified_sha256 {
+                errors.push(format!(
+                    "photo {}: SHA256 mismatch on {} — expected {} got {} — skipping",
+                    item.photo_id,
+                    path.display(),
+                    item.verified_sha256,
+                    actual_sha
+                ));
+                continue;
+            }
+
+            // All gates passed — delete the file.
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    let file_size = item.size_bytes as u64;
+                    deleted_count += 1;
+                    freed_bytes += file_size;
+
+                    let now = chrono::Utc::now().to_rfc3339();
+
+                    // Audit log.
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO source_deletions \
+                         (photo_id, source_id, source_kind, deleted_at, pre_sha256, \
+                          pre_size_bytes, confirm_token, dry_run) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+                    )
+                    .bind(item.photo_id)
+                    .bind(item.source_id)
+                    .bind(&item.source_kind)
+                    .bind(&now)
+                    .bind(&item.verified_sha256)
+                    .bind(item.size_bytes)
+                    .bind(&confirm_token)
+                    .execute(pool)
+                    .await
+                    {
+                        // Non-fatal: file is already deleted; log and continue.
+                        tracing::warn!(
+                            error = %e,
+                            photo_id = item.photo_id,
+                            "failed to insert source_deletions audit row"
+                        );
+                        errors.push(format!(
+                            "photo {}: deletion succeeded but audit log failed: {}",
+                            item.photo_id, e
+                        ));
+                    }
+
+                    // Soft-delete: set last_seen_at = NULL on the copy row.
+                    // We prefer keeping the row (soft delete) so the audit trail
+                    // remains and the photo still appears in the catalog.
+                    if let Err(e) =
+                        sqlx::query("UPDATE source_copies SET last_seen_at = NULL WHERE id = ?1")
+                            .bind(item.copy_id)
+                            .execute(pool)
+                            .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            copy_id = item.copy_id,
+                            "failed to soft-delete source_copies row"
+                        );
+                        errors.push(format!(
+                            "photo {}: source_copies soft-delete failed: {}",
+                            item.photo_id, e
+                        ));
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "photo {}: failed to remove {}: {}",
+                        item.photo_id,
+                        path.display(),
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(CleanupExecuteResult {
+        deleted_count,
+        freed_bytes,
+        errors,
+    })
+}
+
+// ── Lift & Shift commands ─────────────────────────────────────────────────────
+//
+// SAFETY INVARIANTS (mirrors source-side cleanup):
+//  1. Two-step: dry-run issues a signed confirm_token; execute rejects anything
+//     that doesn't match.
+//  2. SHA256 pre-verify: source file re-hashed before copy; mismatch → skip.
+//  3. SHA256 post-verify: destination re-hashed after copy; mismatch → remove
+//     dest + append to errors.
+//  4. ≥ 1.5× free-space gate: reported in `LiftPlan.free_space_ok`.
+//  5. Lift does NOT delete source copies — that is source-side cleanup's job.
+//
+// See docs/prds/phase-1.md §11 and CLAUDE.md § Security/privacy for rationale.
+
+/// Compute a lift-and-shift plan for all source photos not already under
+/// `target_root`.  Returns a `LiftPlan` with a one-time `confirm_token` that
+/// must be supplied to `lift_shift_execute` to proceed.
+///
+/// This is a dry-run: no files are moved or created.
+#[tauri::command]
+pub async fn lift_shift_dry_run(
+    state: State<'_, AppState>,
+    target_root: String,
+) -> AppResult<crate::lift_and_shift::LiftPlan> {
+    let target = std::path::PathBuf::from(target_root);
+    crate::lift_and_shift::plan_lift(&state.pool, target).await
+}
+
+/// Execute a previously issued lift plan.
+///
+/// `plan_id` + `confirm_token` must match the values returned by
+/// `lift_shift_dry_run`.  Plans are single-use.
+#[tauri::command]
+pub async fn lift_shift_execute(
+    state: State<'_, AppState>,
+    plan_id: String,
+    confirm_token: String,
+) -> AppResult<crate::lift_and_shift::LiftReceipt> {
+    crate::lift_and_shift::execute_lift(&state.pool, &plan_id, &confirm_token).await
+}
 
 /// Smoke command used by the frontend at boot to verify the IPC bridge.
 #[tauri::command]
@@ -231,6 +717,26 @@ pub async fn create_source(
     Ok(row)
 }
 
+/// Remove a source and all its associated source_copies and import records.
+/// Photos themselves are NOT deleted — only the source-side linkage.
+#[tauri::command]
+pub async fn delete_source(state: State<'_, AppState>, source_id: i64) -> AppResult<()> {
+    sqlx::query("DELETE FROM imports WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM source_copies WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM sources WHERE id = ?1")
+        .bind(source_id)
+        .execute(&state.pool)
+        .await?;
+    tracing::info!(source_id, "source deleted");
+    Ok(())
+}
+
 // ── Catalog read commands ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -256,7 +762,13 @@ pub async fn list_albums(state: State<'_, AppState>) -> AppResult<Vec<AlbumRow>>
     Ok(rows)
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+// ── Natural-language search ───────────────────────────────────────────────
+
+/// A photo row returned by search and the catalog grid.
+///
+/// Field names mirror the `photos` table columns that the frontend grid
+/// already understands. Optional Phase 1 columns are included when populated.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PhotoRow {
     pub id: i64,
     pub sha256: String,
@@ -264,6 +776,7 @@ pub struct PhotoRow {
     pub width: i64,
     pub height: i64,
     pub captured_at: Option<String>,
+    pub imported_at: String,
     pub is_raw: bool,
     pub size_bytes: Option<i64>,
     pub camera_make: Option<String>,
@@ -274,6 +787,7 @@ pub struct PhotoRow {
     pub focal_mm: Option<f64>,
     pub aesthetic_score: Option<f64>,
     pub paired_photo_id: Option<i64>,
+    pub raw_format: Option<String>,
 }
 
 /// List photos ordered by imported_at desc, with optional pagination and album filter.
@@ -316,9 +830,9 @@ pub async fn list_photos(
     };
 
     let sql = format!(
-        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-         paired_photo_id \
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+         size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+         aesthetic_score, paired_photo_id, raw_format \
          FROM photos {where_clause} ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2"
     );
     let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -392,123 +906,6 @@ pub async fn list_sources(state: State<'_, AppState>) -> AppResult<Vec<SourceRow
     .fetch_all(&state.pool)
     .await?;
     Ok(rows)
-}
-
-// ── Source-side cleanup commands ─────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct SourceCleanupItem {
-    pub source_copy_id: i64,
-    pub photo_id: i64,
-    pub source_id: i64,
-    pub path: String,
-    pub size_bytes: i64,
-    pub sha256: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CleanupPlan {
-    pub source_id: i64,
-    pub source_name: String,
-    pub reclaimable_bytes: i64,
-    pub item_count: i64,
-    pub items: Vec<SourceCleanupItem>,
-}
-
-/// Dry-run: returns, per source, the set of source copies that can be safely deleted.
-///
-/// Safety criteria (all must hold):
-/// 1. The source copy's `verified_sha256` matches the canonical `photos.sha256`.
-/// 2. The same photo has at least one **other** copy in a different source that is also
-///    SHA256-verified (so we're not deleting the only surviving copy).
-/// 3. The source copy has a non-null `path` (i.e. it's a local filesystem file we can
-///    actually delete).
-///
-/// If `source_id` is `Some`, only that source is evaluated.
-#[tauri::command]
-pub async fn cleanup_dry_run(
-    state: State<'_, AppState>,
-    source_id: Option<i64>,
-) -> AppResult<Vec<CleanupPlan>> {
-    let pool = &state.pool;
-
-    // Build the reclaimable items query.
-    // A copy is reclaimable when:
-    //   - sc.verified_sha256 IS NOT NULL AND sc.verified_sha256 = p.sha256
-    //   - sc.path IS NOT NULL
-    //   - There exists another source_copy for the same photo_id in a *different*
-    //     source with a verified sha256.
-    let items: Vec<(i64, i64, i64, String, i64, String, String)> = if let Some(sid) = source_id {
-        sqlx::query_as(
-            "SELECT sc.id, sc.photo_id, sc.source_id, sc.path, \
-             COALESCE(p.size_bytes, 0) AS size_bytes, p.sha256, s.name \
-             FROM source_copies sc \
-             JOIN photos p ON p.id = sc.photo_id \
-             JOIN sources s ON s.id = sc.source_id \
-             WHERE sc.source_id = ?1 \
-               AND sc.path IS NOT NULL \
-               AND sc.verified_sha256 IS NOT NULL \
-               AND sc.verified_sha256 = p.sha256 \
-               AND EXISTS ( \
-                 SELECT 1 FROM source_copies sc2 \
-                 WHERE sc2.photo_id = sc.photo_id \
-                   AND sc2.source_id != sc.source_id \
-                   AND sc2.verified_sha256 IS NOT NULL \
-                   AND sc2.verified_sha256 = p.sha256 \
-               ) \
-             ORDER BY sc.source_id, sc.id",
-        )
-        .bind(sid)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_as(
-            "SELECT sc.id, sc.photo_id, sc.source_id, sc.path, \
-             COALESCE(p.size_bytes, 0) AS size_bytes, p.sha256, s.name \
-             FROM source_copies sc \
-             JOIN photos p ON p.id = sc.photo_id \
-             JOIN sources s ON s.id = sc.source_id \
-             WHERE sc.path IS NOT NULL \
-               AND sc.verified_sha256 IS NOT NULL \
-               AND sc.verified_sha256 = p.sha256 \
-               AND EXISTS ( \
-                 SELECT 1 FROM source_copies sc2 \
-                 WHERE sc2.photo_id = sc.photo_id \
-                   AND sc2.source_id != sc.source_id \
-                   AND sc2.verified_sha256 IS NOT NULL \
-                   AND sc2.verified_sha256 = p.sha256 \
-               ) \
-             ORDER BY sc.source_id, sc.id",
-        )
-        .fetch_all(pool)
-        .await?
-    };
-
-    // Group items by source.
-    let mut plans: std::collections::HashMap<i64, CleanupPlan> = std::collections::HashMap::new();
-    for (sc_id, photo_id, sid, path, size_bytes, sha256, source_name) in items {
-        let plan = plans.entry(sid).or_insert_with(|| CleanupPlan {
-            source_id: sid,
-            source_name: source_name.clone(),
-            reclaimable_bytes: 0,
-            item_count: 0,
-            items: Vec::new(),
-        });
-        plan.reclaimable_bytes += size_bytes;
-        plan.item_count += 1;
-        plan.items.push(SourceCleanupItem {
-            source_copy_id: sc_id,
-            photo_id,
-            source_id: sid,
-            path,
-            size_bytes,
-            sha256,
-        });
-    }
-
-    let mut result: Vec<CleanupPlan> = plans.into_values().collect();
-    result.sort_by_key(|p| p.source_id);
-    Ok(result)
 }
 
 // ── Source connector commands ─────────────────────────────────────────────
@@ -594,9 +991,9 @@ pub async fn on_this_day(
     // captured_at is stored as RFC3339 which starts with YYYY-MM-DDTHH:MM:SS…
     let today_md = chrono::Utc::now().format("%m-%d").to_string();
     let rows = sqlx::query_as::<_, PhotoRow>(
-        "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-         camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-         paired_photo_id \
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+         size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+         aesthetic_score, paired_photo_id, raw_format \
          FROM photos \
          WHERE captured_at IS NOT NULL \
            AND strftime('%m-%d', captured_at) = ?1 \
@@ -611,6 +1008,104 @@ pub async fn on_this_day(
     Ok(rows)
 }
 
+// ── AI inference commands ─────────────────────────────────────────────────
+
+/// Detect the hardware tier (CPU / GpuLow / GpuHigh) and available VRAM.
+/// Called once at startup so the frontend can show the correct model badge.
+#[tauri::command]
+pub fn detect_hardware() -> crate::ai::budget::HardwareInfo {
+    crate::ai::budget::detect()
+}
+
+/// Embed a single image using SigLIP-B/16.
+/// Returns 768 f32 values. Errors when the model file is not yet downloaded.
+#[tauri::command]
+pub fn embed_image(path: String) -> AppResult<Vec<f32>> {
+    let model_path = crate::util::paths::models_dir()?.join("siglip-b16-image.onnx");
+    let session = crate::ai::siglip::get_or_load(&model_path)?;
+    session.embed_image(std::path::Path::new(&path))
+}
+
+/// Score a single image for aesthetic quality (1.0–10.0).
+/// Errors when the model file is not yet downloaded.
+#[tauri::command]
+pub fn score_aesthetic(path: String) -> AppResult<f32> {
+    let model_path = crate::util::paths::models_dir()?.join("nima.onnx");
+    let session = crate::ai::aesthetic::get_or_load(&model_path)?;
+    session.score(std::path::Path::new(&path))
+}
+
+/// Download one or more AI models to the local models directory.
+///
+/// `names` is an optional filter — if omitted all known models are downloaded.
+/// Progress is emitted as `"chronimage://download-progress"` events.
+/// Returns the list of model names that were successfully installed.
+#[tauri::command]
+pub async fn download_models<R: tauri::Runtime>(
+    names: Option<Vec<String>>,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<String>> {
+    use crate::ai::download::{user_initiated_download_model, DownloadProgress, KNOWN_MODELS};
+    use tauri::Emitter;
+
+    let models_dir = crate::util::paths::models_dir()?;
+    let specs: Vec<_> = KNOWN_MODELS
+        .iter()
+        .filter(|m| {
+            names
+                .as_ref()
+                .map(|n| n.iter().any(|req| req == m.name))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let mut installed: Vec<String> = Vec::new();
+
+    for spec in specs {
+        let handle = app_handle.clone();
+        let name = spec.name.to_string();
+        let result =
+            user_initiated_download_model(spec, &models_dir, move |p: DownloadProgress| {
+                let _ = handle.emit("chronimage://download-progress", &p);
+            })
+            .await;
+
+        match result {
+            Ok(path) => {
+                // Upsert the model row so the catalog reflects the installation.
+                let now_ts = chrono::Utc::now().to_rfc3339();
+                let path_str = path.to_string_lossy().to_string();
+                let _ = sqlx::query(
+                    "INSERT INTO models (name, kind, version, sha256, installed_path, installed_at, size_bytes) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     ON CONFLICT(name) DO UPDATE SET \
+                       installed_path = excluded.installed_path, \
+                       installed_at   = excluded.installed_at, \
+                       size_bytes     = excluded.size_bytes",
+                )
+                .bind(&name)
+                .bind(spec.kind)
+                .bind(spec.version)
+                .bind(spec.sha256)
+                .bind(&path_str)
+                .bind(&now_ts)
+                .bind(spec.size_bytes as i64)
+                .execute(&state.pool)
+                .await;
+
+                tracing::info!(model = %name, path = %path_str, "model installed");
+                installed.push(name);
+            }
+            Err(e) => {
+                tracing::warn!(model = %name, error = %e, "model download failed");
+            }
+        }
+    }
+
+    Ok(installed)
+}
+
 /// Photos that have never been viewed or were last viewed more than two years ago,
 /// with an aesthetic_score >= `min_score` (default 0.0).
 /// Returns at most `limit` rows (default 20), ordered by aesthetic_score desc.
@@ -623,9 +1118,9 @@ pub async fn unseen_photos(
     let lim = limit.unwrap_or(20);
     let score = min_score.unwrap_or(0.0);
     let rows = sqlx::query_as::<_, PhotoRow>(
-        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
-         p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-         p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
+         p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
@@ -640,6 +1135,149 @@ pub async fn unseen_photos(
     .fetch_all(&state.pool)
     .await?;
     Ok(rows)
+}
+
+// ── Dedupe commands ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn find_duplicates(
+    state: State<'_, AppState>,
+    min_similarity: Option<f64>,
+) -> AppResult<Vec<DuplicateGroup>> {
+    let threshold = min_similarity.unwrap_or(0.90);
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(AppError::InvalidInput(format!(
+            "min_similarity must be between 0.0 and 1.0, got {threshold}"
+        )));
+    }
+    crate::dedupe::confirm::find_duplicate_groups(&state.pool, threshold).await
+}
+
+// ── Natural-language search ───────────────────────────────────────────────
+
+/// Encode `query` with the SigLIP text encoder and return the `limit`
+/// (default 50) most similar photos ordered by cosine similarity desc.
+///
+/// Uses the BLOB fallback path: reads `embedding` from `photo_embeddings`,
+/// L2-normalises, computes dot product with the query vector. This handles
+/// the case where `vec_rowid` is NULL (sqlite-vec unavailable or not yet
+/// populated).
+///
+/// Returns an empty vec — not an error — when:
+/// - No photos have stored embeddings yet.
+/// - The SigLIP model is absent (stub emits a zero-vector → all scores 0.0).
+#[tauri::command]
+pub async fn search_photos(
+    query: String,
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PhotoRow>> {
+    let max_results = limit.unwrap_or(50).clamp(1, 1000);
+
+    // 1. Encode the query text into a 768-dim vector via the SigLIP stub.
+    //    Model path: `{data_local_dir}/app.chronimage.desktop/models/siglip_text.onnx`
+    //    We pass None for now — the stub will be used if the file is absent.
+    let models_dir = crate::util::paths::models_dir().ok();
+    let model_path = models_dir.as_deref().map(|d| d.join("siglip_text.onnx"));
+    let session = SigLipSession::load_or_stub(model_path.as_deref());
+
+    let mut query_vec = session.embed_text(&query)?;
+
+    // 2. L2-normalise. If the model is absent this stays a zero-vector and
+    //    all dot products will be 0.0 — effectively returning no results.
+    l2_normalise(&mut query_vec);
+
+    // If the query vector is all-zero (stub) there's nothing meaningful to
+    // rank; return empty rather than an arbitrary ordering.
+    let is_zero = query_vec.iter().all(|x| *x == 0.0);
+    if is_zero {
+        tracing::debug!(
+            query = %query,
+            "search_photos: SigLIP stub returned zero vector — no results"
+        );
+        return Ok(Vec::new());
+    }
+
+    // 3. Fetch all photo_id + embedding BLOBs (BLOB fallback path).
+    //    We only pull rows that have a non-null embedding BLOB.
+    let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT photo_id, embedding FROM photo_embeddings \
+         WHERE embedding IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 4. Decode each BLOB (768 × f32 LE), L2-normalise, compute dot product.
+    let expected_bytes = crate::ai::EMBED_DIM * std::mem::size_of::<f32>();
+    let mut scored: Vec<(i64, f32)> = rows
+        .into_iter()
+        .filter_map(|(photo_id, blob)| {
+            if blob.len() != expected_bytes {
+                tracing::warn!(
+                    photo_id,
+                    blob_len = blob.len(),
+                    expected = expected_bytes,
+                    "photo_embeddings BLOB has wrong length — skipping"
+                );
+                return None;
+            }
+            let mut emb: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            l2_normalise(&mut emb);
+            let score = dot_product(&query_vec, &emb);
+            Some((photo_id, score))
+        })
+        .collect();
+
+    // 5. Sort by score descending, take top N.
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(max_results as usize);
+
+    if scored.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 6. Fetch full PhotoRow data for the ranked photo IDs.
+    //    We preserve the score order by fetching all and re-sorting.
+    let photo_ids: Vec<i64> = scored.iter().map(|(id, _)| *id).collect();
+
+    // Build a parameterised IN clause. sqlx doesn't support dynamic IN with
+    // query_as!, so we fall back to the dynamic form.
+    let placeholders: String = photo_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
+         is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format \
+         FROM photos WHERE id IN ({placeholders})"
+    );
+
+    let mut q = sqlx::query_as::<_, PhotoRow>(&sql);
+    for id in &photo_ids {
+        q = q.bind(id);
+    }
+    let mut photos: Vec<PhotoRow> = q.fetch_all(&state.pool).await?;
+
+    // Re-sort to match the score ordering from step 5.
+    let order: std::collections::HashMap<i64, usize> = photo_ids
+        .iter()
+        .enumerate()
+        .map(|(rank, &id)| (id, rank))
+        .collect();
+    photos.sort_by_key(|p| order.get(&p.id).copied().unwrap_or(usize::MAX));
+
+    Ok(photos)
 }
 
 #[cfg(test)]
@@ -800,9 +1438,10 @@ mod tests {
     async fn list_photos_returns_empty_on_fresh_catalog() {
         let (_tmp, pool) = make_pool().await;
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format \
+             FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
         )
         .fetch_all(&pool)
         .await
@@ -828,9 +1467,10 @@ mod tests {
         }
 
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format \
+             FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
         )
         .fetch_all(&pool)
         .await
@@ -882,9 +1522,10 @@ mod tests {
         let rule = crate::catalog::rules::parse_rule(rule_json).unwrap();
         let frag = crate::catalog::rules::rule_to_sql(&rule).unwrap();
         let sql = format!(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format \
+             FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
         );
         let rows = sqlx::query_as::<_, PhotoRow>(&sql)
             .fetch_all(&pool)
@@ -1171,9 +1812,9 @@ mod tests {
     async fn on_this_day_returns_empty_when_no_photos() {
         let (_tmp, pool) = make_pool().await;
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos \
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -1220,9 +1861,9 @@ mod tests {
 
         let today_md = chrono::Utc::now().format("%m-%d").to_string();
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT id, sha256, filename, width, height, captured_at, is_raw, size_bytes, \
-             camera_make, camera_model, aperture, shutter, iso, focal_mm, aesthetic_score, \
-             paired_photo_id FROM photos \
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = ?1 \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -1259,9 +1900,10 @@ mod tests {
         }
 
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
-             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
+             p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
+             p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
+             p.paired_photo_id, p.raw_format \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -1301,9 +1943,10 @@ mod tests {
         .expect("view");
 
         let rows = sqlx::query_as::<_, PhotoRow>(
-            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.is_raw, \
-             p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-             p.focal_mm, p.aesthetic_score, p.paired_photo_id \
+            "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
+             p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
+             p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
+             p.paired_photo_id, p.raw_format \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -1368,5 +2011,128 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].photo_count, 3);
+    }
+
+    // ── cleanup_execute unit tests ────────────────────────────────────────────
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    #[tokio::test]
+    async fn cleanup_execute_wrong_token_returns_permission_denied() {
+        let pool = test_pool().await;
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let real_token = uuid::Uuid::new_v4().to_string();
+        let plan = CleanupPlan {
+            plan_id: plan_id.clone(),
+            confirm_token: real_token.clone(),
+            total_reclaimable_bytes: 0,
+            total_file_count: 0,
+            sources: vec![],
+        };
+        {
+            let mut guard = PENDING_PLANS.lock().unwrap();
+            guard.insert(plan_id.clone(), plan);
+        }
+        let wrong_token = uuid::Uuid::new_v4().to_string();
+        let err = execute_cleanup_plan(plan_id.clone(), wrong_token, &pool)
+            .await
+            .expect_err("should fail");
+        assert!(
+            matches!(err, AppError::PermissionDenied(_)),
+            "expected PermissionDenied, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_execute_sha256_mismatch_skips_file_adds_to_errors() {
+        let pool = test_pool().await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let file_path = tmp.path().join("photo.jpg");
+        std::fs::write(&file_path, b"real content").unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let source_id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES ('test', 'local', 'idle', '{}', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert source");
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, size_bytes) \
+             VALUES ('aabbcc', 'photo.jpg', 100, 100, ?1, 12) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert photo");
+
+        let copy_id: i64 = sqlx::query_scalar(
+            "INSERT INTO source_copies (photo_id, source_id, path, verified_sha256, last_seen_at) \
+             VALUES (?1, ?2, ?3, 'aabbcc', ?4) RETURNING id",
+        )
+        .bind(photo_id)
+        .bind(source_id)
+        .bind(file_path.to_str().unwrap())
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert copy");
+
+        let wrong_hash = "deadbeef".repeat(8);
+        let item = CleanupItem {
+            copy_id,
+            photo_id,
+            source_id,
+            source_kind: "local".into(),
+            path: Some(file_path.to_str().unwrap().into()),
+            verified_sha256: wrong_hash,
+            size_bytes: 12,
+        };
+        let plan_id = uuid::Uuid::new_v4().to_string();
+        let confirm_token = uuid::Uuid::new_v4().to_string();
+        let plan = CleanupPlan {
+            plan_id: plan_id.clone(),
+            confirm_token: confirm_token.clone(),
+            total_reclaimable_bytes: 12,
+            total_file_count: 1,
+            sources: vec![SourceCleanupItem {
+                source_id,
+                source_name: "test".into(),
+                source_kind: "local".into(),
+                reclaimable_bytes: 12,
+                file_count: 1,
+                items: vec![item],
+            }],
+        };
+        {
+            let mut guard = PENDING_PLANS.lock().unwrap();
+            guard.insert(plan_id.clone(), plan);
+        }
+
+        let result = execute_cleanup_plan(plan_id, confirm_token, &pool)
+            .await
+            .expect("execute should not return Err");
+
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(result.freed_bytes, 0);
+        assert!(
+            result.errors.iter().any(|e| e.contains("SHA256 mismatch")),
+            "expected SHA256 mismatch error, got: {:?}",
+            result.errors
+        );
+        assert!(file_path.exists(), "file should not have been deleted");
     }
 }

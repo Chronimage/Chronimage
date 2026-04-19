@@ -5,7 +5,10 @@ import {
   cleanupDryRun,
   createSource,
   currentChannel,
+  deleteSource,
+  detectHardware,
   detectIcloudPath,
+  embedImage,
   importDryRun,
   importGoogleTakeout,
   listAlbums,
@@ -16,6 +19,7 @@ import {
   onThisDay,
   ping,
   refreshSmartAlbums,
+  scoreAesthetic,
   startImport,
   unseenPhotos,
 } from './invoke';
@@ -120,15 +124,9 @@ describe('invoke wrappers', () => {
     expect(tauriInvoke).toHaveBeenCalledWith('unseen_photos', { limit: 15, minScore: 6.5 });
   });
 
-  it('cleanupDryRun calls cleanup_dry_run and returns array', async () => {
-    expect(Array.isArray(await cleanupDryRun())).toBe(true);
-    expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run', { sourceId: null });
-  });
-
-  it('cleanupDryRun forwards sourceId', async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
-    await cleanupDryRun(5);
-    expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run', { sourceId: 5 });
+  it('cleanupDryRun calls cleanup_dry_run with no args', async () => {
+    await cleanupDryRun();
+    expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run');
   });
 
   it('importDryRun calls import_dry_run and returns scan report', async () => {
@@ -153,6 +151,25 @@ describe('invoke wrappers', () => {
     expect(tauriInvoke).toHaveBeenCalledWith('detect_icloud_path');
   });
 
+  it('detectHardware calls detect_hardware and returns tier', async () => {
+    const info = await detectHardware();
+    expect(info.tier).toBe('CpuOnly');
+    expect(info.vram_mb).toBe(0);
+    expect(tauriInvoke).toHaveBeenCalledWith('detect_hardware');
+  });
+
+  it('embedImage calls embed_image and returns 768-dim array', async () => {
+    const vec = await embedImage('/photo.jpg');
+    expect(vec).toHaveLength(768);
+    expect(tauriInvoke).toHaveBeenCalledWith('embed_image', { path: '/photo.jpg' });
+  });
+
+  it('scoreAesthetic calls score_aesthetic and returns number', async () => {
+    const score = await scoreAesthetic('/photo.jpg');
+    expect(score).toBe(5.5);
+    expect(tauriInvoke).toHaveBeenCalledWith('score_aesthetic', { path: '/photo.jpg' });
+  });
+
   it('listIphoneDevices calls list_iphone_devices and returns array', async () => {
     expect(Array.isArray(await listIphoneDevices())).toBe(true);
     expect(tauriInvoke).toHaveBeenCalledWith('list_iphone_devices');
@@ -165,5 +182,11 @@ describe('invoke wrappers', () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await listImports(3);
     expect(tauriInvoke).toHaveBeenCalledWith('list_imports', { sourceId: 3 });
+  });
+
+  it('deleteSource calls delete_source with sourceId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await deleteSource(7);
+    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', { sourceId: 7 });
   });
 });

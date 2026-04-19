@@ -19,11 +19,44 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 fn install_tracing() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("chronimage=info,tauri=info,sqlx=warn"));
-    let _ = tracing_subscriber::registry()
+        .unwrap_or_else(|_| EnvFilter::new("chronimage=debug,tauri=info,sqlx=warn"));
+
+    let registry = tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer().with_target(false).compact())
-        .try_init();
+        .with(fmt::layer().with_target(false).compact());
+
+    // Ship logs to Loki when available (dev only). Silently skip if Loki is not running.
+    #[cfg(debug_assertions)]
+    {
+        let loki_url =
+            std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3101".to_string());
+        let builder_result = tracing_loki::builder()
+            .label("app", "chronimage")
+            .and_then(|b| b.label("env", "dev"))
+            .and_then(|b| b.extra_field("pid", std::process::id().to_string()))
+            .and_then(|b| {
+                b.build_url(
+                    tracing_loki::url::Url::parse(&format!("{loki_url}/loki/api/v1/push"))
+                        .expect("loki url"),
+                )
+            });
+        match builder_result {
+            Ok((loki_layer, task)) => {
+                tauri::async_runtime::spawn(task);
+                let _ = registry.with(loki_layer).try_init();
+                tracing::info!(loki_url, "loki log shipping enabled");
+            }
+            Err(e) => {
+                let _ = registry.try_init();
+                tracing::warn!(error = %e, "loki layer init failed, stdout only");
+            }
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = registry.try_init();
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -64,6 +97,7 @@ fn main() {
             commands::list_photos,
             commands::list_sources,
             commands::create_source,
+            commands::delete_source,
             commands::on_this_day,
             commands::unseen_photos,
             commands::cleanup_dry_run,
@@ -71,6 +105,15 @@ fn main() {
             commands::import_google_takeout,
             commands::detect_icloud_path,
             commands::list_iphone_devices,
+            commands::detect_hardware,
+            commands::embed_image,
+            commands::score_aesthetic,
+            commands::download_models,
+            commands::find_duplicates,
+            commands::search_photos,
+            commands::cleanup_execute,
+            commands::lift_shift_dry_run,
+            commands::lift_shift_execute,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

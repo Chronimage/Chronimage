@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1a1f2e"/>
+      <stop offset="100%" stop-color="#0f1219"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6fffd4"/>
+      <stop offset="100%" stop-color="#3dd6a8"/>
+    </linearGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#4eefc0" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#2cbf90" stop-opacity="0.7"/>
+    </linearGradient>
+    <clipPath id="circle-clip">
+      <circle cx="32" cy="32" r="28"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="32" fill="url(#bg)"/>
+
+  <!-- Outer ring -->
+  <circle cx="32" cy="32" r="27" stroke="url(#ring)" stroke-width="1.5" stroke-opacity="0.6"/>
+
+  <!-- Aperture blades (6-blade iris) -->
+  <g clip-path="url(#circle-clip)">
+    <!-- Each blade: a rounded rectangle rotated around center -->
+    <!-- Blade 1: 0° -->
+    <rect x="29" y="14" width="6" height="18" rx="3" fill="url(#blade)" transform="rotate(0 32 32)" opacity="0.85"/>
+    <!-- Blade 2: 60° -->
+    <rect x="29" y="14" width="6" height="18" rx="3" fill="url(#blade)" transform="rotate(60 32 32)" opacity="0.85"/>
+    <!-- Blade 3: 120° -->
+    <rect x="29" y="14" width="6" height="18" rx="3" fill="url(#blade)" transform="rotate(120 32 32)" opacity="0.85"/>
+    <!-- Blade 4: 180° -->
+    <rect x="29" y="14" width="6" height="18" rx="3" fill="url(#blade)" transform="rotate(180 32 32)" opacity="0.85"/>
+    <!-- Blade 5: 240° -->
+    <rect x="29" y="14" width="6" height="18" rx="3" fill="url(#blade)" transform="rotate(240 32 32)" opacity="0.85"/>
+    <!-- Blade 6: 300° -->
+    <rect x="29" y="14" width="6" height="18" rx="3" fill="url(#blade)" transform="rotate(300 32 32)" opacity="0.85"/>
+  </g>
+
+  <!-- Dark inner disc that creates the iris aperture hole effect -->
+  <circle cx="32" cy="32" r="10" fill="#0f1219"/>
+
+  <!-- Clock hands inside the aperture hole (time motif) -->
+  <!-- Hour hand pointing ~10 o'clock -->
+  <line x1="32" y1="32" x2="27.5" y2="26.5" stroke="#6fffd4" stroke-width="1.5" stroke-linecap="round" stroke-opacity="0.9"/>
+  <!-- Minute hand pointing ~2 o'clock -->
+  <line x1="32" y1="32" x2="37" y2="25" stroke="#6fffd4" stroke-width="1" stroke-linecap="round" stroke-opacity="0.7"/>
+  <!-- Center dot -->
+  <circle cx="32" cy="32" r="1.5" fill="#6fffd4"/>
+
+  <!-- Tick marks at 12, 3, 6, 9 on the inner disc edge -->
+  <line x1="32" y1="23" x2="32" y2="25" stroke="#6fffd4" stroke-width="1" stroke-linecap="round" stroke-opacity="0.5"/>
+  <line x1="41" y1="32" x2="39" y2="32" stroke="#6fffd4" stroke-width="1" stroke-linecap="round" stroke-opacity="0.5"/>
+  <line x1="32" y1="41" x2="32" y2="39" stroke="#6fffd4" stroke-width="1" stroke-linecap="round" stroke-opacity="0.5"/>
+  <line x1="23" y1="32" x2="25" y2="32" stroke="#6fffd4" stroke-width="1" stroke-linecap="round" stroke-opacity="0.5"/>
+</svg>

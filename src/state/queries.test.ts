@@ -85,10 +85,12 @@ describe('catalog query hooks', () => {
     expect(result.current.data).toEqual([]);
   });
 
-  it('useCleanupDryRun returns empty array from mock', async () => {
+  it('useCleanupDryRun mutation resolves with mock response', async () => {
     const { result } = renderHook(() => useCleanupDryRun(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync();
+    });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual([]);
   });
 
   it('useRefreshSmartAlbums mutation calls refresh_smart_albums', async () => {

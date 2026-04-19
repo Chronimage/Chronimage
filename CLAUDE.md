@@ -75,6 +75,24 @@ models/         gitignored — downloaded on first run
 - No commits to `main` or `develop` directly — PRs only.
 - Branches: `feature/xyz` off `develop`, `hotfix/xyz` off `main`.
 
+### CI minutes are costly — get it right the first push
+GitHub Actions minutes are metered; a failed CI run that burns 10+ minutes on Windows Rust builds is a real cost. **Before every `git push`, run the same gates CI runs locally** and only push when they're all green:
+
+```bash
+# Rust
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test   --manifest-path src-tauri/Cargo.toml --lib
+cargo deny   --manifest-path src-tauri/Cargo.toml check   # license / advisory gate
+
+# Frontend
+pnpm typecheck
+pnpm exec biome check .
+pnpm exec vitest run
+```
+
+Don't rely on the pre-commit / pre-push hook alone — it skips `cargo deny` and sometimes skips `cargo test`. A 5-minute local check saves 15+ minutes of CI pain and avoids the "push, fail, fix, push, fail" cycle. If a push does fail CI, investigate the root cause (read the failing log, not just the summary) before re-pushing.
+
 ### Security / privacy
 - **No network calls** from Rust without an explicit user-triggered flow (import from cloud source, auto-update check, opt-in telemetry). Searchable enforcement: reqwest/ureq usage must be gated behind a function whose name contains `user_initiated_`.
 - **No telemetry** in v1. Call sites exist (`telemetry::event(…)`) but no-op.

@@ -58,6 +58,10 @@ export interface AlbumRow {
   is_system: boolean;
 }
 
+/**
+ * A photo row as returned by catalog queries and `search_photos`.
+ * Field names mirror the `photos` SQLite table.
+ */
 export interface PhotoRow {
   id: number;
   sha256: string;
@@ -65,6 +69,7 @@ export interface PhotoRow {
   width: number;
   height: number;
   captured_at: string | null;
+  imported_at: string;
   is_raw: boolean;
   size_bytes: number | null;
   camera_make: string | null;
@@ -75,6 +80,7 @@ export interface PhotoRow {
   focal_mm: number | null;
   aesthetic_score: number | null;
   paired_photo_id: number | null;
+  raw_format: string | null;
 }
 
 export interface SourceRow {
@@ -120,6 +126,10 @@ export async function createSource(name: string, kind: string, rootPath?: string
   });
 }
 
+export async function deleteSource(sourceId: number): Promise<void> {
+  return tauriInvoke<void>('delete_source', { sourceId });
+}
+
 // ── Import commands ─────────────────────────────────────────────────────────
 
 export interface StartImportResponse {
@@ -144,29 +154,6 @@ export interface ImportSummary {
 
 export async function listImports(sourceId?: number): Promise<ImportSummary[]> {
   return tauriInvoke<ImportSummary[]>('list_imports', { sourceId: sourceId ?? null });
-}
-
-// ── Source-side cleanup ─────────────────────────────────────────────────────
-
-export interface SourceCleanupItem {
-  source_copy_id: number;
-  photo_id: number;
-  source_id: number;
-  path: string;
-  size_bytes: number;
-  sha256: string;
-}
-
-export interface CleanupPlan {
-  source_id: number;
-  source_name: string;
-  reclaimable_bytes: number;
-  item_count: number;
-  items: SourceCleanupItem[];
-}
-
-export async function cleanupDryRun(sourceId?: number): Promise<CleanupPlan[]> {
-  return tauriInvoke<CleanupPlan[]>('cleanup_dry_run', { sourceId: sourceId ?? null });
 }
 
 // ── Rediscovery commands ────────────────────────────────────────────────────
@@ -206,6 +193,51 @@ export async function listIphoneDevices(): Promise<UsbDevice[]> {
   return tauriInvoke<UsbDevice[]>('list_iphone_devices');
 }
 
+// ── AI commands ────────────────────────────────────────────────────────────
+
+export type HardwareTier = 'CpuOnly' | 'GpuLow' | 'GpuHigh';
+
+export interface HardwareInfo {
+  tier: HardwareTier;
+  vram_mb: number;
+  adapter_name: string;
+}
+
+/** Detect GPU tier + VRAM (Windows DXGI; stub on other platforms). */
+export async function detectHardware(): Promise<HardwareInfo> {
+  return tauriInvoke<HardwareInfo>('detect_hardware');
+}
+
+/** Embed an image via SigLIP-B/16. Returns 768-dim f32 array. Errors if model not downloaded. */
+export async function embedImage(path: string): Promise<number[]> {
+  return tauriInvoke<number[]>('embed_image', { path });
+}
+
+/** Score a photo 0–10 for aesthetic quality via NIMA. Errors if model not downloaded. */
+export async function scoreAesthetic(path: string): Promise<number> {
+  return tauriInvoke<number>('score_aesthetic', { path });
+}
+
+/** Download AI models to the local models directory.
+ *  Pass `names` to download a subset; omit for all known models.
+ *  Progress is emitted as `DOWNLOAD_PROGRESS_EVENT` Tauri events.
+ *  Returns the names of successfully installed models. */
+export async function downloadModels(names?: string[]): Promise<string[]> {
+  return tauriInvoke<string[]>('download_models', { names: names ?? null });
+}
+
+// ── Download progress event ─────────────────────────────────────────────────
+
+export interface DownloadProgressEvent {
+  model_name: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  done: boolean;
+  already_installed: boolean;
+}
+
+export const DOWNLOAD_PROGRESS_EVENT = 'chronimage://download-progress';
+
 // ── Import progress event ───────────────────────────────────────────────────
 
 export interface ImportProgressEvent {
@@ -218,3 +250,78 @@ export interface ImportProgressEvent {
 }
 
 export const IMPORT_PROGRESS_EVENT = 'chronimage://import-progress';
+
+// ── Dedupe ─────────────────────────────────────────────────────────────────
+
+export type DupeKind = 'Exact' | 'Near';
+
+export interface DuplicateGroup {
+  photo_ids: number[];
+  max_similarity: number;
+  kind: DupeKind;
+}
+
+export async function findDuplicates(minSimilarity?: number): Promise<DuplicateGroup[]> {
+  return tauriInvoke<DuplicateGroup[]>('find_duplicates', {
+    min_similarity: minSimilarity ?? null,
+  });
+}
+
+// ── Natural-language search ─────────────────────────────────────────────────
+
+/**
+ * Encode `query` with the on-device SigLIP text encoder and return up to
+ * `limit` (default 50) photos ordered by cosine similarity desc.
+ *
+ * Returns an empty array — not an error — when the model is absent or no
+ * embeddings have been computed yet.
+ */
+export async function searchPhotos(query: string, limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('search_photos', { query, limit: limit ?? null });
+}
+
+// ── Source-side cleanup ────────────────────────────────────────────────────
+
+export interface CleanupItem {
+  copy_id: number;
+  photo_id: number;
+  source_id: number;
+  source_kind: string;
+  path: string | null;
+  verified_sha256: string;
+  size_bytes: number;
+}
+
+export interface SourceCleanupItem {
+  source_id: number;
+  source_name: string;
+  source_kind: string;
+  reclaimable_bytes: number;
+  file_count: number;
+  items: CleanupItem[];
+}
+
+export interface CleanupPlan {
+  plan_id: string;
+  confirm_token: string;
+  total_reclaimable_bytes: number;
+  total_file_count: number;
+  sources: SourceCleanupItem[];
+}
+
+export async function cleanupDryRun(): Promise<CleanupPlan> {
+  return tauriInvoke<CleanupPlan>('cleanup_dry_run');
+}
+
+export interface CleanupExecuteResult {
+  deleted_count: number;
+  freed_bytes: number;
+  errors: string[];
+}
+
+export async function cleanupExecute(planId: string, confirmToken: string): Promise<CleanupExecuteResult> {
+  return tauriInvoke<CleanupExecuteResult>('cleanup_execute', {
+    planId,
+    confirmToken,
+  });
+}

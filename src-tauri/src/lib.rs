@@ -9,11 +9,14 @@
 // equivalent lints fire inside test modules too, where those calls are fine.
 #![allow(clippy::module_inception)]
 
+pub mod ai;
 pub mod catalog;
 pub mod commands;
+pub mod dedupe;
 pub mod entitlements;
 pub mod error;
 pub mod import;
+pub mod lift_and_shift;
 pub mod state;
 pub mod telemetry;
 pub mod util;

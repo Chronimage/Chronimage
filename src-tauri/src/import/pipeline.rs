@@ -201,6 +201,61 @@ async fn execute_pipeline(
                 .execute(&pool)
                 .await?;
                 imported.fetch_add(1, Ordering::Relaxed);
+
+                // Stage 2.5: extract EXIF + pHash for this photo.
+                let meta_path = path.clone();
+                let (exif, phash) = match tokio::task::spawn_blocking(move || {
+                    let exif = crate::import::exif::read(&meta_path);
+                    let phash = crate::dedupe::phash::compute(&meta_path);
+                    (exif, phash)
+                })
+                .await
+                {
+                    Ok(data) => data,
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %path_str, "metadata task join error");
+                        (crate::import::exif::ExifData::default(), None)
+                    }
+                };
+
+                if let Err(e) = sqlx::query(
+                    "UPDATE photos SET \
+                     width            = COALESCE(?1,  width), \
+                     height           = COALESCE(?2,  height), \
+                     captured_at      = COALESCE(?3,  captured_at), \
+                     captured_at_local= COALESCE(?4,  captured_at_local), \
+                     camera_make      = COALESCE(?5,  camera_make), \
+                     camera_model     = COALESCE(?6,  camera_model), \
+                     lens_model       = COALESCE(?7,  lens_model), \
+                     aperture         = COALESCE(?8,  aperture), \
+                     shutter          = COALESCE(?9,  shutter), \
+                     iso              = COALESCE(?10, iso), \
+                     focal_mm         = COALESCE(?11, focal_mm), \
+                     gps_lat          = COALESCE(?12, gps_lat), \
+                     gps_lng          = COALESCE(?13, gps_lng), \
+                     phash            = COALESCE(?14, phash) \
+                     WHERE id = ?15",
+                )
+                .bind(exif.width.map(|v| v as i64))
+                .bind(exif.height.map(|v| v as i64))
+                .bind(&exif.captured_at)
+                .bind(&exif.captured_at_local)
+                .bind(&exif.camera_make)
+                .bind(&exif.camera_model)
+                .bind(&exif.lens_model)
+                .bind(exif.aperture)
+                .bind(&exif.shutter)
+                .bind(exif.iso.map(|v| v as i64))
+                .bind(exif.focal_mm)
+                .bind(exif.gps_lat)
+                .bind(exif.gps_lng)
+                .bind(&phash)
+                .bind(photo_id)
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(error = %e, photo_id, "metadata UPDATE failed");
+                }
             } else {
                 skipped.fetch_add(1, Ordering::Relaxed);
             }
@@ -227,17 +282,23 @@ async fn execute_pipeline(
                 eta_seconds: eta,
             });
 
-            Ok::<(PathBuf, String, i64), AppError>((path, hash, photo_id))
+            Ok::<(PathBuf, String, i64, bool), AppError>((path, hash, photo_id, rows_affected > 0))
         });
 
         handles.push(handle);
     }
 
-    // Collect results.
+    // Collect results; track newly-inserted photos for the AI stage.
     let mut path_hash_id: Vec<(PathBuf, String, i64)> = Vec::new();
+    let mut new_photos: Vec<(PathBuf, i64)> = Vec::new();
     for h in handles {
         match h.await {
-            Ok(Ok(triple)) => path_hash_id.push(triple),
+            Ok(Ok((path, hash, photo_id, was_inserted))) => {
+                if was_inserted {
+                    new_photos.push((path.clone(), photo_id));
+                }
+                path_hash_id.push((path, hash, photo_id));
+            }
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "pipeline: file processing error");
                 errors.fetch_add(1, Ordering::Relaxed);
@@ -276,6 +337,84 @@ async fn execute_pipeline(
                 .await
             {
                 tracing::warn!(error = %e, "pipeline: pair link update failed");
+            }
+        }
+    }
+
+    // ── Stage 4: AI enrichment (NIMA + SigLIP, model-optional) ─────────────
+    if !new_photos.is_empty() {
+        if let Ok(models_dir) = crate::util::paths::models_dir() {
+            let nima_session =
+                crate::ai::aesthetic::get_or_load(&models_dir.join("nima.onnx")).ok();
+            let siglip_session =
+                crate::ai::siglip::get_or_load(&models_dir.join("siglip-b16-image.onnx")).ok();
+
+            if nima_session.is_some() || siglip_session.is_some() {
+                // Obtain the model row id for embeddings (created lazily).
+                let siglip_model_id = if siglip_session.is_some() {
+                    crate::catalog::ensure_model_row(&pool, "siglip-b16-image", "embedding").await
+                } else {
+                    None
+                };
+
+                for (path, photo_id) in &new_photos {
+                    // NIMA aesthetic score → photos.aesthetic_score
+                    if let Some(nima) = nima_session {
+                        let p = path.clone();
+                        match tokio::task::spawn_blocking(move || nima.score(&p)).await {
+                            Ok(Ok(score)) => {
+                                if let Err(e) = sqlx::query(
+                                    "UPDATE photos SET aesthetic_score = ?1 WHERE id = ?2",
+                                )
+                                .bind(score)
+                                .bind(photo_id)
+                                .execute(&pool)
+                                .await
+                                {
+                                    tracing::warn!(error = %e, photo_id, "aesthetic score update failed");
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!(error = %e, photo_id, "nima score failed")
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, photo_id, "nima task join failed")
+                            }
+                        }
+                    }
+
+                    // SigLIP embedding → photo_embeddings (BLOB fallback)
+                    if let (Some(siglip), Some(model_id)) = (siglip_session, siglip_model_id) {
+                        let p = path.clone();
+                        match tokio::task::spawn_blocking(move || siglip.embed_image(&p)).await {
+                            Ok(Ok(vec)) => {
+                                let bytes: Vec<u8> =
+                                    vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+                                let now_ts = Utc::now().to_rfc3339();
+                                if let Err(e) = sqlx::query(
+                                    "INSERT OR REPLACE INTO photo_embeddings \
+                                     (photo_id, model_id, embedding, updated_at) \
+                                     VALUES (?1, ?2, ?3, ?4)",
+                                )
+                                .bind(photo_id)
+                                .bind(model_id)
+                                .bind(&bytes)
+                                .bind(&now_ts)
+                                .execute(&pool)
+                                .await
+                                {
+                                    tracing::warn!(error = %e, photo_id, "embedding insert failed");
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!(error = %e, photo_id, "siglip embed failed")
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, photo_id, "siglip task join failed")
+                            }
+                        }
+                    }
+                }
             }
         }
     }

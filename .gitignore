@@ -97,3 +97,6 @@ target/criterion/
 ~/.tauri/
 !tauri-pub.pem
 .claude/scheduled_tasks.lock
+
+# Docker volumes (created by compose up, not source)
+docker/volumes/

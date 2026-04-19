@@ -6,10 +6,16 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AlbumRow,
+  type CleanupExecuteResult,
   type CleanupPlan,
   cleanupDryRun,
+  cleanupExecute,
   createSource,
+  type DuplicateGroup,
+  deleteSource,
   detectIcloudPath,
+  downloadModels,
+  findDuplicates,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
   type ImportSummary,
@@ -26,6 +32,7 @@ import {
   type SourceCleanupItem,
   type SourceRow,
   type StartImportResponse,
+  searchPhotos,
   startImport,
   type UsbDevice,
   unseenPhotos,
@@ -33,7 +40,9 @@ import {
 
 export type {
   AlbumRow,
+  CleanupExecuteResult,
   CleanupPlan,
+  DuplicateGroup,
   ImportProgressEvent,
   ImportSummary,
   PhotoRow,
@@ -90,13 +99,6 @@ export function useUnseenPhotos(limit?: number, minScore?: number) {
   });
 }
 
-export function useCleanupDryRun(sourceId?: number) {
-  return useQuery({
-    queryKey: ['cleanup_dry_run', sourceId],
-    queryFn: () => cleanupDryRun(sourceId),
-  });
-}
-
 export function useRefreshSmartAlbums() {
   const qc = useQueryClient();
   return useMutation({
@@ -117,6 +119,17 @@ export function useCreateSource() {
       createSource(name, kind, rootPath),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sources'] });
+    },
+  });
+}
+
+export function useDeleteSource() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sourceId: number) => deleteSource(sourceId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['cleanup'] });
     },
   });
 }
@@ -150,4 +163,52 @@ export function useDetectIcloudPath() {
 
 export function useIphoneDevices() {
   return useQuery({ queryKey: ['iphone_devices'], queryFn: listIphoneDevices });
+}
+
+export function useDownloadModels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (names?: string[]) => downloadModels(names),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['models'] });
+    },
+  });
+}
+
+export function useDuplicates(minSimilarity?: number) {
+  return useQuery({
+    queryKey: ['duplicates', minSimilarity] as const,
+    queryFn: () => findDuplicates(minSimilarity),
+  });
+}
+
+export function useSearchPhotos(query: string) {
+  return useQuery<PhotoRow[], Error>({
+    queryKey: ['search_photos', query],
+    queryFn: () => searchPhotos(query),
+    enabled: query.trim().length > 0,
+    staleTime: 30_000,
+    placeholderData: (prev) => prev,
+  });
+}
+
+// ── Cleanup ────────────────────────────────────────────────────────────────
+
+export function useCleanupDryRun() {
+  return useMutation({
+    mutationFn: () => cleanupDryRun(),
+  });
+}
+
+export function useCleanupExecute() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ planId, confirmToken }: { planId: string; confirmToken: string }) =>
+      cleanupExecute(planId, confirmToken),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['cleanup'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
 }
