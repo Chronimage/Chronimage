@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm test *)",
+      "Bash(cargo check *)",
+      "PowerShell(Get-Command cargo -ErrorAction SilentlyContinue; Get-Command rustc -ErrorAction SilentlyContinue; Test-Path \"$env:USERPROFILE\\\\.cargo\\\\bin\\\\cargo.exe\")",
+      "Bash(pnpm exec *)",
+      "Bash(timeout 15 pnpm dev)",
+      "Bash(export PATH=\"$HOME/.cargo/bin:$PATH\")",
+      "Bash(cargo --version)",
+      "Bash(node scripts/make-placeholder-icon.js)",
+      "Bash(cargo test *)",
+      "Bash(grep -E \"^\\\\.\\\\\\\\\\\\\\\\\\(scripts|.claude\\)\")",
+      "Bash(cargo clippy *)",
+      "Bash(xargs grep *)",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('.claude/settings.json','utf8'\\)\\); console.log\\('valid JSON'\\);\")"
+    ]
+  }
+}
