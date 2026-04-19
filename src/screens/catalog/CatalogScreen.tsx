@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
-import { ALBUMS, PHOTOS, SEARCH_SUGGESTIONS } from '../../state/fixtures';
+import { SEARCH_SUGGESTIONS } from '../../state/fixtures';
+import { useAlbums, usePhotos } from '../../state/queries';
 
 export interface CatalogScreenProps {
   albumId: string;
@@ -12,23 +13,27 @@ const FACETS = ['All', 'People', 'Places', 'Objects', 'Events', 'Colors', 'Camer
 
 export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<Set<number>>(new Set([2, 5, 12]));
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const searching = query.trim().length > 0;
-  const photos = useMemo(() => PHOTOS.slice(0, 48), []);
-  const album = ALBUMS.find((a) => a.id === albumId) ?? {
-    id: 'all',
+
+  const { data: albums = [] } = useAlbums();
+  const { data: photos = [] } = usePhotos({ limit: 48 });
+
+  const album = useMemo(() => {
+    if (albumId === 'all') return null;
+    return albums.find((a) => String(a.id) === albumId) ?? null;
+  }, [albums, albumId]);
+
+  const displayAlbum = album ?? {
     name: 'All Photos',
-    count: 851002,
-    desc: 'Everything, everywhere',
-    tag: '',
-    tint: 0,
-    covers: [],
+    photo_count: photos.length,
+    description: 'Everything, everywhere',
   };
 
-  const toggle = (i: number) => {
+  const toggle = (id: number) => {
     const next = new Set(selected);
-    if (next.has(i)) next.delete(i);
-    else next.add(i);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
     setSelected(next);
   };
 
@@ -91,11 +96,12 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                   {albumId === 'all' ? 'SMART ALBUM · ALL PHOTOS' : 'SMART ALBUM · AUTO-CURATED'}
                 </div>
                 <h1>
-                  {album.name}
+                  {displayAlbum.name}
                   <em>.</em>
                 </h1>
                 <div className="mono" style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 6 }}>
-                  {album.count.toLocaleString()} photos · {album.desc ?? 'Last updated 2h ago'}
+                  {displayAlbum.photo_count.toLocaleString()} photos ·{' '}
+                  {displayAlbum.description ?? 'Last updated 2h ago'}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -115,18 +121,25 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
             </div>
 
             <div className="libgrid">
-              {photos.map((p, i) => (
-                <button
-                  type="button"
-                  key={p.id}
-                  className="cell"
-                  onClick={() => toggle(i)}
-                  aria-pressed={selected.has(i)}
-                  aria-label={`Select ${p.filename}`}
-                >
-                  <Placeholder photo={p} idx={i} selected={selected.has(i)} subtle />
-                </button>
-              ))}
+              {photos.map((p) => {
+                const hue = (p.id * 31) % 360;
+                return (
+                  <button
+                    type="button"
+                    key={p.id}
+                    className="cell"
+                    onClick={() => toggle(p.id)}
+                    aria-pressed={selected.has(p.id)}
+                    aria-label={`Select ${p.filename}`}
+                  >
+                    <Placeholder
+                      photo={{ hue, filename: p.filename, id: String(p.id) }}
+                      selected={selected.has(p.id)}
+                      subtle
+                    />
+                  </button>
+                );
+              })}
             </div>
             <div
               style={{
@@ -163,18 +176,25 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               ))}
             </div>
             <div className="libgrid">
-              {photos.slice(0, 24).map((p, i) => (
-                <button
-                  type="button"
-                  key={p.id}
-                  className="cell"
-                  style={{ position: 'relative' }}
-                  onClick={() => toggle(i)}
-                  aria-label={`Select ${p.filename}`}
-                >
-                  <Placeholder photo={p} idx={i} selected={selected.has(i)} subtle />
-                </button>
-              ))}
+              {photos.slice(0, 24).map((p) => {
+                const hue = (p.id * 31) % 360;
+                return (
+                  <button
+                    type="button"
+                    key={p.id}
+                    className="cell"
+                    style={{ position: 'relative' }}
+                    onClick={() => toggle(p.id)}
+                    aria-label={`Select ${p.filename}`}
+                  >
+                    <Placeholder
+                      photo={{ hue, filename: p.filename, id: String(p.id) }}
+                      selected={selected.has(p.id)}
+                      subtle
+                    />
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
