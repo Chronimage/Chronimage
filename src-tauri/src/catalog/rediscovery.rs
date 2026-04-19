@@ -59,6 +59,14 @@ fn build_seeds(today_mmdd: &str) -> Vec<RediscoverySeed> {
             rule_json: r#"{"type":"all","rules":[{"type":"quality","field":"aesthetic","op":"gte","value":8.0},{"type":"not","rule":{"type":"starred","value":true}}]}"#.to_owned(),
             kind: None,
         },
+        RediscoverySeed {
+            // Resolved by migrations 20260423000001 (photos.last_viewed_at +
+            // photo_views_sync triggers) and 20260424000000 (FTS5 fix).
+            name: "Unseen in 2 years",
+            description: "Photos not viewed in over two years with strong aesthetics",
+            rule_json: r#"{"type":"all","rules":[{"type":"last_viewed","op":"older_than_days","value":730},{"type":"quality","field":"aesthetic","op":"gte","value":6.5}]}"#.to_owned(),
+            kind: Some("rediscovery_unseen"),
+        },
     ]
 }
 
@@ -115,7 +123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seeds_three_rediscovery_albums() {
+    async fn seeds_four_rediscovery_albums() {
         let (_tmp, pool) = make_pool().await;
         seed_rediscovery_albums(&pool).await.unwrap();
 
@@ -124,13 +132,14 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(count, 3, "expected 3 rediscovery albums, got {count}");
+        assert_eq!(count, 4, "expected 4 rediscovery albums, got {count}");
 
-        // Verify the expected names exist.
+        // Verify all expected names exist.
         for name in [
             "On this day",
             "First time on new camera",
             "Unflagged favorites",
+            "Unseen in 2 years",
         ] {
             let found: Option<i64> =
                 sqlx::query_scalar("SELECT id FROM smart_albums WHERE name = ?1")
@@ -156,7 +165,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(
-            count, 3,
+            count, 4,
             "idempotency failed: got {count} albums after 3 calls"
         );
     }

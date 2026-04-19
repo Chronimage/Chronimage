@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type ScreenId = 'onboard' | 'catalog' | 'cull' | 'cullbin' | 'develop' | 'settings';
+export type ScreenId = 'onboard' | 'catalog' | 'cull' | 'cullbin' | 'develop' | 'people' | 'settings';
 
 export interface Screen {
   id: ScreenId;
@@ -13,6 +13,7 @@ export const SCREENS: Record<ScreenId, Screen> = {
   cull: { id: 'cull', label: 'Cull' },
   cullbin: { id: 'cullbin', label: 'Cull Bin' },
   develop: { id: 'develop', label: 'Develop' },
+  people: { id: 'people', label: 'People' },
   settings: { id: 'settings', label: 'Settings' },
 };
 

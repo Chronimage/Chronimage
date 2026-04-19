@@ -6,8 +6,10 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AlbumRow,
+  aiModelsStatus,
   type CleanupExecuteResult,
   type CleanupPlan,
+  type ClusterRow,
   cleanupDryRun,
   cleanupExecute,
   createSource,
@@ -15,6 +17,9 @@ import {
   deleteSource,
   detectIcloudPath,
   downloadModels,
+  faceClusterMerge,
+  faceClusterName,
+  faceClustersList,
   findDuplicates,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
@@ -30,6 +35,7 @@ import {
   listIphoneDevices,
   listPhotos,
   listSources,
+  type ModelStatus,
   onThisDay,
   type PhotoRow,
   refreshSmartAlbums,
@@ -46,11 +52,13 @@ export type {
   AlbumRow,
   CleanupExecuteResult,
   CleanupPlan,
+  ClusterRow,
   DuplicateGroup,
   ImportProgressEvent,
   ImportSummary,
   LiftPlan,
   LiftReceipt,
+  ModelStatus,
   PhotoRow,
   SourceCleanupItem,
   SourceRow,
@@ -235,5 +243,43 @@ export function useLiftShiftExecute() {
       qc.invalidateQueries({ queryKey: ['sources'] });
       qc.invalidateQueries({ queryKey: ['photos'] });
     },
+  });
+}
+
+// ── Face clusters ─────────────────────────────────────────────────────────────
+
+export function useFaceClusters(limit = 60) {
+  return useQuery<ClusterRow[], Error>({
+    queryKey: ['face-clusters', limit],
+    queryFn: () => faceClustersList(limit),
+  });
+}
+
+export function useFaceClusterName() {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { clusterId: number; name: string }>({
+    mutationFn: ({ clusterId, name }) => faceClusterName(clusterId, name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
+    },
+  });
+}
+
+export function useFaceClusterMerge() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { a: number; b: number }>({
+    mutationFn: ({ a, b }) => faceClusterMerge(a, b),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
+    },
+  });
+}
+
+// ── AI Models status ──────────────────────────────────────────────────────────
+
+export function useAiModelsStatus() {
+  return useQuery<ModelStatus[], Error>({
+    queryKey: ['ai-models-status'],
+    queryFn: aiModelsStatus,
   });
 }

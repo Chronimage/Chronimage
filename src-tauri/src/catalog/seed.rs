@@ -90,7 +90,7 @@ const SYSTEM_ALBUMS: &[AlbumSeed] = &[
 ];
 
 /// Insert the 12 design-specified system smart albums if they haven't been
-/// seeded yet, then seed the three rediscovery albums via
+/// seeded yet, then seed the four rediscovery albums via
 /// [`crate::catalog::rediscovery::seed_rediscovery_albums`].
 ///
 /// Safe to call on every startup — the system-album guard skips when
@@ -146,8 +146,8 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count");
-        // 12 static + 3 rediscovery = 15 total system albums.
-        assert_eq!(count, 15);
+        // 12 static + 4 rediscovery = 16 total system albums.
+        assert_eq!(count, 16);
     }
 
     #[tokio::test]
@@ -165,6 +165,6 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count");
-        assert_eq!(count, 15);
+        assert_eq!(count, 16);
     }
 }

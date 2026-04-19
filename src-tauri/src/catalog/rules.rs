@@ -769,4 +769,65 @@ mod tests {
         .await;
         assert_eq!(count, 1, "expected exactly one April 20 photo; got {count}");
     }
+
+    /// C2 integration test: one photo never viewed (matches older_than_days=730),
+    /// one viewed yesterday (does NOT match). Assert count = 1.
+    #[tokio::test]
+    async fn count_matching_last_viewed_rule() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::catalog::db::open_pool(crate::catalog::db::PoolOptions::new(
+            tmp.path().join("c.db"),
+        ))
+        .await
+        .unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Photo 1: never viewed (no photo_views row).
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'never.jpg', 0, 0, ?2, 0)",
+        )
+        .bind("i".repeat(64))
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Photo 2: viewed yesterday.
+        let photo2_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, 'recent.jpg', 0, 0, ?2, 0) RETURNING id",
+        )
+        .bind("j".repeat(64))
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // yesterday = now minus 1 day
+        let yesterday = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO photo_views (photo_id, last_viewed_at, view_count) \
+             VALUES (?1, ?2, 1)",
+        )
+        .bind(photo2_id)
+        .bind(&yesterday)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Rule: last_viewed older_than_days=730 (2 years)
+        let count = count_matching(
+            &pool,
+            r#"{"type":"last_viewed","op":"older_than_days","value":730}"#,
+        )
+        .await;
+
+        // Only photo 1 (never viewed) should match; photo 2 was viewed yesterday.
+        assert_eq!(
+            count, 1,
+            "expected exactly 1 never-viewed photo to match older_than_days=730, got {count}"
+        );
+    }
 }

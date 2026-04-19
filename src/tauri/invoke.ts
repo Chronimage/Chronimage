@@ -326,6 +326,42 @@ export async function cleanupExecute(planId: string, confirmToken: string): Prom
   });
 }
 
+// ── Face clusters ──────────────────────────────────────────────────────────
+
+export interface ClusterRow {
+  id: number;
+  name: string | null;
+  isNamed: boolean;
+  faceCount: number;
+  coverPhotoId: number | null;
+}
+
+export async function faceClustersList(limit = 60): Promise<ClusterRow[]> {
+  return tauriInvoke<ClusterRow[]>('face_clusters_list', { limit });
+}
+
+export async function faceClusterName(clusterId: number, name: string): Promise<void> {
+  return tauriInvoke<void>('face_cluster_name', { clusterId, name });
+}
+
+export async function faceClusterMerge(a: number, b: number): Promise<number> {
+  return tauriInvoke<number>('face_cluster_merge', { a, b });
+}
+
+// ── AI Models status ────────────────────────────────────────────────────────
+
+export interface ModelStatus {
+  name: string;
+  kind: string;
+  filename: string;
+  installed: boolean;
+  sizeBytes: number;
+}
+
+export async function aiModelsStatus(): Promise<ModelStatus[]> {
+  return tauriInvoke<ModelStatus[]>('ai_models_status');
+}
+
 // ── Lift & Shift ────────────────────────────────────────────────────────────
 
 export interface LiftItem {

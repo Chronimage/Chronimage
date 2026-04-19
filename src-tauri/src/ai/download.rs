@@ -58,6 +58,33 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         size_bytes: 14_000_000,
         filename: "nima.onnx",
     },
+    ModelSpec {
+        name: "retinaface-r50",
+        kind: "face-detect",
+        version: "1.0.0",
+        url: "https://huggingface.co/Chronimage/models/resolve/main/retinaface-r50.onnx",
+        sha256: "tbd",
+        size_bytes: 110_000_000,
+        filename: "retinaface-r50.onnx",
+    },
+    ModelSpec {
+        name: "arcface-r100",
+        kind: "face-embed",
+        version: "1.0.0",
+        url: "https://huggingface.co/Chronimage/models/resolve/main/arcface-r100.onnx",
+        sha256: "tbd",
+        size_bytes: 260_000_000,
+        filename: "arcface-r100.onnx",
+    },
+    ModelSpec {
+        name: "gemma-4-9b-it-q4_k_m",
+        kind: "caption-gguf",
+        version: "1.0.0",
+        url: "https://huggingface.co/Chronimage/models/resolve/main/gemma-4-9b-it-q4_k_m.gguf",
+        sha256: "tbd",
+        size_bytes: 5_800_000_000,
+        filename: "gemma-4-9b-it-q4_k_m.gguf",
+    },
 ];
 
 // ── Progress type ─────────────────────────────────────────────────────────────
@@ -196,10 +223,30 @@ mod tests {
                 "model {} has empty filename",
                 m.name
             );
+            // GGUF models use a different extension; all others must be .onnx.
+            let valid_ext = m.filename.ends_with(".onnx") || m.filename.ends_with(".gguf");
             assert!(
-                m.filename.ends_with(".onnx"),
-                "model {} filename should end with .onnx",
+                valid_ext,
+                "model {} filename should end with .onnx or .gguf",
                 m.name
+            );
+        }
+    }
+
+    #[test]
+    fn known_models_includes_all_phase1_kinds() {
+        let kinds: std::collections::HashSet<&str> = KNOWN_MODELS.iter().map(|m| m.kind).collect();
+        for required in &[
+            "embedding",
+            "aesthetic",
+            "face-detect",
+            "face-embed",
+            "caption-gguf",
+        ] {
+            assert!(
+                kinds.contains(required),
+                "KNOWN_MODELS missing kind {:?}",
+                required
             );
         }
     }

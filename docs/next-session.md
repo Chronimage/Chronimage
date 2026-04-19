@@ -1,43 +1,46 @@
-# Next session · Phase 1 week 2
+# Next session · Phase 1 week 2 → week 3
 
-Landed this session (2026-04-20): `ai/faces.rs`, `ai/cluster.rs`, extended `catalog/rules.rs` + ADR 0001, `lift_and_shift` module + Tauri commands, `is_starred` column (migration `20260422`), wired `chronimage-cli migrate`, dev DB recreated. 152 Rust tests green, clippy + typecheck clean.
+Landed since last plan (PR #14 + #15 merged to `develop`): faces/cluster/caption scaffolds, rule-engine composition (All/Any/Not/CapturedAt/Camera/FaceCluster/Starred/on_mmdd), lift & shift Rust + UI, source cleanup end-to-end, rediscovery (3 seeded albums), background re-evaluator (10-min tokio), `chronimage-cli migrate` wired, migrations `is_starred` + `smart_albums.kind` + `photos.last_viewed_at`. 171 Rust + 60 frontend tests green on develop (`05388bf`).
 
 ## Starts (in order)
 
-### 1. Frontend wiring for lift & shift · 45 min
-First file: [src/tauri/invoke.ts](src/tauri/invoke.ts). Add `liftShiftDryRun()` + `liftShiftExecute(planId, confirmToken)` mirroring the existing `cleanupDryRun`/`cleanupExecute` typed wrappers, then a `useLiftShiftDryRun` mutation hook in `src/state/queries.ts`, then wire the "Lift & shift" step in `src/screens/OnboardScreen.tsx`.
+### 1. Fix FTS5 contentless-trigger defect · 20 min
+First file: new migration `src-tauri/migrations/20260424000000_fts5_triggers_fix.sql`.
 
-Why highest leverage: Rust side landed + tested end-to-end this session with the manifest writer. Only missing piece is the TS wrappers; without them the PRD §2 onboarding flow can't complete. ~45 min because the cleanup wiring is a line-for-line template.
+The existing `tags_fts_insert` / `tags_fts_delete` triggers do `UPDATE photos_fts SET tags = ...` — SQLite's contentless FTS5 (`content=''`) rejects UPDATE on column values. Fix: drop both triggers, recreate as DELETE + INSERT of the rowid with refreshed columns. Unblocks end-to-end imports the moment AI-tagging writes any row to `tags`.
 
-### 2. Rediscovery rows on Catalog home · 60 min
-First file: `src-tauri/src/catalog/seed.rs` (or a new `src-tauri/src/rediscovery.rs`). Define 4 rule_json expressions per PRD §13 and seed them as system albums:
-- "On this day" — `CapturedAt { op: "on_mmdd", value: today }` (needs one new rule variant: `CapturedAt.on_mmdd`)
-- "Unseen in 2 years" — needs `last_viewed_at` column; if missing, blocker-note in ADR 0001 and skip
-- "First time on new camera" — `All [CapturedAt.between, Camera.model_eq]`
-- "Unflagged favorites" — `All [Quality.aesthetic gte 8.0, Not Starred]` ← now unblocked
+Why highest leverage: silent data-path bug with a ~15-line migration. Noted in PR #15 as deferred. Catch-early before Phase 2 culling wires up tag filters.
 
-Surface as horizontal rows on `CatalogScreen` when no query is active. Frontend-only once rule JSON seeded.
+### 2. PeopleScreen shell + `face_clusters_list` / `face_cluster_name` commands · 90 min
+First file: `src-tauri/src/commands.rs` (add 3 Tauri commands per PRD §10 API surface). Then port `design-handoff/chronimage/screens_people.jsx` → `src/screens/PeopleScreen.tsx` via `/port-screen`.
 
-Why: the rule engine work this session was the single biggest unblocker for §13. Cashing it in now delivers user-visible value on the Catalog home — otherwise the extensions sit unused for another cycle.
+Data can be stub-shaped (cluster rows synthesized from the catalog's `clusters` table — empty until real HDBSCAN runs). The point is to land the routing, the side-panel entry, and the typed `Cluster` model so the UI can iterate independently of inference.
 
-### 3. Smart album re-evaluator (background) · 45 min
-First file: `src-tauri/src/albums/reevaluator.rs` (new) + register a tokio task in [src-tauri/src/main.rs](src-tauri/src/main.rs).
+Why: unblocks the second-largest missing PRD surface (§10). The UI layer is independent of the blocked `todo!()` inference paths.
 
-PRD §7 asks for: re-run `count_matching` + `matching_photo_ids` every 10 min on new photos, nightly full rebuild. Use `tokio::time::interval(Duration::from_secs(600))`; write results back to `smart_albums.cover_photo_ids_json` + a `photo_count` column (add migration `20260423000000_smart_albums_photo_count.sql` if not present).
+### 3. Settings screen (PRD §14) · 75 min
+First file: `design-handoff/chronimage/screens_settings.jsx` → `src/screens/SettingsScreen.tsx` via `/port-screen`.
 
-Why: the rule engine returns empty rows in the UI until this runs. Small file, big perceived completeness gain.
+Backing commands mostly exist or are trivial — `ai_model_list`, `budget_report`, `catalog_stats`. The "change model with re-index warning", "updater channel picker", and "nightly re-index toggle" need small Rust-side wiring but no new schema.
 
-### 4. `ai/caption.rs` llama.cpp sidecar scaffold · 60 min
-First file: `src-tauri/src/ai/caption.rs` (new). Spawn `ai-wrangler` (sonnet). Follow the `siglip.rs` stub/real pattern: `CaptionSession::load_or_stub`, `caption_image(path) -> String` returning `"(stub caption)"` when no sidecar. Wire to the existing `src-tauri/src/sidecar/` directory (already exists). GPU-only real path gated behind `ai::budget::detect().tier == Tier::Gpu`.
+Why: leaves the onboarding + catalog + people + settings triad complete — every frame in the design that isn't the Detail overlay (Phase 2) or the Develop screen (Phase 3).
 
-Why: Only remaining unscaffolded PRD §5 item. Low risk, high symbolic completeness — leaves faces + cluster + caption + embed + aesthetic all scaffolded.
+### 4. Wire `photo_views` recording · 30 min
+First file: `src-tauri/src/commands.rs` (add `record_photo_view(photo_id)` command). Call from `src/screens/catalog/CatalogScreen.tsx` in the Detail overlay open handler.
 
-### 5. `biome check --write --unsafe` cleanup · 10 min
-Fix the 4 `useSortedClasses` warnings in `src/screens/OnboardScreen.tsx` (lines 211, 236, 1179). Non-blocking but CI-adjacent. Tack onto end of session.
+Inserts into `photo_views` with `ON CONFLICT(photo_id) DO UPDATE SET last_viewed_at = excluded.last_viewed_at, view_count = view_count + 1`. The trigger on `photo_views` (migration `20260423000001`) already syncs `photos.last_viewed_at`, so the re-evaluator picks it up automatically.
 
-## Deferred
+Why: unlocks the fourth rediscovery album "Unseen in 2 years" (seed it in `catalog/rediscovery.rs` once the insertion path exists). One of the two user-visible payoffs of the `last_viewed_at` migration that shipped this session but has no writer yet.
 
-- PeopleScreen / face clustering UI — blocked on real ArcFace inference (model download flow)
-- Replacing `todo!()` in faces/cluster real paths — blocked on model download
-- Settings screen
-- `last_viewed_at` + `photo_album_membership` schema (Phase 2 scope per ADR 0001)
+### 5. Exit-criteria test scaffolds · 45 min
+First files: `src-tauri/tests/phase_1_face_clustering.rs`, `src-tauri/tests/phase_1_catalog_size.rs`, `tests/e2e/phase-1-source-cleanup.spec.ts`.
+
+PRD lists 8 exit-criteria test files (see § Exit criteria). Most don't exist yet. Create the empty shells with `#[ignore]` or `.skip()` markers and a `// TODO(cc): drive the 100-photo fixture through cleanup dry-run → execute → SHA256 post-check` comment. Phase 1 can't exit until these are green, so having the skeleton visible forces the remaining work to be concrete.
+
+Why: makes the "how do we know Phase 1 is done?" question answerable with `cargo test --ignored` + `playwright test --grep phase-1`.
+
+## Deferred (known-blocked)
+
+- Real RetinaFace / ArcFace / HDBSCAN / llama.cpp inference — blocked on end-to-end model-download smoke (next-next session)
+- Phase 1 performance tests (100k import throughput, 200k search latency, 5k RAW+JPG pair F1, 8h stress) — need real fixtures
+- `photo_album_membership` schema — Phase 2 per ADR 0001
