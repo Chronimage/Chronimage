@@ -69,6 +69,16 @@ pub enum AlbumRule {
     FaceCluster { cluster_ids: Vec<i64> },
     /// Starred flag. Maps to `photos.is_starred` (added in migration 20260422000000).
     Starred { value: bool },
+
+    /// Matches photos captured on today's calendar month-day (MM-DD), regardless of year.
+    /// `op` must be `"on_mmdd"`. Used for the "On this day" rediscovery album.
+    /// Compiles to: `strftime('%m-%d', captured_at) = strftime('%m-%d', 'now')`
+    OnThisDay,
+
+    /// Matches photos not viewed within the last `value` days (or never viewed).
+    /// `op` must be `"older_than_days"`.
+    /// Compiles to: `last_viewed_at IS NULL OR last_viewed_at < datetime('now', '-N days')`
+    LastViewed { op: String, value: i64 },
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────
@@ -120,6 +130,25 @@ fn validated_ts_sql(v: &serde_json::Value) -> Option<String> {
     // Parse to validate; ignore the result — we just want the canonical string.
     DateTime::parse_from_rfc3339(s).ok()?;
     Some(format!("'{}'", s.replace('\'', "''")))
+}
+
+/// Validate a MM-DD string for use with the `on_mmdd` op.
+///
+/// Accepts exactly "MM-DD" where MM ∈ 01–12 and DD ∈ 01–31. Does not
+/// validate calendar correctness (e.g. Feb 30) — SQLite's strftime handles
+/// that by producing no matches. Returns the input string if valid, None otherwise.
+pub(crate) fn validated_mmdd(s: &str) -> Option<&str> {
+    // Expect exactly 5 chars: two digits, dash, two digits.
+    let bytes = s.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b'-' {
+        return None;
+    }
+    let month: u8 = s[..2].parse().ok()?;
+    let day: u8 = s[3..].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(s)
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -219,6 +248,16 @@ pub fn rule_to_sql(rule: &AlbumRule) -> Option<String> {
                     "captured_at IS NOT NULL AND captured_at BETWEEN {start} AND {end}"
                 ))
             }
+            // Match photos captured on a specific MM-DD regardless of year.
+            // `value` must be a "MM-DD" string (e.g. "04-20").
+            // SQL: strftime('%m-%d', captured_at) = 'MM-DD'
+            "on_mmdd" => {
+                let s = value.as_str()?;
+                validated_mmdd(s)?;
+                Some(format!(
+                    "captured_at IS NOT NULL AND strftime('%m-%d', captured_at) = '{s}'"
+                ))
+            }
             _ => None,
         },
 
@@ -248,6 +287,26 @@ pub fn rule_to_sql(rule: &AlbumRule) -> Option<String> {
         AlbumRule::Starred { value } => {
             Some(format!("is_starred = {}", if *value { 1 } else { 0 }))
         }
+
+        AlbumRule::OnThisDay => {
+            // Matches photos whose MM-DD matches today's MM-DD.
+            Some(
+                "captured_at IS NOT NULL AND \
+                 strftime('%m-%d', captured_at) = strftime('%m-%d', 'now')"
+                    .to_owned(),
+            )
+        }
+
+        AlbumRule::LastViewed { op, value } => match op.as_str() {
+            "older_than_days" => {
+                // Matches photos never viewed OR last viewed before N days ago.
+                Some(format!(
+                    "(last_viewed_at IS NULL OR \
+                     last_viewed_at < datetime('now', '-{value} days'))"
+                ))
+            }
+            _ => None,
+        },
     }
 }
 
@@ -555,6 +614,40 @@ mod tests {
     }
 
     #[test]
+    fn on_this_day_rule_compiles_to_strftime_sql() {
+        let r = parse_rule(r#"{"type":"on_this_day"}"#).unwrap();
+        let sql = rule_to_sql(&r).unwrap();
+        assert!(sql.contains("strftime('%m-%d'"), "got: {sql}");
+        assert!(sql.contains("captured_at IS NOT NULL"), "got: {sql}");
+        // Both sides reference the same format function (today's date + photo date).
+        assert_eq!(
+            sql.matches("strftime('%m-%d'").count(),
+            2,
+            "expected two strftime calls: {sql}"
+        );
+    }
+
+    #[test]
+    fn last_viewed_older_than_days_produces_sql() {
+        let r = parse_rule(r#"{"type":"last_viewed","op":"older_than_days","value":730}"#).unwrap();
+        let sql = rule_to_sql(&r).unwrap();
+        assert!(sql.contains("last_viewed_at IS NULL"), "got: {sql}");
+        assert!(
+            sql.contains("last_viewed_at < datetime('now', '-730 days')"),
+            "got: {sql}"
+        );
+    }
+
+    #[test]
+    fn last_viewed_unknown_op_returns_none() {
+        let r = AlbumRule::LastViewed {
+            op: "unknown_op".into(),
+            value: 30,
+        };
+        assert!(rule_to_sql(&r).is_none());
+    }
+
+    #[test]
     fn starred_true_produces_sql() {
         let rule = AlbumRule::Starred { value: true };
         let sql = rule_to_sql(&rule).unwrap();
@@ -603,5 +696,77 @@ mod tests {
 
         let count_unstarred = count_matching(&pool, r#"{"type":"starred","value":false}"#).await;
         assert_eq!(count_unstarred, 1, "expected exactly one unstarred photo");
+    }
+
+    // ── on_mmdd tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn on_mmdd_produces_strftime_sql() {
+        let rule = AlbumRule::CapturedAt {
+            op: "on_mmdd".into(),
+            value: serde_json::json!("04-20"),
+        };
+        let sql = rule_to_sql(&rule).unwrap();
+        assert!(sql.contains("strftime('%m-%d', captured_at)"), "got: {sql}");
+        assert!(sql.contains("'04-20'"), "got: {sql}");
+        assert!(sql.contains("captured_at IS NOT NULL"), "got: {sql}");
+    }
+
+    #[test]
+    fn on_mmdd_rejects_invalid_format() {
+        // Garbage value — must return None, not panic.
+        let rule = AlbumRule::CapturedAt {
+            op: "on_mmdd".into(),
+            value: serde_json::json!("not-a-date"),
+        };
+        assert!(rule_to_sql(&rule).is_none());
+    }
+
+    #[test]
+    fn on_mmdd_rejects_out_of_range_month() {
+        let rule = AlbumRule::CapturedAt {
+            op: "on_mmdd".into(),
+            value: serde_json::json!("13-01"),
+        };
+        assert!(rule_to_sql(&rule).is_none());
+    }
+
+    #[tokio::test]
+    async fn count_matching_on_mmdd_rule() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::catalog::db::open_pool(crate::catalog::db::PoolOptions::new(
+            tmp.path().join("c.db"),
+        ))
+        .await
+        .unwrap();
+
+        // Photo captured on April 20 in a prior year.
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, captured_at) \
+             VALUES (?1, 'today.jpg', 0, 0, ?2, 0, '2023-04-20T12:00:00Z')",
+        )
+        .bind("g".repeat(64))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Photo captured on a different day.
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, captured_at) \
+             VALUES (?1, 'other.jpg', 0, 0, ?2, 0, '2023-06-15T12:00:00Z')",
+        )
+        .bind("h".repeat(64))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let count = count_matching(
+            &pool,
+            r#"{"type":"captured_at","op":"on_mmdd","value":"04-20"}"#,
+        )
+        .await;
+        assert_eq!(count, 1, "expected exactly one April 20 photo; got {count}");
     }
 }

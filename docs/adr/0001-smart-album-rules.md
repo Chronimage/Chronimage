@@ -146,6 +146,20 @@ ids are `i64` values joined with commas — no string interpolation.
   The "unflagged favorites" rule (`aesthetic.gte 8.0 AND NOT starred`) is fully
   expressible as of Phase 1.
 
+## Resolved (continued)
+
+- `CapturedAt` `op: "on_mmdd"` added in Phase 1 (migration
+  `20260423000000_smart_albums_kind.sql`). Accepts `value: "MM-DD"` (e.g.
+  `"04-20"`). SQL: `strftime('%m-%d', captured_at) = 'MM-DD'`. Validation
+  via `rules::validated_mmdd` (rejects non-numeric, out-of-range month/day).
+  Used by the "On this day" rediscovery album; the background re-evaluator
+  rewrites the stored `rule_json` to today's MM-DD on every pass for albums
+  with `smart_albums.kind = 'rediscovery_today'`.
+
+- `smart_albums.kind` column added (migration `20260423000000_smart_albums_kind.sql`).
+  `NULL` = static rule; `'rediscovery_today'` = re-evaluator rewrites MM-DD on
+  every pass. Partial index on `kind` for fast re-evaluator queries.
+
 ## Open issues
 
 - `captured_at` (set by Phase 0 initial migration) is the correct column name.

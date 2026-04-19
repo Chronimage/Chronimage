@@ -129,6 +129,15 @@ fn main() {
                         if let Err(e) = seed_default_smart_albums(&pool).await {
                             tracing::warn!(error = %e, "smart album seed failed (non-fatal)");
                         }
+                        // Spawn the background re-evaluator (10-minute cadence).
+                        // Guarded with cfg(not(test)) so integration tests don't
+                        // start runaway background tasks.
+                        #[cfg(not(test))]
+                        {
+                            use chronimage::albums::reevaluator::spawn_reevaluator;
+                            // JoinHandle dropped intentionally — the task runs until process exit.
+                            std::mem::drop(spawn_reevaluator(pool.clone()));
+                        }
                         handle.manage(AppState { pool });
                     }
                     Err(e) => tracing::error!(error = %e, "failed to open catalog pool"),

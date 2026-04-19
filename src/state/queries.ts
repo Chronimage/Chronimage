@@ -20,7 +20,11 @@ import {
   type ImportProgressEvent,
   type ImportSummary,
   importGoogleTakeout,
+  type LiftPlan,
+  type LiftReceipt,
   type ListPhotosParams,
+  liftShiftDryRun,
+  liftShiftExecute,
   listAlbums,
   listImports,
   listIphoneDevices,
@@ -45,6 +49,8 @@ export type {
   DuplicateGroup,
   ImportProgressEvent,
   ImportSummary,
+  LiftPlan,
+  LiftReceipt,
   PhotoRow,
   SourceCleanupItem,
   SourceRow,
@@ -208,6 +214,25 @@ export function useCleanupExecute() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sources'] });
       qc.invalidateQueries({ queryKey: ['cleanup'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
+}
+
+// ── Lift & Shift ───────────────────────────────────────────────────────────
+
+export function useLiftShiftDryRun() {
+  return useMutation<LiftPlan, Error, { targetRoot: string }>({
+    mutationFn: ({ targetRoot }) => liftShiftDryRun(targetRoot),
+  });
+}
+
+export function useLiftShiftExecute() {
+  const qc = useQueryClient();
+  return useMutation<LiftReceipt, Error, { planId: string; confirmToken: string }>({
+    mutationFn: ({ planId, confirmToken }) => liftShiftExecute(planId, confirmToken),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
       qc.invalidateQueries({ queryKey: ['photos'] });
     },
   });

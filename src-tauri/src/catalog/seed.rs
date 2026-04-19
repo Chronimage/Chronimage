@@ -8,6 +8,12 @@ struct AlbumSeed {
     rule_json: &'static str,
 }
 
+// ── 12 design-specified system albums ────────────────────────────────────────
+//
+// Rediscovery albums ("On this day", "First time on new camera",
+// "Unflagged favorites") are owned by catalog::rediscovery and seeded
+// separately so they can carry runtime-computed values (e.g. today's MM-DD).
+
 const SYSTEM_ALBUMS: &[AlbumSeed] = &[
     AlbumSeed {
         name: "Portraits",
@@ -84,33 +90,39 @@ const SYSTEM_ALBUMS: &[AlbumSeed] = &[
 ];
 
 /// Insert the 12 design-specified system smart albums if they haven't been
-/// seeded yet. Safe to call on every startup — skips when count > 0.
+/// seeded yet, then seed the three rediscovery albums via
+/// [`crate::catalog::rediscovery::seed_rediscovery_albums`].
+///
+/// Safe to call on every startup — the system-album guard skips when
+/// `is_system` rows already exist; `seed_rediscovery_albums` is always called
+/// so the re-evaluator keeps the MM-DD current on each boot.
 pub async fn seed_default_smart_albums(pool: &SqlitePool) -> AppResult<()> {
     let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM smart_albums WHERE is_system = 1")
         .fetch_one(pool)
         .await?;
 
-    if count > 0 {
-        return Ok(());
+    if count == 0 {
+        let now = chrono::Utc::now().to_rfc3339();
+        for album in SYSTEM_ALBUMS {
+            sqlx::query(
+                "INSERT OR IGNORE INTO smart_albums
+                 (name, description, rule_json, cover_photo_ids, tag, is_system, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, '[]', ?4, 1, ?5, ?5)",
+            )
+            .bind(album.name)
+            .bind(album.description)
+            .bind(album.rule_json)
+            .bind(album.tag)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+        }
+        tracing::info!(count = SYSTEM_ALBUMS.len(), "seeded system smart albums");
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    for album in SYSTEM_ALBUMS {
-        sqlx::query(
-            "INSERT OR IGNORE INTO smart_albums
-             (name, description, rule_json, cover_photo_ids, tag, is_system, created_at, updated_at)
-             VALUES (?1, ?2, ?3, '[]', ?4, 1, ?5, ?5)",
-        )
-        .bind(album.name)
-        .bind(album.description)
-        .bind(album.rule_json)
-        .bind(album.tag)
-        .bind(&now)
-        .execute(pool)
-        .await?;
-    }
+    // Always run — keeps kind='rediscovery_today' rows current on every boot.
+    crate::catalog::rediscovery::seed_rediscovery_albums(pool).await?;
 
-    tracing::info!(count = SYSTEM_ALBUMS.len(), "seeded system smart albums");
     Ok(())
 }
 
@@ -134,7 +146,8 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count");
-        assert_eq!(count, 12);
+        // 12 static + 3 rediscovery = 15 total system albums.
+        assert_eq!(count, 15);
     }
 
     #[tokio::test]
@@ -152,6 +165,6 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count");
-        assert_eq!(count, 12);
+        assert_eq!(count, 15);
     }
 }

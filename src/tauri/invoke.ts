@@ -325,3 +325,40 @@ export async function cleanupExecute(planId: string, confirmToken: string): Prom
     confirmToken,
   });
 }
+
+// ── Lift & Shift ────────────────────────────────────────────────────────────
+
+export interface LiftItem {
+  copy_id: number;
+  photo_id: number;
+  source_id: number;
+  src_path: string;
+  dest_rel_path: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+export interface LiftPlan {
+  plan_id: string;
+  confirm_token: string;
+  target_root: string;
+  total_bytes: number;
+  total_file_count: number;
+  items: LiftItem[];
+  free_space_ok: boolean;
+}
+
+export interface LiftReceipt {
+  copied_count: number;
+  bytes_copied: number;
+  manifest_path: string;
+  errors: string[];
+}
+
+export async function liftShiftDryRun(targetRoot: string): Promise<LiftPlan> {
+  return tauriInvoke<LiftPlan>('lift_shift_dry_run', { targetRoot });
+}
+
+export async function liftShiftExecute(planId: string, confirmToken: string): Promise<LiftReceipt> {
+  return tauriInvoke<LiftReceipt>('lift_shift_execute', { planId, confirmToken });
+}

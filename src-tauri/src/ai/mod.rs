@@ -5,6 +5,7 @@
 
 pub mod aesthetic;
 pub mod budget;
+pub mod caption;
 pub mod cluster;
 pub mod download;
 pub mod faces;
