@@ -44,3 +44,64 @@ export interface ScanReport {
 export async function importDryRun(root: string): Promise<ScanReport> {
   return tauriInvoke<ScanReport>('import_dry_run', { root });
 }
+
+// ── Catalog read ────────────────────────────────────────────────────────────
+
+export interface AlbumRow {
+  id: number;
+  name: string;
+  description: string | null;
+  tag: string | null;
+  photo_count: number;
+  /** JSON-encoded array of photo ids, e.g. "[1,2,3]" */
+  cover_photo_ids: string;
+  is_system: boolean;
+}
+
+export interface PhotoRow {
+  id: number;
+  sha256: string;
+  filename: string;
+  width: number;
+  height: number;
+  captured_at: string | null;
+  is_raw: boolean;
+  size_bytes: number | null;
+  camera_make: string | null;
+  camera_model: string | null;
+  aperture: number | null;
+  shutter: string | null;
+  iso: number | null;
+  focal_mm: number | null;
+  aesthetic_score: number | null;
+  paired_photo_id: number | null;
+}
+
+export interface SourceRow {
+  id: number;
+  name: string;
+  kind: string;
+  status: string;
+  last_scan_at: string | null;
+  photo_count: number;
+}
+
+export async function listAlbums(): Promise<AlbumRow[]> {
+  return tauriInvoke<AlbumRow[]>('list_albums');
+}
+
+export interface ListPhotosParams {
+  limit?: number;
+  offset?: number;
+}
+
+export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('list_photos', {
+    limit: params?.limit ?? null,
+    offset: params?.offset ?? null,
+  });
+}
+
+export async function listSources(): Promise<SourceRow[]> {
+  return tauriInvoke<SourceRow[]>('list_sources');
+}

@@ -18,6 +18,12 @@ vi.mock('@tauri-apps/api/core', () => ({
         return { channel: 'dev' };
       case 'import_dry_run':
         return { root: '/mock', total_files: 0, raw_jpg_pairs: 0, unpaired: 0, by_extension: [] };
+      case 'list_albums':
+        return [];
+      case 'list_photos':
+        return [];
+      case 'list_sources':
+        return [];
       default:
         throw new Error(`mock invoke: unknown command ${cmd}`);
     }
