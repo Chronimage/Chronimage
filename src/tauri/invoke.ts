@@ -156,29 +156,6 @@ export async function listImports(sourceId?: number): Promise<ImportSummary[]> {
   return tauriInvoke<ImportSummary[]>('list_imports', { sourceId: sourceId ?? null });
 }
 
-// ── Source-side cleanup ─────────────────────────────────────────────────────
-
-export interface SourceCleanupItem {
-  source_copy_id: number;
-  photo_id: number;
-  source_id: number;
-  path: string;
-  size_bytes: number;
-  sha256: string;
-}
-
-export interface CleanupPlan {
-  source_id: number;
-  source_name: string;
-  reclaimable_bytes: number;
-  item_count: number;
-  items: SourceCleanupItem[];
-}
-
-export async function cleanupDryRun(sourceId?: number): Promise<CleanupPlan[]> {
-  return tauriInvoke<CleanupPlan[]>('cleanup_dry_run', { sourceId: sourceId ?? null });
-}
-
 // ── Rediscovery commands ────────────────────────────────────────────────────
 
 export async function onThisDay(limit?: number): Promise<PhotoRow[]> {
@@ -301,4 +278,50 @@ export async function findDuplicates(minSimilarity?: number): Promise<DuplicateG
  */
 export async function searchPhotos(query: string, limit?: number): Promise<PhotoRow[]> {
   return tauriInvoke<PhotoRow[]>('search_photos', { query, limit: limit ?? null });
+}
+
+// ── Source-side cleanup ────────────────────────────────────────────────────
+
+export interface CleanupItem {
+  copy_id: number;
+  photo_id: number;
+  source_id: number;
+  source_kind: string;
+  path: string | null;
+  verified_sha256: string;
+  size_bytes: number;
+}
+
+export interface SourceCleanupItem {
+  source_id: number;
+  source_name: string;
+  source_kind: string;
+  reclaimable_bytes: number;
+  file_count: number;
+  items: CleanupItem[];
+}
+
+export interface CleanupPlan {
+  plan_id: string;
+  confirm_token: string;
+  total_reclaimable_bytes: number;
+  total_file_count: number;
+  sources: SourceCleanupItem[];
+}
+
+export async function cleanupDryRun(): Promise<CleanupPlan> {
+  return tauriInvoke<CleanupPlan>('cleanup_dry_run');
+}
+
+export interface CleanupExecuteResult {
+  deleted_count: number;
+  freed_bytes: number;
+  errors: string[];
+}
+
+export async function cleanupExecute(planId: string, confirmToken: string): Promise<CleanupExecuteResult> {
+  return tauriInvoke<CleanupExecuteResult>('cleanup_execute', {
+    planId,
+    confirmToken,
+  });
 }

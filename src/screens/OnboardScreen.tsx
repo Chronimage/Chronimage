@@ -109,11 +109,10 @@ function getSourceKind(sourceName: string): string {
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 interface CleanupSectionProps {
-  plans: CleanupPlan[];
+  plan: CleanupPlan;
 }
 
-function CleanupSection({ plans }: CleanupSectionProps) {
-  const totalBytes = plans.reduce((sum, p) => sum + p.reclaimable_bytes, 0);
+function CleanupSection({ plan }: CleanupSectionProps) {
   return (
     <div style={{ marginTop: 32 }}>
       <div
@@ -133,18 +132,18 @@ function CleanupSection({ plans }: CleanupSectionProps) {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <span className="display" style={{ fontSize: 28 }}>
-            {fmtBytes(totalBytes)}
+            {fmtBytes(plan.total_reclaimable_bytes)}
           </span>
           <span className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-            {plans.reduce((s, p) => s + p.item_count, 0).toLocaleString()} photos across {plans.length}{' '}
-            {plans.length === 1 ? 'source' : 'sources'}
+            {plan.total_file_count.toLocaleString()} photos across {plan.sources.length}{' '}
+            {plan.sources.length === 1 ? 'source' : 'sources'}
           </span>
         </div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {plans.map((plan) => (
+        {plan.sources.map((src) => (
           <div
-            key={plan.source_id}
+            key={src.source_id}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -155,13 +154,13 @@ function CleanupSection({ plans }: CleanupSectionProps) {
               background: 'var(--bg-elev)',
             }}
           >
-            <Icon name={SOURCE_KIND_ICON[getSourceKind(plan.source_name)] ?? 'disk'} size={14} />
-            <span style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>{plan.source_name}</span>
+            <Icon name={SOURCE_KIND_ICON[getSourceKind(src.source_name)] ?? 'disk'} size={14} />
+            <span style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>{src.source_name}</span>
             <span className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)' }}>
-              {plan.item_count.toLocaleString()} photos
+              {src.file_count.toLocaleString()} photos
             </span>
             <span className="mono" style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>
-              {fmtBytes(plan.reclaimable_bytes)}
+              {fmtBytes(src.reclaimable_bytes)}
             </span>
             <button
               type="button"
@@ -309,7 +308,8 @@ function OnbSources({
   const deleteSource = useDeleteSource();
   const { data: icloudPath } = useDetectIcloudPath();
   const { data: iphoneDevices = [] } = useIphoneDevices();
-  const { data: cleanupPlans = [] } = useCleanupDryRun();
+  const cleanupDryRun = useCleanupDryRun();
+  const cleanupPlan = cleanupDryRun.data ?? null;
 
   const runningImports = [...activeImports.values()].filter((i) => !i.finished);
   const finishedImports = [...activeImports.values()].filter((i) => i.finished);
@@ -516,7 +516,7 @@ function OnbSources({
               </div>
             ))}
           </div>
-          {cleanupPlans.length > 0 && <CleanupSection plans={cleanupPlans} />}
+          {cleanupPlan && cleanupPlan.sources.length > 0 && <CleanupSection plan={cleanupPlan} />}
         </>
       )}
     </div>

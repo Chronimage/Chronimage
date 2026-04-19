@@ -6,8 +6,10 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type AlbumRow,
+  type CleanupExecuteResult,
   type CleanupPlan,
   cleanupDryRun,
+  cleanupExecute,
   createSource,
   type DuplicateGroup,
   deleteSource,
@@ -38,6 +40,7 @@ import {
 
 export type {
   AlbumRow,
+  CleanupExecuteResult,
   CleanupPlan,
   DuplicateGroup,
   ImportProgressEvent,
@@ -93,13 +96,6 @@ export function useUnseenPhotos(limit?: number, minScore?: number) {
   return useQuery({
     queryKey: ['unseen_photos', limit, minScore],
     queryFn: () => unseenPhotos(limit, minScore),
-  });
-}
-
-export function useCleanupDryRun(sourceId?: number) {
-  return useQuery({
-    queryKey: ['cleanup_dry_run', sourceId],
-    queryFn: () => cleanupDryRun(sourceId),
   });
 }
 
@@ -193,5 +189,26 @@ export function useSearchPhotos(query: string) {
     enabled: query.trim().length > 0,
     staleTime: 30_000,
     placeholderData: (prev) => prev,
+  });
+}
+
+// ── Cleanup ────────────────────────────────────────────────────────────────
+
+export function useCleanupDryRun() {
+  return useMutation({
+    mutationFn: () => cleanupDryRun(),
+  });
+}
+
+export function useCleanupExecute() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ planId, confirmToken }: { planId: string; confirmToken: string }) =>
+      cleanupExecute(planId, confirmToken),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['cleanup'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
   });
 }

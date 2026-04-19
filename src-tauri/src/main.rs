@@ -111,6 +111,7 @@ fn main() {
             commands::download_models,
             commands::find_duplicates,
             commands::search_photos,
+            commands::cleanup_execute,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
