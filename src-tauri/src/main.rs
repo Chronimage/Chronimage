@@ -59,6 +59,8 @@ fn main() {
             commands::app_version,
             commands::current_channel,
             commands::import_dry_run,
+            commands::start_import,
+            commands::list_imports,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

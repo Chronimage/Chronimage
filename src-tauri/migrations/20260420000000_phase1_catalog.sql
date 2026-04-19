@@ -187,8 +187,8 @@ CREATE TRIGGER IF NOT EXISTS tags_fts_delete AFTER DELETE ON tags BEGIN
     WHERE rowid = old.photo_id;
 END;
 
--- ── Imports: track last seen path for resume ─────────────────────────────────
--- (last_seen_path already added in initial migration)
+-- ── Imports: add skipped_count column ───────────────────────────────────────
+ALTER TABLE imports ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0;
 
 -- ── Schema version bump ─────────────────────────────────────────────────────
 
