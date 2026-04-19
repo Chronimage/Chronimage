@@ -282,17 +282,23 @@ async fn execute_pipeline(
                 eta_seconds: eta,
             });
 
-            Ok::<(PathBuf, String, i64), AppError>((path, hash, photo_id))
+            Ok::<(PathBuf, String, i64, bool), AppError>((path, hash, photo_id, rows_affected > 0))
         });
 
         handles.push(handle);
     }
 
-    // Collect results.
+    // Collect results; track newly-inserted photos for the AI stage.
     let mut path_hash_id: Vec<(PathBuf, String, i64)> = Vec::new();
+    let mut new_photos: Vec<(PathBuf, i64)> = Vec::new();
     for h in handles {
         match h.await {
-            Ok(Ok(triple)) => path_hash_id.push(triple),
+            Ok(Ok((path, hash, photo_id, was_inserted))) => {
+                if was_inserted {
+                    new_photos.push((path.clone(), photo_id));
+                }
+                path_hash_id.push((path, hash, photo_id));
+            }
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "pipeline: file processing error");
                 errors.fetch_add(1, Ordering::Relaxed);
@@ -331,6 +337,84 @@ async fn execute_pipeline(
                 .await
             {
                 tracing::warn!(error = %e, "pipeline: pair link update failed");
+            }
+        }
+    }
+
+    // ── Stage 4: AI enrichment (NIMA + SigLIP, model-optional) ─────────────
+    if !new_photos.is_empty() {
+        if let Ok(models_dir) = crate::util::paths::models_dir() {
+            let nima_session =
+                crate::ai::aesthetic::get_or_load(&models_dir.join("nima.onnx")).ok();
+            let siglip_session =
+                crate::ai::siglip::get_or_load(&models_dir.join("siglip-b16-image.onnx")).ok();
+
+            if nima_session.is_some() || siglip_session.is_some() {
+                // Obtain the model row id for embeddings (created lazily).
+                let siglip_model_id = if siglip_session.is_some() {
+                    crate::catalog::ensure_model_row(&pool, "siglip-b16-image", "embedding").await
+                } else {
+                    None
+                };
+
+                for (path, photo_id) in &new_photos {
+                    // NIMA aesthetic score → photos.aesthetic_score
+                    if let Some(nima) = nima_session {
+                        let p = path.clone();
+                        match tokio::task::spawn_blocking(move || nima.score(&p)).await {
+                            Ok(Ok(score)) => {
+                                if let Err(e) = sqlx::query(
+                                    "UPDATE photos SET aesthetic_score = ?1 WHERE id = ?2",
+                                )
+                                .bind(score)
+                                .bind(photo_id)
+                                .execute(&pool)
+                                .await
+                                {
+                                    tracing::warn!(error = %e, photo_id, "aesthetic score update failed");
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!(error = %e, photo_id, "nima score failed")
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, photo_id, "nima task join failed")
+                            }
+                        }
+                    }
+
+                    // SigLIP embedding → photo_embeddings (BLOB fallback)
+                    if let (Some(siglip), Some(model_id)) = (siglip_session, siglip_model_id) {
+                        let p = path.clone();
+                        match tokio::task::spawn_blocking(move || siglip.embed_image(&p)).await {
+                            Ok(Ok(vec)) => {
+                                let bytes: Vec<u8> =
+                                    vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+                                let now_ts = Utc::now().to_rfc3339();
+                                if let Err(e) = sqlx::query(
+                                    "INSERT OR REPLACE INTO photo_embeddings \
+                                     (photo_id, model_id, embedding, updated_at) \
+                                     VALUES (?1, ?2, ?3, ?4)",
+                                )
+                                .bind(photo_id)
+                                .bind(model_id)
+                                .bind(&bytes)
+                                .bind(&now_ts)
+                                .execute(&pool)
+                                .await
+                                {
+                                    tracing::warn!(error = %e, photo_id, "embedding insert failed");
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!(error = %e, photo_id, "siglip embed failed")
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, photo_id, "siglip task join failed")
+                            }
+                        }
+                    }
+                }
             }
         }
     }

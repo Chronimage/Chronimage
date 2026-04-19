@@ -235,6 +235,26 @@ export async function scoreAesthetic(path: string): Promise<number> {
   return tauriInvoke<number>('score_aesthetic', { path });
 }
 
+/** Download AI models to the local models directory.
+ *  Pass `names` to download a subset; omit for all known models.
+ *  Progress is emitted as `DOWNLOAD_PROGRESS_EVENT` Tauri events.
+ *  Returns the names of successfully installed models. */
+export async function downloadModels(names?: string[]): Promise<string[]> {
+  return tauriInvoke<string[]>('download_models', { names: names ?? null });
+}
+
+// ── Download progress event ─────────────────────────────────────────────────
+
+export interface DownloadProgressEvent {
+  model_name: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  done: boolean;
+  already_installed: boolean;
+}
+
+export const DOWNLOAD_PROGRESS_EVENT = 'chronimage://download-progress';
+
 // ── Import progress event ───────────────────────────────────────────────────
 
 export interface ImportProgressEvent {

@@ -108,6 +108,7 @@ fn main() {
             commands::detect_hardware,
             commands::embed_image,
             commands::score_aesthetic,
+            commands::download_models,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

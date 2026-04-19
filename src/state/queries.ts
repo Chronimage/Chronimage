@@ -11,6 +11,7 @@ import {
   createSource,
   deleteSource,
   detectIcloudPath,
+  downloadModels,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
   type ImportSummary,
@@ -162,4 +163,14 @@ export function useDetectIcloudPath() {
 
 export function useIphoneDevices() {
   return useQuery({ queryKey: ['iphone_devices'], queryFn: listIphoneDevices });
+}
+
+export function useDownloadModels() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (names?: string[]) => downloadModels(names),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['models'] });
+    },
+  });
 }

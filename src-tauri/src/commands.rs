@@ -658,6 +658,77 @@ pub fn score_aesthetic(path: String) -> AppResult<f32> {
     session.score(std::path::Path::new(&path))
 }
 
+/// Download one or more AI models to the local models directory.
+///
+/// `names` is an optional filter — if omitted all known models are downloaded.
+/// Progress is emitted as `"chronimage://download-progress"` events.
+/// Returns the list of model names that were successfully installed.
+#[tauri::command]
+pub async fn download_models<R: tauri::Runtime>(
+    names: Option<Vec<String>>,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<String>> {
+    use crate::ai::download::{user_initiated_download_model, DownloadProgress, KNOWN_MODELS};
+    use tauri::Emitter;
+
+    let models_dir = crate::util::paths::models_dir()?;
+    let specs: Vec<_> = KNOWN_MODELS
+        .iter()
+        .filter(|m| {
+            names
+                .as_ref()
+                .map(|n| n.iter().any(|req| req == m.name))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let mut installed: Vec<String> = Vec::new();
+
+    for spec in specs {
+        let handle = app_handle.clone();
+        let name = spec.name.to_string();
+        let result =
+            user_initiated_download_model(spec, &models_dir, move |p: DownloadProgress| {
+                let _ = handle.emit("chronimage://download-progress", &p);
+            })
+            .await;
+
+        match result {
+            Ok(path) => {
+                // Upsert the model row so the catalog reflects the installation.
+                let now_ts = chrono::Utc::now().to_rfc3339();
+                let path_str = path.to_string_lossy().to_string();
+                let _ = sqlx::query(
+                    "INSERT INTO models (name, kind, version, sha256, installed_path, installed_at, size_bytes) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     ON CONFLICT(name) DO UPDATE SET \
+                       installed_path = excluded.installed_path, \
+                       installed_at   = excluded.installed_at, \
+                       size_bytes     = excluded.size_bytes",
+                )
+                .bind(&name)
+                .bind(spec.kind)
+                .bind(spec.version)
+                .bind(spec.sha256)
+                .bind(&path_str)
+                .bind(&now_ts)
+                .bind(spec.size_bytes as i64)
+                .execute(&state.pool)
+                .await;
+
+                tracing::info!(model = %name, path = %path_str, "model installed");
+                installed.push(name);
+            }
+            Err(e) => {
+                tracing::warn!(model = %name, error = %e, "model download failed");
+            }
+        }
+    }
+
+    Ok(installed)
+}
+
 /// Photos that have never been viewed or were last viewed more than two years ago,
 /// with an aesthetic_score >= `min_score` (default 0.0).
 /// Returns at most `limit` rows (default 20), ordered by aesthetic_score desc.

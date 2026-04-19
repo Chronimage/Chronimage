@@ -5,4 +5,5 @@
 
 pub mod aesthetic;
 pub mod budget;
+pub mod download;
 pub mod siglip;
