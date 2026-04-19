@@ -4,6 +4,7 @@ version = "0.1.0-dev"
 description = "Chronimage — on-device AI photo organizer"
 authors = ["Jay Amirineni <jay@stackular.com>"]
 license = "UNLICENSED"
+publish = false
 edition = "2021"
 rust-version = "1.88"
 default-run = "chronimage-app"
