@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Chronimage Insider",
+  "identifier": "app.chronimage.desktop.insider",
+  "bundle": {
+    "shortDescription": "Chronimage — Insider preview (license-gated)."
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": ["https://releases.chronimage.app/insider.json"],
+      "dialog": false,
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
+    }
+  }
+}

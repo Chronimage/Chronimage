@@ -1,0 +1,10 @@
+* @jamirineni-onedosh
+
+# AI models + pipelines require extra care
+/src-tauri/src/ai/      @jamirineni-onedosh
+/src-tauri/src/raw/     @jamirineni-onedosh
+
+# Release workflows + signing
+/.github/workflows/release-*.yml  @jamirineni-onedosh
+/.github/workflows/insider.yml    @jamirineni-onedosh
+/src-tauri/tauri.*.conf.json      @jamirineni-onedosh

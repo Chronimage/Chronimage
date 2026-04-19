@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Chronimage Nightly",
+  "identifier": "app.chronimage.desktop.nightly",
+  "bundle": {
+    "shortDescription": "Chronimage — Nightly channel.",
+    "windows": {
+      "digestAlgorithm": "sha256"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": ["https://releases.chronimage.app/nightly.json"],
+      "dialog": false,
+      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
+    }
+  }
+}

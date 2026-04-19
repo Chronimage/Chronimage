@@ -1,0 +1,83 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Nightly (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    environment: nightly
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with: { version: '9.15.0' }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: nightly-win
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Full test gauntlet
+        run: |
+          pnpm typecheck
+          pnpm exec biome ci .
+          pnpm test:cov
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Criterion perf benches
+        run: cargo bench --manifest-path src-tauri/Cargo.toml -- --save-baseline nightly
+
+      - name: Mutation tests (time-boxed)
+        continue-on-error: true
+        run: |
+          cargo install cargo-mutants --quiet
+          cargo mutants --manifest-path src-tauri/Cargo.toml --timeout 30 --jobs 2 --test-workspace || true
+
+      - name: Compute nightly version
+        id: ver
+        shell: pwsh
+        run: |
+          $base = (node -p "require('./package.json').version").Split('-')[0]
+          $stamp = Get-Date -Format "yyyyMMdd"
+          "tag=v$base-nightly.$stamp" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Build signed nightly MSI
+        env:
+          # Non-EV test cert for nightly; OK that SmartScreen warns
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_UPDATER_PWD }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_SIGN_CERT_NIGHTLY_PFX_B64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_NIGHTLY_PWD }}
+        run: pnpm tauri build --config src-tauri/tauri.nightly.conf.json
+
+      - name: Bundle size check
+        run: node scripts/bundle-size-check.cjs
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronimage-nightly-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+          retention-days: 14
+
+      - name: Publish updater manifest (nightly channel)
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/publish-updater-manifest.cjs nightly ${{ steps.ver.outputs.tag }}

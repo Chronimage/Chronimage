@@ -1,0 +1,24 @@
+name: release-please
+
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: node
+          target-branch: develop
+          changelog-notes-type: github
+          # Version drives Cargo.toml + package.json via the extra-files list
+          extra-files: |
+            package.json
+            src-tauri/Cargo.toml
+            src-tauri/tauri.conf.json

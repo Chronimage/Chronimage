@@ -1,0 +1,32 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default permissions for the Chronimage main window.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
+    "core:app:allow-version",
+    "core:app:allow-name",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "dialog:allow-confirm",
+    "fs:allow-appconfig-read-recursive",
+    "fs:allow-appdata-read-recursive",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "log:default",
+    "notification:default",
+    "os:default",
+    "shell:default",
+    "store:default",
+    "updater:default"
+  ]
+}
