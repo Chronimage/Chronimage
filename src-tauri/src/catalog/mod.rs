@@ -6,10 +6,12 @@
 
 pub mod db;
 pub mod models;
+pub mod rediscovery;
 pub mod rules;
 pub mod seed;
 
 pub use db::{open_pool, PoolOptions};
+pub use rediscovery::seed_rediscovery_albums;
 pub use seed::seed_default_smart_albums;
 
 /// Get or create a row in the `models` table, returning the row id.

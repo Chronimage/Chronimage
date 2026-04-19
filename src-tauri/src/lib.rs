@@ -10,6 +10,7 @@
 #![allow(clippy::module_inception)]
 
 pub mod ai;
+pub mod albums;
 pub mod catalog;
 pub mod commands;
 pub mod dedupe;

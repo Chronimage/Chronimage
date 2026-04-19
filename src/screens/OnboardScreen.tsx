@@ -17,6 +17,7 @@ import {
   type CleanupPlan,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
+  type LiftPlan,
   useCleanupDryRun,
   useCreateSource,
   useDeleteSource,
@@ -24,6 +25,8 @@ import {
   useDownloadModels,
   useImportGoogleTakeout,
   useIphoneDevices,
+  useLiftShiftDryRun,
+  useLiftShiftExecute,
   useSources,
   useStartImport,
 } from '../state/queries';
@@ -654,6 +657,114 @@ function OnbImport({ activeImports }: OnbImportProps) {
   );
 }
 
+// ── Step 3b: Lift & Shift panel (shown on import step when mode=consolidate) ──
+
+function OnbLiftPanel() {
+  const [targetRoot, setTargetRoot] = useState<string>('');
+  const [plan, setPlan] = useState<LiftPlan | null>(null);
+  const dryRun = useLiftShiftDryRun();
+  const execute = useLiftShiftExecute();
+
+  async function pickTarget(): Promise<void> {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (!selected || typeof selected !== 'string') return;
+    setTargetRoot(selected);
+    setPlan(null);
+  }
+
+  async function previewPlan(): Promise<void> {
+    if (!targetRoot) return;
+    const result = await dryRun.mutateAsync({ targetRoot });
+    setPlan(result);
+  }
+
+  async function runExecute(): Promise<void> {
+    if (!plan) return;
+    await execute.mutateAsync({ planId: plan.plan_id, confirmToken: plan.confirm_token });
+    setPlan(null);
+  }
+
+  const receipt = execute.data;
+  const gb = plan ? (plan.total_bytes / 1_073_741_824).toFixed(2) : '0.00';
+
+  return (
+    <div
+      style={{
+        marginTop: 20,
+        padding: 14,
+        borderRadius: 10,
+        border: '1px solid var(--br)',
+        background: 'var(--panel)',
+      }}
+    >
+      <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginBottom: 10 }}>
+        CONSOLIDATE INTO ONE LIBRARY
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+        <button type="button" className="btn2 ghost" onClick={pickTarget}>
+          <Icon name="disk" size={13} /> {targetRoot ? 'Change target…' : 'Pick target folder…'}
+        </button>
+        {targetRoot && (
+          <code style={{ fontSize: 11, color: 'var(--fg-dim)' }} title={targetRoot}>
+            {targetRoot.length > 48 ? `…${targetRoot.slice(-45)}` : targetRoot}
+          </code>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          className="btn2 ghost"
+          onClick={previewPlan}
+          disabled={!targetRoot || dryRun.isPending}
+        >
+          {dryRun.isPending ? 'Planning…' : 'Preview consolidation'}
+        </button>
+        {plan && plan.total_file_count > 0 && (
+          <button
+            type="button"
+            className="btn2 primary"
+            onClick={runExecute}
+            disabled={execute.isPending || !plan.free_space_ok}
+            title={plan.free_space_ok ? '' : 'Target drive free space < 1.5× plan size'}
+          >
+            {execute.isPending ? 'Consolidating…' : `Consolidate ${plan.total_file_count} files (${gb} GB)`}
+          </button>
+        )}
+      </div>
+
+      {plan && plan.total_file_count === 0 && (
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--fg-dim)' }}>
+          Nothing to move — every photo already lives under this target root.
+        </div>
+      )}
+
+      {plan && !plan.free_space_ok && (
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--warn, #b07a00)' }}>
+          Target drive does not have 1.5× the plan size free. Pick a different drive.
+        </div>
+      )}
+
+      {dryRun.error && (
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--danger, #c33)' }}>
+          Plan failed: {String(dryRun.error.message ?? dryRun.error)}
+        </div>
+      )}
+
+      {receipt && (
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--fg-dim)' }}>
+          Copied {receipt.copied_count} files ({(receipt.bytes_copied / 1_073_741_824).toFixed(2)} GB).
+          Manifest: <code>{receipt.manifest_path}</code>
+          {receipt.errors.length > 0 && (
+            <span style={{ color: 'var(--warn, #b07a00)' }}> · {receipt.errors.length} warnings</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Step 4: Models ────────────────────────────────────────────────────────────
 
 interface ModelTier {
@@ -1213,7 +1324,12 @@ export function OnboardScreen() {
               error={sourceErrorNormalized}
             />
           )}
-          {step === 'import' && <OnbImport activeImports={activeImports} />}
+          {step === 'import' && (
+            <>
+              <OnbImport activeImports={activeImports} />
+              {catalogMode === 'consolidate' && <OnbLiftPanel />}
+            </>
+          )}
           {step === 'models' && <OnbModels />}
           {step === 'people' && <OnbPeople />}
 

@@ -1428,7 +1428,8 @@ mod tests {
         .await
         .expect("query");
 
-        assert_eq!(rows.len(), 12);
+        // 12 static system albums + 3 rediscovery albums = 15 total.
+        assert_eq!(rows.len(), 15);
         assert!(rows.iter().all(|r| r.is_system));
     }
 
