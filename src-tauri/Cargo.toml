@@ -6,6 +6,7 @@ authors = ["Jay Amirineni <jay@stackular.com>"]
 license = "UNLICENSED"
 edition = "2021"
 rust-version = "1.88"
+default-run = "chronimage-app"
 
 [[bin]]
 name = "chronimage-app"
