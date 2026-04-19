@@ -1,20 +1,21 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.12/schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
   "files": {
     "ignoreUnknown": true,
-    "ignore": [
-      "dist",
-      "node_modules",
-      "src-tauri/target",
-      "design-handoff",
-      "models",
-      "src/routeTree.gen.ts",
-      "coverage",
-      "playwright-report",
-      "test-results",
-      "tests/visual-goldens/actual",
-      "tests/visual-goldens/diff"
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/node_modules",
+      "!**/src-tauri/target",
+      "!**/design-handoff",
+      "!**/models",
+      "!**/src/routeTree.gen.ts",
+      "!**/coverage",
+      "!**/playwright-report",
+      "!**/test-results",
+      "!**/tests/visual-goldens/actual",
+      "!**/tests/visual-goldens/diff"
     ]
   },
   "formatter": {
@@ -44,8 +45,7 @@
       "suspicious": {
         "noExplicitAny": "error",
         "noConsole": { "level": "error", "options": { "allow": ["warn", "error"] } },
-        "noDebugger": "error",
-        "noConsoleLog": "error"
+        "noDebugger": "error"
       },
       "style": {
         "useConst": "error",
@@ -64,21 +64,21 @@
       }
     }
   },
-  "organizeImports": { "enabled": true },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "overrides": [
     {
-      "include": ["**/*.test.{ts,tsx}", "tests/**"],
+      "includes": ["**/*.test.{ts,tsx}", "**/tests/**"],
       "linter": {
         "rules": {
-          "suspicious": { "noExplicitAny": "off", "noConsoleLog": "off", "noConsole": "off" }
+          "suspicious": { "noExplicitAny": "off", "noConsole": "off" }
         }
       }
     },
     {
-      "include": ["**/.claude/hooks/**", "**/scripts/**", "scripts/**", ".claude/hooks/**"],
+      "includes": ["**/.claude/hooks/**", "**/scripts/**"],
       "linter": {
         "rules": {
-          "suspicious": { "noConsoleLog": "off", "noConsole": "off" },
+          "suspicious": { "noConsole": "off" },
           "correctness": { "noUnusedVariables": "off", "noUnusedImports": "off" },
           "style": {
             "useNodejsImportProtocol": "off",

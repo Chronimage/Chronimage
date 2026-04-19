@@ -11,13 +11,19 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const BUNDLES_DIR = path.join(ROOT, 'docs', 'context-bundles');
 
 function read(rel) {
-  try { return fs.readFileSync(path.join(ROOT, rel), 'utf8').trimEnd(); }
-  catch { return '(not found)'; }
+  try {
+    return fs.readFileSync(path.join(ROOT, rel), 'utf8').trimEnd();
+  } catch {
+    return '(not found)';
+  }
 }
 
 function exec(cmd) {
-  try { return execSync(cmd, { cwd: ROOT, encoding: 'utf8' }).trimEnd(); }
-  catch { return '(command failed)'; }
+  try {
+    return execSync(cmd, { cwd: ROOT, encoding: 'utf8' }).trimEnd();
+  } catch {
+    return '(command failed)';
+  }
 }
 
 // Determine label from stdin (PreCompact passes {"reason":"manual"|"auto"})
@@ -26,7 +32,9 @@ try {
   const raw = fs.readFileSync(0, 'utf8'); // fd 0 = stdin, cross-platform
   const payload = JSON.parse(raw);
   label = payload.reason === 'manual' ? 'manual-compact' : 'auto-compact';
-} catch { /* stdin unavailable or not JSON — use default label */ }
+} catch {
+  /* stdin unavailable or not JSON — use default label */
+}
 
 const now = new Date();
 const pad = (n) => String(n).padStart(2, '0');
