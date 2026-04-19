@@ -5,8 +5,11 @@ import {
   cleanupDryRun,
   createSource,
   currentChannel,
+  detectIcloudPath,
+  importGoogleTakeout,
   listAlbums,
   listImports,
+  listIphoneDevices,
   listPhotos,
   listSources,
   onThisDay,
@@ -125,6 +128,26 @@ describe('invoke wrappers', () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await cleanupDryRun(5);
     expect(tauriInvoke).toHaveBeenCalledWith('cleanup_dry_run', { sourceId: 5 });
+  });
+
+  it('importGoogleTakeout calls import_google_takeout and returns import_id', async () => {
+    const resp = await importGoogleTakeout(1, '/takeout/root');
+    expect(resp.import_id).toBe(2);
+    expect(tauriInvoke).toHaveBeenCalledWith('import_google_takeout', {
+      sourceId: 1,
+      root: '/takeout/root',
+    });
+  });
+
+  it('detectIcloudPath calls detect_icloud_path', async () => {
+    const path = await detectIcloudPath();
+    expect(path).toBeNull();
+    expect(tauriInvoke).toHaveBeenCalledWith('detect_icloud_path');
+  });
+
+  it('listIphoneDevices calls list_iphone_devices and returns array', async () => {
+    expect(Array.isArray(await listIphoneDevices())).toBe(true);
+    expect(tauriInvoke).toHaveBeenCalledWith('list_iphone_devices');
   });
 
   it('listImports calls list_imports with optional sourceId', async () => {

@@ -182,6 +182,30 @@ export async function unseenPhotos(limit?: number, minScore?: number): Promise<P
   });
 }
 
+// ── Source connectors ───────────────────────────────────────────────────────
+
+/** Run the full import pipeline over a Google Photos Takeout export, then enrich with sidecar metadata. */
+export async function importGoogleTakeout(sourceId: number, root: string): Promise<StartImportResponse> {
+  return tauriInvoke<StartImportResponse>('import_google_takeout', { sourceId, root });
+}
+
+/** Detect the iCloud-for-Windows Photos folder path, or null if not installed. */
+export async function detectIcloudPath(): Promise<string | null> {
+  return tauriInvoke<string | null>('detect_icloud_path');
+}
+
+export interface UsbDevice {
+  device_id: string;
+  friendly_name: string;
+  manufacturer: string;
+  description: string;
+}
+
+/** List Apple USB devices connected via WPD/MTP. Returns [] when none. */
+export async function listIphoneDevices(): Promise<UsbDevice[]> {
+  return tauriInvoke<UsbDevice[]>('list_iphone_devices');
+}
+
 // ── Import progress event ───────────────────────────────────────────────────
 
 export interface ImportProgressEvent {

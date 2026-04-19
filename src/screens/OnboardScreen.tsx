@@ -8,6 +8,9 @@ import {
   type ImportProgressEvent,
   useCleanupDryRun,
   useCreateSource,
+  useDetectIcloudPath,
+  useImportGoogleTakeout,
+  useIphoneDevices,
   useSources,
   useStartImport,
 } from '../state/queries';
@@ -113,7 +116,10 @@ export function OnboardScreen() {
   const { data: sources = [] } = useSources();
   const createSource = useCreateSource();
   const startImport = useStartImport();
+  const importTakeout = useImportGoogleTakeout();
   const { data: cleanupPlans = [] } = useCleanupDryRun();
+  const { data: icloudPath } = useDetectIcloudPath();
+  const { data: iphoneDevices = [] } = useIphoneDevices();
   const setScreen = useUi((s) => s.setScreen);
 
   const [activeImports, setActiveImports] = useState<Map<number, ActiveImport>>(new Map());
@@ -176,11 +182,93 @@ export function OnboardScreen() {
     });
   }
 
+  async function handleAddGoogleTakeout() {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (!selected || typeof selected !== 'string') return;
+
+    const folderName = selected.split(/[\\/]/).pop() ?? selected;
+    const source = await createSource.mutateAsync({
+      name: `Google Photos · ${folderName}`,
+      kind: 'google_photos',
+      rootPath: selected,
+    });
+
+    const resp = await importTakeout.mutateAsync({ sourceId: source.id, root: selected });
+    setActiveImports((prev) => {
+      const next = new Map(prev);
+      next.set(resp.import_id, {
+        importId: resp.import_id,
+        sourceId: source.id,
+        sourceName: source.name,
+        total: 0,
+        done: 0,
+        currentFile: '',
+        etaSeconds: null,
+        finished: false,
+      });
+      return next;
+    });
+  }
+
+  async function handleAddIcloud() {
+    const root = icloudPath ?? (await openDialog({ directory: true, multiple: false }));
+    if (!root || typeof root !== 'string') return;
+
+    const source = await createSource.mutateAsync({
+      name: 'iCloud Photos',
+      kind: 'icloud',
+      rootPath: root,
+    });
+
+    const resp = await startImport.mutateAsync({ sourceId: source.id, root });
+    setActiveImports((prev) => {
+      const next = new Map(prev);
+      next.set(resp.import_id, {
+        importId: resp.import_id,
+        sourceId: source.id,
+        sourceName: source.name,
+        total: 0,
+        done: 0,
+        currentFile: '',
+        etaSeconds: null,
+        finished: false,
+      });
+      return next;
+    });
+  }
+
+  async function handleImportIphone(_deviceId: string, deviceName: string) {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (!selected || typeof selected !== 'string') return;
+
+    const source = await createSource.mutateAsync({
+      name: `iPhone · ${deviceName}`,
+      kind: 'iphone',
+      rootPath: selected,
+    });
+
+    const resp = await startImport.mutateAsync({ sourceId: source.id, root: selected });
+    setActiveImports((prev) => {
+      const next = new Map(prev);
+      next.set(resp.import_id, {
+        importId: resp.import_id,
+        sourceId: source.id,
+        sourceName: source.name,
+        total: 0,
+        done: 0,
+        currentFile: '',
+        etaSeconds: null,
+        finished: false,
+      });
+      return next;
+    });
+  }
+
   const hasAnySources = sources.length > 0;
   const runningImports = [...activeImports.values()].filter((i) => !i.finished);
   const finishedImports = [...activeImports.values()].filter((i) => i.finished);
-  const busy = createSource.isPending || startImport.isPending;
-  const error = createSource.error ?? startImport.error;
+  const busy = createSource.isPending || startImport.isPending || importTakeout.isPending;
+  const error = createSource.error ?? startImport.error ?? importTakeout.error;
 
   return (
     <div className="canvas" style={{ gridColumn: '2 / -1' }}>
@@ -293,8 +381,9 @@ export function OnboardScreen() {
             type="button"
             className="btn2"
             style={{ padding: '9px 16px', fontSize: 13 }}
-            disabled
-            title="Phase 1b"
+            onClick={handleAddGoogleTakeout}
+            disabled={busy}
+            title="Select a Google Photos Takeout export folder"
           >
             <Icon name="cloud" size={14} /> Google Photos
           </button>
@@ -302,11 +391,38 @@ export function OnboardScreen() {
             type="button"
             className="btn2"
             style={{ padding: '9px 16px', fontSize: 13 }}
-            disabled
-            title="Phase 1b"
+            onClick={handleAddIcloud}
+            disabled={busy}
+            title={icloudPath ? `Detected: ${icloudPath}` : 'Select your iCloud Photos folder'}
           >
-            <Icon name="iphone" size={14} /> iPhone USB
+            <Icon name="cloud" size={14} />
+            {icloudPath ? 'iCloud (detected)' : 'iCloud Photos'}
           </button>
+          {iphoneDevices.length > 0 ? (
+            iphoneDevices.map((dev) => (
+              <button
+                key={dev.device_id}
+                type="button"
+                className="btn2"
+                style={{ padding: '9px 16px', fontSize: 13 }}
+                onClick={() => handleImportIphone(dev.device_id, dev.friendly_name || dev.description)}
+                disabled={busy}
+                title={`Import from ${dev.friendly_name || dev.description}`}
+              >
+                <Icon name="iphone" size={14} /> {dev.friendly_name || 'iPhone'}
+              </button>
+            ))
+          ) : (
+            <button
+              type="button"
+              className="btn2"
+              style={{ padding: '9px 16px', fontSize: 13 }}
+              disabled
+              title="Connect an iPhone via USB to enable"
+            >
+              <Icon name="iphone" size={14} /> iPhone USB
+            </button>
+          )}
           <button
             type="button"
             className="btn2"

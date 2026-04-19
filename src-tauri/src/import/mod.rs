@@ -3,7 +3,10 @@
 //! Phase 1: filesystem scanner, streaming hasher, RAW+JPG pair detector, and
 //! the full tokio/rayon pipeline that ties them together.
 
+pub mod google_takeout;
 pub mod hash;
+pub mod icloud;
+pub mod iphone_usb;
 pub mod pair;
 pub mod pipeline;
 pub mod scanner;

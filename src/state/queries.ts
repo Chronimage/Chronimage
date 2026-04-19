@@ -9,12 +9,15 @@ import {
   type CleanupPlan,
   cleanupDryRun,
   createSource,
+  detectIcloudPath,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
   type ImportSummary,
+  importGoogleTakeout,
   type ListPhotosParams,
   listAlbums,
   listImports,
+  listIphoneDevices,
   listPhotos,
   listSources,
   onThisDay,
@@ -24,6 +27,7 @@ import {
   type SourceRow,
   type StartImportResponse,
   startImport,
+  type UsbDevice,
   unseenPhotos,
 } from '../tauri/invoke';
 
@@ -36,6 +40,7 @@ export type {
   SourceCleanupItem,
   SourceRow,
   StartImportResponse,
+  UsbDevice,
 };
 export { IMPORT_PROGRESS_EVENT };
 
@@ -125,4 +130,24 @@ export function useStartImport() {
       qc.invalidateQueries({ queryKey: ['imports'] });
     },
   });
+}
+
+export function useImportGoogleTakeout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ sourceId, root }: { sourceId: number; root: string }) =>
+      importGoogleTakeout(sourceId, root),
+    onSuccess: (_data, { sourceId }) => {
+      qc.invalidateQueries({ queryKey: ['imports', sourceId] });
+      qc.invalidateQueries({ queryKey: ['imports'] });
+    },
+  });
+}
+
+export function useDetectIcloudPath() {
+  return useQuery({ queryKey: ['icloud_path'], queryFn: detectIcloudPath });
+}
+
+export function useIphoneDevices() {
+  return useQuery({ queryKey: ['iphone_devices'], queryFn: listIphoneDevices });
 }

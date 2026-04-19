@@ -511,6 +511,75 @@ pub async fn cleanup_dry_run(
     Ok(result)
 }
 
+// ── Source connector commands ─────────────────────────────────────────────
+
+/// Run the standard import pipeline over a Google Photos Takeout export root,
+/// then enrich catalog rows with metadata from the sidecar `.json` files.
+#[tauri::command]
+pub async fn import_google_takeout(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    source_id: i64,
+    root: String,
+) -> AppResult<StartImportResponse> {
+    let root_path = PathBuf::from(&root);
+    if !root_path.exists() {
+        return Err(AppError::NotFound(format!(
+            "takeout root does not exist: {root}"
+        )));
+    }
+
+    let pool = state.pool.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (source_id, started_at, total_files, imported_count, \
+         skipped_count, error_count) VALUES (?1, ?2, 0, 0, 0, 0) RETURNING id",
+    )
+    .bind(source_id)
+    .bind(&now)
+    .fetch_one(&pool)
+    .await?;
+
+    let pool2 = pool.clone();
+    let root_clone = root_path.clone();
+    tokio::spawn(async move {
+        if let Err(e) = import::pipeline::run_pipeline_from_import_id(
+            source_id,
+            import_id,
+            root_clone.clone(),
+            pool2.clone(),
+            app_handle,
+        )
+        .await
+        {
+            tracing::error!(error = %e, import_id, "google takeout pipeline failed");
+            return;
+        }
+
+        match import::google_takeout::enrich_from_sidecars(&pool2, &root_clone).await {
+            Ok(n) => tracing::info!(enriched = n, import_id, "takeout sidecar enrichment done"),
+            Err(e) => tracing::warn!(error = %e, import_id, "takeout sidecar enrichment failed"),
+        }
+    });
+
+    Ok(StartImportResponse { import_id })
+}
+
+/// Detect the iCloud-for-Windows Photos folder, if installed.
+/// Returns the path as a string, or `null` when not found.
+#[tauri::command]
+pub async fn detect_icloud_path() -> AppResult<Option<String>> {
+    Ok(import::icloud::detect_icloud_path().map(|p| p.to_string_lossy().into_owned()))
+}
+
+/// List Apple devices connected via USB (WPD/MTP). Returns `[]` when none.
+#[tauri::command]
+pub async fn list_iphone_devices() -> AppResult<Vec<import::iphone_usb::UsbDevice>> {
+    tokio::task::spawn_blocking(import::iphone_usb::list_iphone_devices)
+        .await
+        .map_err(|e| AppError::Internal(format!("iphone usb task join: {e}")))?
+}
+
 // ── Rediscovery commands ──────────────────────────────────────────────────
 
 /// Photos taken on today's month+day in any prior year.

@@ -68,6 +68,9 @@ fn main() {
             commands::unseen_photos,
             commands::cleanup_dry_run,
             commands::refresh_smart_albums,
+            commands::import_google_takeout,
+            commands::detect_icloud_path,
+            commands::list_iphone_devices,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

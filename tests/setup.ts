@@ -45,6 +45,12 @@ vi.mock('@tauri-apps/api/core', () => ({
         return { import_id: 1 };
       case 'list_imports':
         return [];
+      case 'import_google_takeout':
+        return { import_id: 2 };
+      case 'detect_icloud_path':
+        return null;
+      case 'list_iphone_devices':
+        return [];
       default:
         throw new Error(`mock invoke: unknown command ${cmd}`);
     }
