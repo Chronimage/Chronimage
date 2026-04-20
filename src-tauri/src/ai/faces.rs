@@ -52,7 +52,7 @@ use crate::{AppError, AppResult};
 use image::imageops::FilterType;
 use ort::session::Session;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// ArcFace R50 embedding dimensionality.
 pub const FACE_EMBED_DIM: usize = 512;
@@ -197,7 +197,57 @@ impl FacesSession {
             is_stub: true,
         }
     }
+}
 
+// ── Global memoised session (shared across pipeline runs) ──────────────────
+
+/// Holds the process-wide `FacesSession`. `None` variant means a successful
+/// resolve-and-init ran but either model file is absent at the resolved path
+/// — callers should skip face work. `Some(sess)` may still be a stub if
+/// inference init failed after file-existence checks passed (rare).
+static GLOBAL_FACES: OnceLock<Option<FacesSession>> = OnceLock::new();
+
+/// Initialise the process-wide `FacesSession` exactly once. Subsequent calls
+/// are no-ops — the first call's resolution wins.
+///
+/// Passing `None` for either path means "we already know the file is absent";
+/// the global is seeded with `None` and face work is permanently skipped for
+/// this process. Re-init after a bundled-dir re-resolution requires a restart.
+///
+/// Safe to call from any thread; the `OnceLock` linearises.
+pub fn init_global_faces_session(retina_path: Option<&Path>, arcface_path: Option<&Path>) {
+    GLOBAL_FACES.get_or_init(|| match (retina_path, arcface_path) {
+        (Some(r), Some(a)) if r.exists() && a.exists() => match FacesSession::load(r, a) {
+            Ok(sess) => {
+                tracing::info!(
+                    scrfd = %r.display(),
+                    arcface = %a.display(),
+                    "global FacesSession initialised"
+                );
+                Some(sess)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "global FacesSession load failed — face work disabled");
+                None
+            }
+        },
+        _ => {
+            tracing::debug!("global FacesSession: model paths absent — face work disabled");
+            None
+        }
+    });
+}
+
+/// Access the memoised global session. Returns `None` when either model file
+/// was absent at init time (or init was never called — e.g. tests).
+///
+/// Pipeline stage-5 + any future face-related command should prefer this over
+/// `FacesSession::load` to avoid re-init (~2s per call, ~190MB ONNX commit).
+pub fn global_faces_session() -> Option<&'static FacesSession> {
+    GLOBAL_FACES.get().and_then(|o| o.as_ref())
+}
+
+impl FacesSession {
     // ── public API ────────────────────────────────────────────────────────
 
     /// Detect faces in `image_path` using default detection parameters.

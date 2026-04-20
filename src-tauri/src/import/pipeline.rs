@@ -446,81 +446,71 @@ async fn execute_pipeline(
 
     // ── Stage 5: face detection + embedding (model-optional) ───────────────
     //
-    // Requires both SCRFD + ArcFace ONNX files on disk. Skips silently when
-    // either is absent (e.g. fresh install before model download, or
-    // CHRONIMAGE_MODELS_DIR-overridden test environment).
+    // Uses the process-wide `FacesSession` initialised once at app boot
+    // (src-tauri/src/main.rs calls `init_global_faces_session`). When absent
+    // — tests, fresh installs without bundled models, or CHRONIMAGE_MODELS_DIR
+    // pointing at an empty dir — `global_faces_session` returns None and
+    // stage-5 is skipped cleanly.
+    //
+    // Previously this block called `FacesSession::load(scrfd, arcface)` on
+    // every pipeline invocation, committing ~190 MB of ONNX through ort
+    // (~2 s per import batch). Memoising at boot eliminates the repeated init.
     if !new_photos.is_empty() {
-        if let Ok(models_dir) = crate::util::paths::models_dir() {
-            let scrfd_path = models_dir.join("det_10g.onnx");
-            let arcface_path = models_dir.join("w600k_r50.onnx");
-            if scrfd_path.exists() && arcface_path.exists() {
-                match crate::ai::faces::FacesSession::load(&scrfd_path, &arcface_path) {
-                    Ok(session) => {
-                        let session = std::sync::Arc::new(session);
-                        for (path, photo_id) in &new_photos {
-                            let session_c = Arc::clone(&session);
-                            let path_c = path.clone();
-                            let detect_result = tokio::task::spawn_blocking(move || {
-                                session_c.detect_faces(&path_c)
-                            })
-                            .await;
-                            let faces = match detect_result {
-                                Ok(Ok(f)) => f,
-                                Ok(Err(e)) => {
-                                    tracing::debug!(error = %e, photo_id, "scrfd detect failed");
-                                    continue;
-                                }
-                                Err(e) => {
-                                    tracing::debug!(error = %e, photo_id, "scrfd task join failed");
-                                    continue;
-                                }
-                            };
-                            let now_ts = Utc::now().to_rfc3339();
-                            for face in faces {
-                                let session_c = Arc::clone(&session);
-                                let path_c = path.clone();
-                                let face_for_embed = face.clone();
-                                let embed_result = tokio::task::spawn_blocking(move || {
-                                    session_c.embed_face(&path_c, &face_for_embed)
-                                })
-                                .await;
-                                let embedding = match embed_result {
-                                    Ok(Ok(v)) => v,
-                                    Ok(Err(e)) => {
-                                        tracing::debug!(error = %e, photo_id, "arcface embed failed");
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(error = %e, photo_id, "arcface task join failed");
-                                        continue;
-                                    }
-                                };
-                                let embedding_bytes: Vec<u8> =
-                                    embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-                                if let Err(e) = sqlx::query(
-                                    "INSERT INTO faces \
-                                     (photo_id, bbox_x, bbox_y, bbox_w, bbox_h, quality, \
-                                      embedding, created_at) \
-                                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                                )
-                                .bind(photo_id)
-                                .bind(face.x as f64)
-                                .bind(face.y as f64)
-                                .bind(face.w as f64)
-                                .bind(face.h as f64)
-                                .bind(face.score as f64)
-                                .bind(&embedding_bytes)
-                                .bind(&now_ts)
-                                .execute(&pool)
-                                .await
-                                {
-                                    tracing::warn!(error = %e, photo_id, "faces insert failed");
-                                }
-                            }
-                        }
+        if let Some(session) = crate::ai::faces::global_faces_session() {
+            for (path, photo_id) in &new_photos {
+                let path_c = path.clone();
+                let detect_result =
+                    tokio::task::spawn_blocking(move || session.detect_faces(&path_c)).await;
+                let faces = match detect_result {
+                    Ok(Ok(f)) => f,
+                    Ok(Err(e)) => {
+                        tracing::debug!(error = %e, photo_id, "scrfd detect failed");
+                        continue;
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "face session load failed — stage-5 skipped");
+                        tracing::debug!(error = %e, photo_id, "scrfd task join failed");
+                        continue;
+                    }
+                };
+                let now_ts = Utc::now().to_rfc3339();
+                for face in faces {
+                    let path_c = path.clone();
+                    let face_for_embed = face.clone();
+                    let embed_result = tokio::task::spawn_blocking(move || {
+                        session.embed_face(&path_c, &face_for_embed)
+                    })
+                    .await;
+                    let embedding = match embed_result {
+                        Ok(Ok(v)) => v,
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, photo_id, "arcface embed failed");
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, photo_id, "arcface task join failed");
+                            continue;
+                        }
+                    };
+                    let embedding_bytes: Vec<u8> =
+                        embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+                    if let Err(e) = sqlx::query(
+                        "INSERT INTO faces \
+                         (photo_id, bbox_x, bbox_y, bbox_w, bbox_h, quality, \
+                          embedding, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    )
+                    .bind(photo_id)
+                    .bind(face.x as f64)
+                    .bind(face.y as f64)
+                    .bind(face.w as f64)
+                    .bind(face.h as f64)
+                    .bind(face.score as f64)
+                    .bind(&embedding_bytes)
+                    .bind(&now_ts)
+                    .execute(&pool)
+                    .await
+                    {
+                        tracing::warn!(error = %e, photo_id, "faces insert failed");
                     }
                 }
             }
