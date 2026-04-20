@@ -148,14 +148,16 @@ fn main() {
                         // Build AI sessions (stub when model files absent).
                         let md = models_dir().ok();
 
-                        let retina_path = md.as_deref().map(|d| d.join("retinaface-r50.onnx"));
-                        let arcface_path = md.as_deref().map(|d| d.join("arcface-r100.onnx"));
+                        let retina_path = md.as_deref().map(|d| d.join("scrfd_10g_bnkps.onnx"));
+                        let arcface_path = md.as_deref().map(|d| d.join("w600k_r50.onnx"));
                         let faces = Arc::new(FacesSession::load_or_stub(
                             retina_path.as_deref().filter(|p| p.exists()),
                             arcface_path.as_deref().filter(|p| p.exists()),
                         ));
 
-                        let gguf_path = md.as_deref().map(|d| d.join("gemma-4-9b-it-q4_k_m.gguf"));
+                        let gguf_path = md
+                            .as_deref()
+                            .map(|d| d.join("moondream2-text-model-f16.gguf"));
                         let tier = budget::detect().tier;
                         let caption = Arc::new(CaptionSession::load_or_stub(
                             gguf_path.as_deref().filter(|p| p.exists()),

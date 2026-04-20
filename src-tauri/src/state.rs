@@ -6,8 +6,8 @@ use std::sync::Arc;
 /// `tauri::State<'_, AppState>`.
 pub struct AppState {
     pub pool: SqlitePool,
-    /// RetinaFace + ArcFace sessions. Always present; stubs when model files
-    /// are absent. `is_stub == true` until model files are downloaded.
+    /// SCRFD-10g + ArcFace W600K R50 sessions. Always present; stubs when model
+    /// files are absent. `is_stub == true` until model files are downloaded.
     pub faces: Arc<FacesSession>,
     /// llama.cpp caption session. Always present; stubs on CPU-only hardware
     /// or when the GGUF model / sidecar binary are absent.

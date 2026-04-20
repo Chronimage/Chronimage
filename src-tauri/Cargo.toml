@@ -74,6 +74,9 @@ walkdir = "2"
 # HTTP client (model downloader — user-initiated only)
 reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 
+# Zip extraction for InsightFace buffalo_l.zip bundle (MIT licence)
+zip = "2"
+
 # AI / inference
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 image = "0.25"
