@@ -110,7 +110,7 @@ vi.mock('@tauri-apps/api/core', () => ({
           {
             name: 'scrfd-10g',
             kind: 'face-detect',
-            filename: 'scrfd_10g_bnkps.onnx',
+            filename: 'det_10g.onnx',
             installed: false,
             sizeBytes: 275_000_000,
           },

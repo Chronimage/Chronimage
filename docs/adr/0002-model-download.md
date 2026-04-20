@@ -36,7 +36,7 @@ licensing), and must degrade gracefully when absent.
 |---|---|---|---|---|---|
 | `siglip2-b16-image.onnx` | embedding | ONNX | ~375 MB | Apache 2.0 | onnx-community/siglip2-base-patch16-naflex |
 | `nima.onnx` | aesthetic | ONNX | ~14 MB | — | MobileNet; very fast on CPU |
-| `scrfd_10g_bnkps.onnx` | face-detect | ONNX | ~30 MB (extracted from buffalo_l.zip ~275 MB) | MIT | SCRFD-10g with keypoints |
+| `det_10g.onnx` | face-detect | ONNX | ~30 MB (extracted from buffalo_l.zip ~275 MB) | MIT | SCRFD-10g with keypoints (named `det_10g.onnx` inside the buffalo_l bundle; was `scrfd_10g_bnkps.onnx` in the standalone release) |
 | `w600k_r50.onnx` | face-embed | ONNX | ~130 MB (extracted from buffalo_l.zip ~275 MB) | MIT | ArcFace W600K R50, 512-dim |
 | `moondream2-text-model-f16.gguf` | caption-gguf | GGUF | ~1.7 GB | Apache 2.0 | Vision-language; llama.cpp sidecar |
 

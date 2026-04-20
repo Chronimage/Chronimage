@@ -22,7 +22,7 @@
 //!
 //! ## Model files (extracted from buffalo_l.zip on first run)
 //!
-//! - `scrfd_10g_bnkps.onnx`  — SCRFD-10g with keypoints (InsightFace MIT)
+//! - `det_10g.onnx`  — SCRFD-10g with keypoints (InsightFace MIT)
 //! - `w600k_r50.onnx`        — ArcFace W600K R50 (InsightFace MIT)
 //!
 //! Note: the `FacesSession` struct retains the field names `retina` and
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn missing_model_returns_not_found() {
-        let scrfd = PathBuf::from("/nonexistent/scrfd_10g_bnkps.onnx");
+        let scrfd = PathBuf::from("/nonexistent/det_10g.onnx");
         let arcface = PathBuf::from("/nonexistent/w600k_r50.onnx");
         let err = FacesSession::load(&scrfd, &arcface).unwrap_err();
         assert!(

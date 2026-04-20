@@ -102,7 +102,9 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
         sha256: "tbd",
         size_bytes: 275_000_000,
-        filename: "scrfd_10g_bnkps.onnx",
+        // InsightFace renamed the SCRFD model to `det_10g.onnx` inside
+        // buffalo_l.zip (was `scrfd_10g_bnkps.onnx` in the standalone release).
+        filename: "det_10g.onnx",
     },
     ModelSpec {
         name: "arcface-w600k-r50",
@@ -317,8 +319,15 @@ fn extract_from_zip(zip_path: &Path, filename: &str, dest: &Path) -> AppResult<(
             .unwrap_or(false)
     });
 
-    let idx = entry_index
-        .ok_or_else(|| AppError::NotFound(format!("{filename} not in archive {zip_path:?}")))?;
+    let idx = entry_index.ok_or_else(|| {
+        let contents: Vec<String> = (0..archive.len())
+            .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
+            .collect();
+        AppError::NotFound(format!(
+            "{filename} not in archive {zip_path:?}. archive contains: [{}]",
+            contents.join(", ")
+        ))
+    })?;
 
     let mut entry = archive
         .by_index(idx)
