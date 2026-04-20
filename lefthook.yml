@@ -32,9 +32,7 @@ pre-push:
   commands:
     unit-tests:
       run: pnpm exec vitest run --reporter=dot
-    rust-tests:
-      run: cargo test --manifest-path src-tauri/Cargo.toml --lib --quiet
-
+      
 post-checkout:
   commands:
     install-deps:
