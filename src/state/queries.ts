@@ -38,6 +38,7 @@ import {
   type ModelStatus,
   onThisDay,
   type PhotoRow,
+  recordPhotoView,
   refreshSmartAlbums,
   type SourceCleanupItem,
   type SourceRow,
@@ -281,5 +282,18 @@ export function useAiModelsStatus() {
   return useQuery<ModelStatus[], Error>({
     queryKey: ['ai-models-status'],
     queryFn: aiModelsStatus,
+  });
+}
+
+// ── View tracking ─────────────────────────────────────────────────────────────
+
+/**
+ * Record a photo-view event. Fire-and-forget mutation fired when the Detail
+ * overlay opens — unblocks the `LastViewed` rule predicate and the
+ * "Unseen in 2 years" rediscovery album.
+ */
+export function useRecordPhotoView() {
+  return useMutation<void, Error, number>({
+    mutationFn: (photoId: number) => recordPhotoView(photoId),
   });
 }

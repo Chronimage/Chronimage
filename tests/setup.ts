@@ -98,6 +98,8 @@ vi.mock('@tauri-apps/api/core', () => ({
         return undefined;
       case 'face_cluster_merge':
         return 1;
+      case 'record_photo_view':
+        return undefined;
       case 'ai_models_status':
         return [
           {

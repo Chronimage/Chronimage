@@ -14,5 +14,5 @@ pub mod scanner;
 
 pub use hash::sha256_file;
 pub use pair::{detect_pairs, is_raw_extension, ImagePair, RawExt};
-pub use pipeline::{run_pipeline, ImportProgress, ImportResult};
+pub use pipeline::{run_pipeline, run_pipeline_headless, ImportProgress, ImportResult};
 pub use scanner::{scan_dir, ScanEntry, ScanOptions};

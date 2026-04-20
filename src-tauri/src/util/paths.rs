@@ -19,7 +19,15 @@ pub fn catalog_db_path() -> AppResult<PathBuf> {
 }
 
 /// Path to the model cache directory.
+///
+/// Respects the `CHRONIMAGE_MODELS_DIR` env override when set. This lets
+/// integration tests point at an empty tempdir so stage-4 AI enrichment
+/// (NIMA / SigLIP) short-circuits instead of loading the developer's
+/// real multi-hundred-MB models and running inference on synthetic fixtures.
 pub fn models_dir() -> AppResult<PathBuf> {
+    if let Ok(override_path) = std::env::var("CHRONIMAGE_MODELS_DIR") {
+        return Ok(PathBuf::from(override_path));
+    }
     Ok(app_data_dir()?.join("models"))
 }
 

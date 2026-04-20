@@ -76,7 +76,7 @@ models/         gitignored — downloaded on first run
 - Branches: `feature/xyz` off `develop`, `hotfix/xyz` off `main`.
 
 ### CI minutes are costly — get it right the first push
-GitHub Actions minutes are metered; a failed CI run that burns 10+ minutes on Windows Rust builds is a real cost. **Before every `git push`, run the same gates CI runs locally** and only push when they're all green:
+GitHub Actions minutes are metered; a failed CI run that burns 10+ minutes on Windows Rust builds is a real cost. **Before every `git push`, run the same gates CI runs locally** and only push when they're all green: make sure to have meaningful amount of work before pushing to remote.
 
 ```bash
 # Rust

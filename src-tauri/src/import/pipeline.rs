@@ -77,6 +77,31 @@ pub async fn run_pipeline<R: tauri::Runtime>(
     execute_pipeline(source_id, import_id, root, pool, on_progress).await
 }
 
+/// Headless variant of `run_pipeline` that accepts an explicit progress
+/// callback instead of a `tauri::AppHandle`. Used by integration tests and
+/// offline tools (CLI, benchmarks) that don't have a running Tauri runtime.
+///
+/// Creates the `imports` row and drives the full pipeline; progress events
+/// go to `on_progress` instead of a Tauri event channel.
+pub async fn run_pipeline_headless(
+    source_id: i64,
+    root: PathBuf,
+    pool: SqlitePool,
+    on_progress: Arc<dyn Fn(ImportProgress) + Send + Sync>,
+) -> AppResult<ImportResult> {
+    let now = Utc::now().to_rfc3339();
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (source_id, started_at, total_files, imported_count, \
+         skipped_count, error_count) VALUES (?1, ?2, 0, 0, 0, 0) RETURNING id",
+    )
+    .bind(source_id)
+    .bind(&now)
+    .fetch_one(&pool)
+    .await?;
+
+    execute_pipeline(source_id, import_id, root, pool, on_progress).await
+}
+
 /// Continue a pipeline run against an already-created `imports` row.
 ///
 /// Used by `commands::start_import`, which creates the row synchronously so
@@ -347,12 +372,12 @@ async fn execute_pipeline(
             let nima_session =
                 crate::ai::aesthetic::get_or_load(&models_dir.join("nima.onnx")).ok();
             let siglip_session =
-                crate::ai::siglip::get_or_load(&models_dir.join("siglip-b16-image.onnx")).ok();
+                crate::ai::siglip::get_or_load(&models_dir.join("siglip2-b16-image.onnx")).ok();
 
             if nima_session.is_some() || siglip_session.is_some() {
                 // Obtain the model row id for embeddings (created lazily).
                 let siglip_model_id = if siglip_session.is_some() {
-                    crate::catalog::ensure_model_row(&pool, "siglip-b16-image", "embedding").await
+                    crate::catalog::ensure_model_row(&pool, "siglip2-b16-image", "embedding").await
                 } else {
                     None
                 };
@@ -467,10 +492,30 @@ mod tests {
     use super::*;
     use crate::catalog::db::{open_pool, PoolOptions};
     use std::fs;
+    use std::sync::Once;
     use tempfile::TempDir;
+
+    /// Point `models_dir()` at an empty path for the entire test binary so
+    /// stage-4 AI enrichment short-circuits instead of loading the developer's
+    /// real models and running real inference against synthetic fixtures.
+    /// Writes via `set_var` are UB if done after threads are spawned — this
+    /// runs before any `tokio::test` body executes.
+    fn isolate_models_dir() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // SAFETY: called before any tokio runtime or thread is spawned.
+            unsafe {
+                std::env::set_var(
+                    "CHRONIMAGE_MODELS_DIR",
+                    "\\nonexistent\\chronimage-test-models",
+                );
+            }
+        });
+    }
 
     /// Create an in-memory (well, temp-file) catalog and return the pool.
     async fn make_pool(tmp: &TempDir) -> SqlitePool {
+        isolate_models_dir();
         let db = tmp.path().join("catalog.db");
         open_pool(PoolOptions::new(db)).await.expect("open_pool")
     }

@@ -69,7 +69,9 @@ pub struct ModelSpec {
 /// | Gemma-4-9B-it Q4 (gated) | Moondream2 1.9B f16 (Apache 2.0) | No HF token; purpose-built for photo captioning; CPU-capable |
 /// | SigLIP-1 B/16 (private HF) | SigLIP-2 B/16 naflex (Apache 2.0 via onnx-community) | ~5pt retrieval improvement; same footprint |
 ///
-// TODO(cc): lock real sha256 once a release cuts — see docs/adr/0002-model-download.md
+// SHA256s below are locked against the bytes observed on 2026-04-20 from the
+// upstream HuggingFace / GitHub URLs. If any drifts the downloader rejects
+// the file with `AppError::Internal("SHA256 mismatch for ...")`.
 pub static KNOWN_MODELS: &[ModelSpec] = &[
     // Image embeddings — CLIP-style semantic vectors.
     // Upgraded from SigLIP-1 to SigLIP-2 (2025) — same footprint, ~5pt better retrieval.
@@ -79,8 +81,8 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         kind: "embedding",
         version: "2.0.0",
         url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/vision_model.onnx",
-        sha256: "tbd",
-        size_bytes: 375_000_000,
+        sha256: "c0573e3f4140c3a7c4e9cc5912bd6b26a033b46a6a8e8af26cbea262b163bcad",
+        size_bytes: 371_807_752,
         filename: "siglip2-b16-image.onnx",
     },
     // Aesthetic score (NIMA) — ride on top of CLIP for Phase 2 ranking.
@@ -90,20 +92,22 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         kind: "aesthetic",
         version: "1.0.0",
         url: "https://huggingface.co/cromsc/nima-mobilenet-aesthetic/resolve/main/nima_mobilenet_aesthetic.onnx",
-        sha256: "tbd",
-        size_bytes: 14_000_000,
+        sha256: "c58b0c39b5b8f752b1b0ebf10e07e48406780ce3bf9d4647f8c43898748fe69c",
+        size_bytes: 12_867_270,
         filename: "nima.onnx",
     },
     // Face detection (SCRFD-10g) + Face embedding (ArcFace W600K R50).
     // Both ship in InsightFace's buffalo_l.zip (MIT). Downloader extracts the
-    // two ONNX files we need and discards the rest of the bundle (~275MB → ~160MB kept).
+    // two ONNX files we need and discards the rest of the bundle (~275MB zip → ~190MB kept).
+    // `size_bytes` is the zip size (used for download-progress estimation);
+    // `sha256` is the *post-extract* ONNX hash (verified after extract_from_zip).
     ModelSpec {
         name: "scrfd-10g",
         kind: "face-detect",
         version: "0.7.0",
         url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
-        sha256: "tbd",
-        size_bytes: 275_000_000,
+        sha256: "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+        size_bytes: 288_621_354,
         // InsightFace renamed the SCRFD model to `det_10g.onnx` inside
         // buffalo_l.zip (was `scrfd_10g_bnkps.onnx` in the standalone release).
         filename: "det_10g.onnx",
@@ -113,8 +117,8 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         kind: "face-embed",
         version: "0.7.0",
         url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
-        sha256: "tbd",
-        size_bytes: 275_000_000,
+        sha256: "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+        size_bytes: 288_621_354,
         filename: "w600k_r50.onnx",
     },
     // Caption: Moondream2 (1.9B, Apache 2.0) — purpose-built for "describe this photo"
@@ -133,8 +137,8 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         kind: "caption-gguf",
         version: "2024.08.26",
         url: "https://huggingface.co/moondream/moondream2-gguf/resolve/main/moondream2-text-model-f16.gguf",
-        sha256: "tbd",
-        size_bytes: 1_700_000_000,
+        sha256: "4e17e9107fb8781629b3c8ce177de57ffeae90fe14adcf7b99f0eef025889696",
+        size_bytes: 2_839_534_976,
         filename: "moondream2-text-model-f16.gguf",
     },
 ];
@@ -418,6 +422,34 @@ mod tests {
                 !m.url.contains("Chronimage/models"),
                 "model {} still points at the private Chronimage HF repo",
                 m.name
+            );
+        }
+    }
+
+    #[test]
+    fn known_models_have_locked_sha256() {
+        // No entry may still use the "tbd" placeholder — a placeholder disables
+        // the hash check entirely, exposing users to MITM.
+        for m in KNOWN_MODELS {
+            assert_ne!(
+                m.sha256, "tbd",
+                "model {} has unlocked sha256 placeholder",
+                m.name
+            );
+            assert_eq!(
+                m.sha256.len(),
+                64,
+                "model {} sha256 is not 64 hex chars: {:?}",
+                m.name,
+                m.sha256
+            );
+            assert!(
+                m.sha256
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "model {} sha256 has non-lowercase-hex chars: {:?}",
+                m.name,
+                m.sha256
             );
         }
     }

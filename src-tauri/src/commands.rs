@@ -2352,22 +2352,23 @@ mod tests {
 
     #[tokio::test]
     async fn ai_models_status_not_installed_when_dir_empty() {
-        // Point models_dir at a known-empty temp dir by relying on the real
-        // models_dir not containing our test filenames on CI.
-        // We verify that every entry whose filename doesn't exist is `false`.
+        // Force models_dir at an empty tempdir so the command reports every
+        // entry as not-installed without hashing the developer's real 2+ GB
+        // of downloaded models (previously: 57s; now: <100ms).
+        // SAFETY: env set_var is process-global; all lib tests should share the
+        // same override so any interleaving is harmless.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("CHRONIMAGE_MODELS_DIR", tmp.path());
+        }
         let statuses = ai_models_status().await.expect("ai_models_status failed");
+        assert!(!statuses.is_empty(), "should report all KNOWN_MODELS rows");
         for s in &statuses {
-            // If the file doesn't exist the command must report not-installed.
-            let path = crate::util::paths::models_dir()
-                .expect("models_dir")
-                .join(&s.filename);
-            if !path.exists() {
-                assert!(
-                    !s.installed,
-                    "model {} reported installed but file is absent",
-                    s.name
-                );
-            }
+            assert!(
+                !s.installed,
+                "model {} reported installed but tempdir is empty",
+                s.name
+            );
         }
     }
 

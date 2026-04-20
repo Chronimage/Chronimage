@@ -398,3 +398,14 @@ export async function liftShiftDryRun(targetRoot: string): Promise<LiftPlan> {
 export async function liftShiftExecute(planId: string, confirmToken: string): Promise<LiftReceipt> {
   return tauriInvoke<LiftReceipt>('lift_shift_execute', { planId, confirmToken });
 }
+
+// ── View tracking ──────────────────────────────────────────────────────────
+
+/**
+ * Records that a photo was viewed (opens the Detail overlay).
+ * Backend upserts `photo_views` and a trigger propagates `last_viewed_at`
+ * onto `photos` for the LastViewed rule engine predicate.
+ */
+export async function recordPhotoView(photoId: number): Promise<void> {
+  return tauriInvoke<void>('record_photo_view', { photoId });
+}
