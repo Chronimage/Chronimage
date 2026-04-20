@@ -44,11 +44,14 @@ jobs:
       - name: Criterion perf benches
         run: cargo bench --manifest-path src-tauri/Cargo.toml -- --save-baseline nightly
 
+      - name: Install cargo-mutants (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
       - name: Mutation tests (time-boxed)
         continue-on-error: true
-        run: |
-          cargo install cargo-mutants --quiet
-          cargo mutants --manifest-path src-tauri/Cargo.toml --timeout 30 --jobs 2 --test-workspace || true
+        run: cargo mutants --manifest-path src-tauri/Cargo.toml --timeout 30 --jobs 2 --test-workspace || true
 
       - name: Compute nightly version
         id: ver
