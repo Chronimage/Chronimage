@@ -148,7 +148,7 @@ fn main() {
                         // Build AI sessions (stub when model files absent).
                         let md = models_dir().ok();
 
-                        let retina_path = md.as_deref().map(|d| d.join("scrfd_10g_bnkps.onnx"));
+                        let retina_path = md.as_deref().map(|d| d.join("det_10g.onnx"));
                         let arcface_path = md.as_deref().map(|d| d.join("w600k_r50.onnx"));
                         let faces = Arc::new(FacesSession::load_or_stub(
                             retina_path.as_deref().filter(|p| p.exists()),
