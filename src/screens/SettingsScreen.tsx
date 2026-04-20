@@ -9,8 +9,102 @@
  */
 
 import { useState } from 'react';
-import { type ModelStatus, useAiModelsStatus } from '../state/queries';
+import {
+  type ModelSource,
+  type ModelStatus,
+  useAiModelsStatus,
+  useAiReindex,
+  useDownloadModels,
+} from '../state/queries';
 import { useUi } from '../state/ui';
+
+/**
+ * Rust `KNOWN_MODELS.kind` values ↔ the `ai_reindex(kind)` accepted values.
+ * Kept in lockstep with `src-tauri/src/commands.rs::ai_reindex`.
+ */
+const KIND_TO_REINDEX: Record<string, string> = {
+  embedding: 'embeddings',
+  aesthetic: 'aesthetic',
+  'face-detect': 'face-detect',
+  'face-embed': 'face-embed',
+  'caption-gguf': 'captions',
+};
+
+/** Human-readable feature label per `kind`. */
+const KIND_LABEL: Record<string, string> = {
+  embedding: 'Embeddings',
+  aesthetic: 'Aesthetic score',
+  'face-detect': 'Face detection',
+  'face-embed': 'Face embedding',
+  'caption-gguf': 'Captions',
+};
+
+interface Preset {
+  name: string;
+  repo: string;
+  filename: string;
+  sizeBytes: number;
+  license: string;
+  note?: string;
+}
+
+/**
+ * Curated presets per feature. The first entry is the default bundled model;
+ * additional entries are vetted community alternatives users can swap to.
+ * Custom URLs live in a separate input below the preset list.
+ */
+const PRESETS_BY_KIND: Record<string, Preset[]> = {
+  embedding: [
+    {
+      name: 'siglip2-b16-image',
+      repo: 'onnx-community/siglip2-base-patch16-224-ONNX',
+      filename: 'onnx/vision_model.onnx',
+      sizeBytes: 371_807_752,
+      license: 'Apache-2.0',
+      note: 'Default · bundled',
+    },
+  ],
+  aesthetic: [
+    {
+      name: 'nima-aesthetic',
+      repo: 'cromsc/nima-mobilenet-aesthetic',
+      filename: 'nima_mobilenet_aesthetic.onnx',
+      sizeBytes: 12_867_270,
+      license: 'permissive',
+      note: 'Default · bundled',
+    },
+  ],
+  'face-detect': [
+    {
+      name: 'scrfd-10g',
+      repo: 'deepinsight/insightface (buffalo_l.zip)',
+      filename: 'det_10g.onnx',
+      sizeBytes: 16_923_827,
+      license: 'MIT',
+      note: 'Default · bundled',
+    },
+  ],
+  'face-embed': [
+    {
+      name: 'arcface-w600k-r50',
+      repo: 'deepinsight/insightface (buffalo_l.zip)',
+      filename: 'w600k_r50.onnx',
+      sizeBytes: 174_383_860,
+      license: 'MIT',
+      note: 'Default · bundled',
+    },
+  ],
+  'caption-gguf': [
+    {
+      name: 'moondream2-q4',
+      repo: 'moondream/moondream2-gguf',
+      filename: 'moondream2-text-model-f16.gguf',
+      sizeBytes: 2_839_534_976,
+      license: 'Apache-2.0',
+      note: 'Default · on-demand download',
+    },
+  ],
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -95,7 +189,23 @@ function Slider({ value, onChange, min, max, suffix, label }: SliderProps) {
 
 // ── AI Models section row ─────────────────────────────────────────────────────
 
-function ModelRow({ model }: { model: ModelStatus }) {
+function sourceBadge(source: ModelSource): { label: string; accent: 'ok' | 'info' | 'warn' } {
+  switch (source) {
+    case 'bundled':
+      return { label: 'Bundled', accent: 'ok' };
+    case 'downloaded':
+      return { label: 'Installed', accent: 'info' };
+    default:
+      return { label: 'Missing', accent: 'warn' };
+  }
+}
+
+function ModelRow({ model, onSwap }: { model: ModelStatus; onSwap: () => void }) {
+  const badge = sourceBadge(model.source);
+  const featureLabel = KIND_LABEL[model.kind] ?? model.kind;
+  const presets = PRESETS_BY_KIND[model.kind];
+  const swappable = model.kind in KIND_TO_REINDEX && (presets?.length ?? 0) > 0;
+
   return (
     <div
       style={{
@@ -109,7 +219,7 @@ function ModelRow({ model }: { model: ModelStatus }) {
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 13, color: 'var(--fg)', fontFamily: 'var(--mono-font)' }}>{model.name}</div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 2 }}>
-          {model.kind} · {model.filename} · {fmtBytes(model.sizeBytes)}
+          {featureLabel} · {model.filename} · {fmtBytes(model.sizeBytes)}
         </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -119,29 +229,259 @@ function ModelRow({ model }: { model: ModelStatus }) {
             fontSize: 10,
             padding: '2px 7px',
             borderRadius: 'var(--radius-sm)',
-            background: model.installed
-              ? 'color-mix(in oklch, var(--accent) 18%, var(--bg-elev))'
-              : 'var(--bg-elev)',
-            color: model.installed ? 'var(--accent)' : 'var(--fg-mute)',
-            border: `1px solid ${model.installed ? 'color-mix(in oklch, var(--accent) 30%, var(--stroke))' : 'var(--stroke)'}`,
+            background:
+              badge.accent === 'ok'
+                ? 'color-mix(in oklch, var(--accent) 18%, var(--bg-elev))'
+                : badge.accent === 'info'
+                  ? 'color-mix(in oklch, var(--info, #5aa7ff) 18%, var(--bg-elev))'
+                  : 'var(--bg-elev)',
+            color:
+              badge.accent === 'ok'
+                ? 'var(--accent)'
+                : badge.accent === 'info'
+                  ? 'var(--info, #5aa7ff)'
+                  : 'var(--fg-mute)',
+            border: `1px solid ${badge.accent === 'warn' ? 'var(--stroke)' : 'color-mix(in oklch, var(--accent) 30%, var(--stroke))'}`,
           }}
         >
-          {model.installed ? 'Installed' : 'Not installed'}
+          {badge.label}
         </span>
-        {/* Change model buttons are deferred to phase-1b */}
-        <span
-          className="mono"
+        <button
+          type="button"
+          onClick={onSwap}
+          disabled={!swappable}
+          title={swappable ? 'Swap to a different model' : 'No alternatives available yet'}
           style={{
-            fontSize: 9.5,
-            color: 'var(--fg-mute)',
-            padding: '1px 5px',
-            border: '1px solid var(--stroke)',
+            fontSize: 11,
+            padding: '3px 10px',
             borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--stroke)',
+            background: 'var(--bg-elev)',
+            color: swappable ? 'var(--fg)' : 'var(--fg-mute)',
+            cursor: swappable ? 'pointer' : 'not-allowed',
+            fontFamily: 'var(--mono-font)',
           }}
-          title="Model switching ships in phase 1b"
         >
-          phase-1b
-        </span>
+          Swap…
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Picker modal (Radix-free minimal dialog) ──────────────────────────────────
+
+interface PickerProps {
+  open: boolean;
+  feature: ModelStatus | null;
+  onClose: () => void;
+  onSwapped: () => void;
+}
+
+function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
+  const download = useDownloadModels();
+  const reindex = useAiReindex();
+  const [selected, setSelected] = useState<string | null>(null);
+  const [customRepo, setCustomRepo] = useState('');
+  const [customFilename, setCustomFilename] = useState('');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  if (!open || !feature) return null;
+
+  const presets = PRESETS_BY_KIND[feature.kind] ?? [];
+  const activePreset = presets.find((p) => p.name === (selected ?? feature.name)) ?? presets[0];
+
+  async function handleSwap() {
+    if (!feature) return;
+    setErrorMsg(null);
+    try {
+      const reindexKind = KIND_TO_REINDEX[feature.kind];
+      if (!reindexKind) {
+        throw new Error(`unsupported kind ${feature.kind}`);
+      }
+      if (activePreset && activePreset.name !== feature.name) {
+        // Selected a different preset — ensure it's downloaded first.
+        await download.mutateAsync([activePreset.name]);
+      } else if (customRepo.trim() && customFilename.trim()) {
+        // Custom HF URL flow — Phase 1b will land the register-custom flow.
+        // For now, surface a friendly "not yet available" to avoid silent no-op.
+        throw new Error('Custom HF URLs land in Phase 1b — pick a preset for now.');
+      }
+      await reindex.mutateAsync(reindexKind);
+      onSwapped();
+      onClose();
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const busy = download.isPending || reindex.isPending;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Swap ${KIND_LABEL[feature.kind] ?? 'model'}`}
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onClose();
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.55)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+        role="document"
+        style={{
+          background: 'var(--bg)',
+          border: '1px solid var(--stroke)',
+          borderRadius: 'var(--radius-md)',
+          padding: 24,
+          width: 560,
+          maxHeight: '80vh',
+          overflow: 'auto',
+        }}
+      >
+        <h2 style={{ marginTop: 0, fontSize: 16 }}>Swap {KIND_LABEL[feature.kind] ?? feature.kind} model</h2>
+        <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginBottom: 16 }}>
+          Current: {feature.name} ({sourceBadge(feature.source).label.toLowerCase()})
+        </div>
+
+        {presets.map((p) => {
+          const isActive = p.name === (selected ?? feature.name);
+          return (
+            <label
+              key={p.name}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 10px',
+                border: `1px solid ${isActive ? 'var(--accent)' : 'var(--stroke)'}`,
+                borderRadius: 'var(--radius-sm)',
+                marginBottom: 8,
+                cursor: 'pointer',
+                background: isActive ? 'color-mix(in oklch, var(--accent) 8%, var(--bg))' : 'transparent',
+              }}
+            >
+              <input type="radio" name="preset" checked={isActive} onChange={() => setSelected(p.name)} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontFamily: 'var(--mono-font)' }}>{p.name}</div>
+                <div style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 2 }}>
+                  {p.repo} · {fmtBytes(p.sizeBytes)} · {p.license}
+                  {p.note ? ` · ${p.note}` : ''}
+                </div>
+              </div>
+            </label>
+          );
+        })}
+
+        {presets.length <= 1 && (
+          <div
+            className="mono"
+            style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 12, marginBottom: 12 }}
+          >
+            Only the default is bundled for this feature. Curated alternates land in Phase 2.
+          </div>
+        )}
+
+        <details style={{ marginTop: 14 }}>
+          <summary style={{ cursor: 'pointer', fontSize: 12 }}>Add custom HF URL…</summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+            <input
+              type="text"
+              placeholder="repo_id (e.g. onnx-community/siglip2-large-patch16-384-ONNX)"
+              value={customRepo}
+              onChange={(e) => setCustomRepo(e.target.value)}
+              style={{
+                fontSize: 12,
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--stroke)',
+                background: 'var(--bg-elev)',
+                color: 'var(--fg)',
+                fontFamily: 'var(--mono-font)',
+              }}
+            />
+            <input
+              type="text"
+              placeholder="filename (e.g. onnx/vision_model.onnx)"
+              value={customFilename}
+              onChange={(e) => setCustomFilename(e.target.value)}
+              style={{
+                fontSize: 12,
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid var(--stroke)',
+                background: 'var(--bg-elev)',
+                color: 'var(--fg)',
+                fontFamily: 'var(--mono-font)',
+              }}
+            />
+            <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)' }}>
+              Download SHA-verifies against the first published hash. Custom flow lands in Phase 1b.
+            </div>
+          </div>
+        </details>
+
+        {errorMsg && (
+          <div
+            className="mono"
+            style={{
+              fontSize: 12,
+              color: 'var(--danger)',
+              marginTop: 12,
+              padding: '8px 10px',
+              border: '1px solid var(--danger)',
+              borderRadius: 'var(--radius-sm)',
+            }}
+          >
+            {errorMsg}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            style={{
+              fontSize: 12,
+              padding: '6px 14px',
+              border: '1px solid var(--stroke)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'transparent',
+              color: 'var(--fg)',
+              cursor: busy ? 'not-allowed' : 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSwap}
+            disabled={busy}
+            style={{
+              fontSize: 12,
+              padding: '6px 14px',
+              border: '1px solid var(--accent)',
+              borderRadius: 'var(--radius-sm)',
+              background: 'var(--accent)',
+              color: 'var(--bg)',
+              cursor: busy ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {busy ? 'Working…' : 'Swap & re-index'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -160,7 +500,14 @@ export function SettingsScreen() {
   const [requireReview, setRequireReview] = useState<boolean>(true);
   const [nightlyReindex, setNightlyReindex] = useState<boolean>(true);
 
-  const { data: models = [], isLoading: modelsLoading, isError: modelsError } = useAiModelsStatus();
+  const {
+    data: models = [],
+    isLoading: modelsLoading,
+    isError: modelsError,
+    refetch: refetchModels,
+  } = useAiModelsStatus();
+
+  const [pickerFor, setPickerFor] = useState<ModelStatus | null>(null);
 
   function handleAppNameBlur() {
     const trimmed = localAppName.trim();
@@ -259,7 +606,7 @@ export function SettingsScreen() {
               </div>
             )}
             {models.map((m) => (
-              <ModelRow key={m.filename} model={m} />
+              <ModelRow key={m.filename} model={m} onSwap={() => setPickerFor(m)} />
             ))}
           </div>
 
@@ -404,6 +751,14 @@ export function SettingsScreen() {
           </div>
         </div>
       </div>
+      <ModelPickerModal
+        open={pickerFor !== null}
+        feature={pickerFor}
+        onClose={() => setPickerFor(null)}
+        onSwapped={() => {
+          refetchModels().catch(() => {});
+        }}
+      />
     </div>
   );
 }

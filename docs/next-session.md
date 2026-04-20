@@ -1,53 +1,69 @@
-# Next session · Phase 1 week 4
+# Next session · Phase 1 week 5 — bundle default models
 
-On develop after PRs #22 (KNOWN_MODELS swap to community), #23 (FE model names), #24 (SCRFD filename fix). Pending commit on local develop: **URL fixes** for siglip-2 (`naflex` repo 401 → `224-ONNX` repo), nima (`Chronimage/models` 401 → `cromsc/nima-mobilenet-aesthetic`), moondream2 (`vikhyatk/moondream2` 404 → `moondream/moondream2-gguf`). Ship that as PR #25 first thing. 193 Rust lib tests + 64 frontend green.
+Queued on local `feature/phase1-week4-plumbing` (2 commits, unpushed):
+- `63cd55a` SHA locks + catalog-size exit test + record_photo_view + stage-4 filename fix + `CHRONIMAGE_MODELS_DIR` override
+- `9528c8a` real SCRFD + ArcFace inference + pipeline stage-5 + `phase_1_face_clustering` exit test
+
+**New direction (this session):** PRD §1 / §5 / §14 amended + ADR 0003 added. Default models will ship bundled in the installer; Settings owns swaps. See `docs/adr/0003-bundled-default-models.md`.
 
 ## Starts (in order)
 
-### 1. Ship the URL-fix commit + full-download smoke · 30 min
-First command: `git status` — push the uncommitted `ai/download.rs` + `docs/adr/0002-model-download.md` changes as `fix(ai): correct siglip-2, nima, moondream2 repo urls`. Then `rm` the old failed files in `%LOCALAPPDATA%/app.chronimage.desktop/models/` and click "Download all" in Onboarding → Models.
-
-All 5 models should now install end-to-end. If any fails, the extract error now lists archive contents — use that to debug.
-
-Why: this closes the smoke-test loop the user hit tonight. Every other next-session item assumes models are actually present on disk.
-
-### 2. Lock real SHA256s · 30 min (after #1 confirms downloads work)
-First file: `src-tauri/src/ai/download.rs` — replace each `sha256: "tbd"` with the real hex hash.
-
-After a successful "Download all" run:
+### 1. Ship the week-4 bundle as-is · 15 min
 ```bash
-cd "$LOCALAPPDATA/app.chronimage.desktop/models"
-for f in *.onnx *.gguf; do echo "$f $(sha256sum $f)"; done
+git push -u origin feature/phase1-week4-plumbing
+gh pr create --base develop
 ```
-Copy into the specs. For `det_10g.onnx` and `w600k_r50.onnx` the hashes are the post-extract ONNX files, not the zip. Add an integration test `known_model_hashes_are_hex_64` asserting no entry still says `"tbd"`.
+This is independent of the bundling work and unblocks everything else.
 
-Why: `"tbd"` disables the MITM check entirely. Required before any v0.1 release.
+### 2. Installer-resource plumbing for bundled models · 90 min
+First file: `src-tauri/tauri.conf.json` — add `"bundle.resources": ["models/bundled/*"]` (or equivalent Tauri v2 syntax).
 
-### 3. First real inference path: SCRFD-10g preprocess + decode · 90 min (needs #1)
-First file: `src-tauri/src/ai/faces.rs` — the `detect_faces` function at the `TODO(cc): scrfd inference` marker.
+Then:
+- `src-tauri/src/ai/download.rs` — add `pub bundled: bool` to `ModelSpec`; mark the 4 always-needed entries `bundled = true`, Moondream2 `false`.
+- `src-tauri/src/util/paths.rs` — new `bundled_models_dir()` via `tauri::path::resolve_resource`.
+- `src-tauri/src/ai/download.rs` or `commands.rs::ai_models_status` — check bundled path first; treat bundled files as permanently `installed: true` with `source: "bundled"`.
+- `src-tauri/src/state.rs` — `AppState::new` resolves model paths from bundled dir first, falls back to user data dir for Moondream2.
 
-Steps: resize + letterbox to 640×640 RGB f32, normalise `(x − 127.5)/128.0`, `session.run([pixel_values])`, decode 3-scale anchor outputs (stride 8/16/32), NMS at IoU 0.45 + conf 0.5, map boxes back to original coords. Keep the 5-point landmarks in `FaceBox` for downstream ArcFace alignment.
+Add a `models/bundled/` directory to the repo **gitignored** plus a `scripts/fetch-bundled-models.ps1` / `.sh` that downloads the 4 defaults with the locked SHA256s. CI runs this in the packaging job before `tauri build`. Dev-time: documented in CLAUDE.md + README.
 
-Add a small fixture (1 public-domain group photo) under `tests/fixtures/face-detect/` and an `#[ignore]` integration test that drives the real SCRFD session and asserts N faces detected.
+Why highest leverage: every other item in this plan assumes the bundling path exists. Do it first so downstream UI work can be built against the final shape.
 
-Why: first `todo!(…)` → live transition of Phase 1. Starts populating the `faces` table so `face_clusters_list` has non-empty data in PeopleScreen.
+### 3. Remove Models step from onboarding · 30 min
+First file: `src/screens/OnboardScreen.tsx` — delete `OnbModels`, the `MODEL_TIERS` array, the step entry for `models`, and the associated download-listener wiring. Renumber the stepper from 5 → 4 (Welcome · Sources · Import · People-naming).
 
-### 4. Fill `phase_1_catalog_size` exit test · 45 min
-First file: `src-tauri/tests/phase_1_catalog_size.rs` — drop `#[ignore]`, replace `unimplemented!()` with real code.
+Update `src/screens/OnboardScreen.test.tsx` expectations. Visual QA: the `onb-step` stepper must still show 4 dots + connector lines with correct `on`/`done` states.
 
-Generate 10k tiny 100×100 JPEGs (`image::save_buffer` in a setup helper, ~30 MB total), import via the pipeline, assert catalog.db size / fixture bytes ≤ 0.02.
+Why: direct user-facing change that closes half the "first-run is confusing" feedback. Cannot land before #2 because the stepper assumes the bundled set exists.
 
-Why: cheapest of the 8 exit-criteria scaffolds — proves one `.skip()` → passing. One solved criterion leaves 7.
+### 4. Settings → AI Models picker modal · 90 min
+First file: `src/screens/SettingsScreen.tsx` — the AI Models section already renders rows; replace the "(phase-1b)" muted badge with a real **Swap…** button per row.
 
-### 5. Wire `record_photo_view` from Detail overlay · 20 min
-First file: `src/screens/catalog/CatalogScreen.tsx` — find the Detail overlay open handler. Add `useRecordPhotoView().mutate(photoId)` on open.
+New picker modal (`src/screens/settings/ModelPickerModal.tsx` or similar):
+- Curated presets per feature (3-5 options: current bundled + 2-4 alternates we've vetted — SigLIP-2-Large, Florence-2 for captions, etc.).
+- "Add custom HF URL…" field + filename input → `ai::download::user_initiated_download_model` with SHA verification (post-download hash display for user to compare).
+- "Re-index affected photos" CTA appears on model change (reuses the re-evaluator + adds an `ai_reindex(kind)` command that truncates + recomputes the affected column/table).
 
-Why: command landed in PR #16 but is never called. Until it fires, `last_viewed_at` stays NULL across the catalog and "Unseen in 2 years" can't distinguish never-viewed from 3y-ago-viewed.
+Persist active choice via `tauri-plugin-store`; `AppState::new` reads it before session construction.
 
-## Deferred (known-blocked)
+Why: primary user-facing interaction now that models live in Settings. Also the mechanism that lets power users add any HF model post-install.
 
-- ArcFace real inference (chained after #3 — needs landmark-based 112×112 alignment)
-- HDBSCAN real clustering (needs ArcFace embeddings flowing)
-- Moondream2 llama.cpp sidecar + mmproj companion download (vision-language protocol design; see ADR 0002 open issues)
-- Remaining 7 exit-criteria tests (fixtures don't exist yet)
-- Settings "change model with re-index warning" + tauri-plugin-store persistence
+### 5. Smoke + merge · 30 min
+`pnpm tauri dev`:
+- First-run with fresh `%LOCALAPPDATA%/app.chronimage.desktop/` (delete it manually) — onboarding must complete without any download prompt, first photo imports cleanly, ai_models_status shows 4 bundled `installed: true` + Moondream2 `installed: false, source: "missing"`.
+- Settings → AI Models → Swap on Embeddings to SigLIP-2-Large → download progresses → "Re-index" CTA appears → click → photo_embeddings rebuilds.
+
+Then PR + merge.
+
+## Push discipline
+
+- #1 as its own PR (already queued; just push).
+- #2 + #3 + #4 as one "bundle default models" PR (shares the `bundled` flag + onboarding delete + settings UI; reviewer can trace the end-to-end flow).
+- #5 manual smoke before merging #2-#4.
+
+## Deferred
+
+- HDBSCAN real clustering (unblocked now that ArcFace embeddings flow in stage-5; needs a real Rust HDBSCAN crate vetted or a hand-roll).
+- Moondream2 mmproj companion download + llama.cpp sidecar binary bundling + vision-language HTTP protocol (Phase 2 prereq, not Phase 1 exit).
+- Remaining 6 PRD exit-criteria tests (fixtures missing).
+- CI packaging job: fetch bundled models from a pinned S3/HF release + attach LICENSE files under `resources/licenses/`.
+- User research: is a ~700 MB MSI acceptable? If not, ship a "slim" variant that first-run-downloads the bundled set.

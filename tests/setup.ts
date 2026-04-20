@@ -98,21 +98,35 @@ vi.mock('@tauri-apps/api/core', () => ({
         return undefined;
       case 'face_cluster_merge':
         return 1;
+      case 'record_photo_view':
+        return undefined;
+      case 'ai_reindex':
+        return 0;
       case 'ai_models_status':
         return [
           {
             name: 'siglip2-b16-image',
             kind: 'embedding',
             filename: 'siglip2-b16-image.onnx',
-            installed: false,
+            installed: true,
             sizeBytes: 375_000_000,
+            source: 'bundled',
           },
           {
             name: 'scrfd-10g',
             kind: 'face-detect',
             filename: 'det_10g.onnx',
-            installed: false,
+            installed: true,
             sizeBytes: 275_000_000,
+            source: 'bundled',
+          },
+          {
+            name: 'moondream2-q4',
+            kind: 'caption-gguf',
+            filename: 'moondream2-text-model-f16.gguf',
+            installed: false,
+            sizeBytes: 2_839_534_976,
+            source: 'missing',
           },
         ];
       default:

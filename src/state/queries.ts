@@ -5,15 +5,12 @@
 
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  type AlbumRow,
   aiModelsStatus,
-  type CleanupExecuteResult,
-  type CleanupPlan,
+  aiReindex,
   type ClusterRow,
   cleanupDryRun,
   cleanupExecute,
   createSource,
-  type DuplicateGroup,
   deleteSource,
   detectIcloudPath,
   downloadModels,
@@ -22,8 +19,6 @@ import {
   faceClustersList,
   findDuplicates,
   IMPORT_PROGRESS_EVENT,
-  type ImportProgressEvent,
-  type ImportSummary,
   importGoogleTakeout,
   type LiftPlan,
   type LiftReceipt,
@@ -38,13 +33,10 @@ import {
   type ModelStatus,
   onThisDay,
   type PhotoRow,
+  recordPhotoView,
   refreshSmartAlbums,
-  type SourceCleanupItem,
-  type SourceRow,
-  type StartImportResponse,
   searchPhotos,
   startImport,
-  type UsbDevice,
   unseenPhotos,
 } from '../tauri/invoke';
 
@@ -58,13 +50,14 @@ export type {
   ImportSummary,
   LiftPlan,
   LiftReceipt,
+  ModelSource,
   ModelStatus,
   PhotoRow,
   SourceCleanupItem,
   SourceRow,
   StartImportResponse,
   UsbDevice,
-};
+} from '../tauri/invoke';
 export { IMPORT_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
@@ -185,6 +178,23 @@ export function useDownloadModels() {
     mutationFn: (names?: string[]) => downloadModels(names),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['models'] });
+      qc.invalidateQueries({ queryKey: ['ai-models-status'] });
+    },
+  });
+}
+
+/**
+ * Truncate + recompute data produced by `kind` after a model swap.
+ * kind ∈ {"embeddings", "face-detect", "face-embed", "aesthetic", "captions"}.
+ * Returns count of affected rows (for the success toast).
+ */
+export function useAiReindex() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, string>({
+    mutationFn: (kind: string) => aiReindex(kind),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ai-models-status'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
     },
   });
 }
@@ -281,5 +291,18 @@ export function useAiModelsStatus() {
   return useQuery<ModelStatus[], Error>({
     queryKey: ['ai-models-status'],
     queryFn: aiModelsStatus,
+  });
+}
+
+// ── View tracking ─────────────────────────────────────────────────────────────
+
+/**
+ * Record a photo-view event. Fire-and-forget mutation fired when the Detail
+ * overlay opens — unblocks the `LastViewed` rule predicate and the
+ * "Unseen in 2 years" rediscovery album.
+ */
+export function useRecordPhotoView() {
+  return useMutation<void, Error, number>({
+    mutationFn: (photoId: number) => recordPhotoView(photoId),
   });
 }

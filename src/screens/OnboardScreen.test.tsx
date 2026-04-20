@@ -27,13 +27,13 @@ describe('OnboardScreen', () => {
     expect(screen.getByText(/STEP 1 · CATALOG HOME/i)).toBeInTheDocument();
   });
 
-  it('shows all 5 step labels in the left stepper', () => {
+  it('shows all 4 step labels in the left stepper (Models lives in Settings per ADR 0003)', () => {
     render(<OnboardScreen />, { wrapper });
     expect(screen.getByText('Welcome')).toBeInTheDocument();
     expect(screen.getByText('Sources')).toBeInTheDocument();
     expect(screen.getByText('Import')).toBeInTheDocument();
-    expect(screen.getByText('Models')).toBeInTheDocument();
     expect(screen.getByText('Name people')).toBeInTheDocument();
+    expect(screen.queryByText('Models')).toBeNull();
   });
 
   it('advances to step 2 (Sources) when Continue is clicked, showing Add local folder', () => {

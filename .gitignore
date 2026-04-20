@@ -31,6 +31,13 @@ src-tauri/release/
 # Chronimage runtime state (never commit user data)
 models/
 !models/.gitkeep
+# Bundled-model staging dir: track the directory but not the binary files.
+# `scripts/fetch-bundled-models.*` populates this at build time.
+!src-tauri/models/
+!src-tauri/models/bundled/
+!src-tauri/models/bundled/.gitkeep
+src-tauri/models/bundled/*.onnx
+src-tauri/models/bundled/*.gguf
 **/catalog.db
 **/catalog.db-journal
 **/catalog.db-wal

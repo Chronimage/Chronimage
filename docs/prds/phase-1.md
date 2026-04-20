@@ -25,12 +25,12 @@ This phase validates the user's hypothesis: can Chronimage make a hobbyist's 200
 ## Must-have deliverables
 
 ### 1. Onboarding (ported from `screens_onboard.jsx`)
-- [ ] 5 steps: Welcome · Sources · Import · Models · People-naming
+- [ ] **4 steps** (down from 5): Welcome · Sources · Import · People-naming
 - [ ] "Lift & shift" option: consolidate into `D:/Chronimage/` vs. "Index in place"
 - [ ] Source picker with working connectors (Local, USB iPhone, iCloud-for-Windows folder, Google Photos OAuth + Takeout, NAS UNC)
 - [ ] Import-progress surface (live)
-- [ ] Model picker with CPU/GPU auto-detect
 - [ ] People-naming grid for initial face clusters
+- [ ] **Model selection is NOT in onboarding.** Default models are bundled in the installer (see §5 / ADR 0003) so first-run import works with zero user decisions. Power users swap models from Settings post-install.
 
 ### 2. Import pipeline (Rust)
 - [ ] `src-tauri/src/import/scanner.rs` — walk filesystem respecting gitignore-style `.chronimage-ignore` files
@@ -57,12 +57,23 @@ This phase validates the user's hypothesis: can Chronimage make a hobbyist's 200
 
 ### 5. AI layer
 - [ ] `src-tauri/src/ai/siglip.rs` — embeddings (image + text encoders)
-- [ ] `src-tauri/src/ai/faces.rs` — RetinaFace detect + ArcFace embed
+- [ ] `src-tauri/src/ai/faces.rs` — SCRFD-10g detect + ArcFace W600K R50 embed
 - [ ] `src-tauri/src/ai/cluster.rs` — HDBSCAN over ArcFace embeddings; stable cluster IDs across re-runs
-- [ ] `src-tauri/src/ai/caption.rs` — optional llama.cpp sidecar bridge (GPU path only)
+- [ ] `src-tauri/src/ai/caption.rs` — Moondream2 via llama.cpp sidecar (optional, post-install download)
 - [ ] `src-tauri/src/ai/aesthetic.rs` — NIMA score (used by rediscovery + Phase 2 ranking)
 - [ ] `src-tauri/src/ai/budget.rs` — detect VRAM, pick model variants, enforce concurrency limits
-- [ ] First-run downloader: progress surface + SHA256-pinned model URLs
+
+#### Model distribution — bundled defaults + on-demand swaps (see ADR 0003)
+- [ ] **Bundled in installer** (~580 MB total) — zero-download first run:
+  - SigLIP-2 B/16 (375 MB) — embeddings
+  - SCRFD-10g + ArcFace W600K R50 (~190 MB extracted) — face detect + embed
+  - NIMA (13 MB) — aesthetic score
+- [ ] **Downloaded on-demand from Settings → AI Models** (opt-in, not required for Phase 1 exit):
+  - Moondream2 GGUF (1.7 GB) — captions
+  - Any future alternates the user chooses from the HF catalogue
+- [ ] Installer size target: **≤ 700 MB** MSI (~580 MB models + ~120 MB app + webview runtime). Auto-updater deltas stay small because bundled models are pinned + rarely change.
+- [ ] The model-download infrastructure (`ai::download`) stays in place for the on-demand path; it is no longer on the first-run critical path.
+- [ ] Custom model flow: Settings lets power users paste an HF repo URL + filename, the app downloads + SHA-verifies, and registers the model under a user-chosen `kind` (e.g. swap `siglip2-b16` for `siglip2-large`). Per-feature model selection persists via `tauri-plugin-store`; re-indexing on model change is gated behind a confirmation dialog.
 
 ### 6. Dedupe
 - [ ] `src-tauri/src/dedupe/phash.rs` — pHash pre-filter at import time
@@ -117,7 +128,13 @@ This phase validates the user's hypothesis: can Chronimage make a hobbyist's 200
 - [ ] Surfaced as horizontally-scrolling rows on Catalog home when no search/filter is active
 
 ### 14. Settings
-- [ ] Model picker (change with re-index warning)
+- [ ] **AI Models panel** (primary interaction — moved from onboarding):
+  - One row per feature: Embeddings, Face detection, Face embedding, Aesthetic, Captions
+  - Current model + Installed/Bundled badge + "Swap…" button → picker modal
+  - Picker modal: community catalogue (curated list of HF repos we've tested) + "Add custom HF URL…" field
+  - Download progress for non-bundled models streams via `chronimage://download-progress`
+  - "Re-index affected photos" button appears after a model swap (explicit user action, gated)
+  - Active choice persists via `tauri-plugin-store`; startup `AppState::new` reads it before loading sessions
 - [ ] Storage location picker
 - [ ] Culling thresholds (used by Phase 2)
 - [ ] Nightly re-index toggle
@@ -222,7 +239,7 @@ Each criterion bound to a test file (created with the feature that covers it):
 - **iCloud API**: rely on iCloud-for-Windows vs. `pyicloud` via Python sidecar. Lean iCloud-for-Windows for v1; revisit if sync folder coverage proves incomplete.
 - **Google Photos delete scope**: if OAuth denies `drive.photos.delete`, fall back to Takeout-only + guide user to web UI.
 - **Face clustering on CPU**: HDBSCAN at 200k faces on CPU takes ~20 min. Acceptable as background nightly?
-- **gemma4 license terms**: confirm redistribution rights for the quantized GGUF we download; if restricted, ask user to pull from Hugging Face directly via a UI link.
+- **Bundled-models installer size**: ~700 MB MSI is roomy for Windows; acceptable? If users on metered connections push back, consider a "slim" installer variant that falls back to first-run download for the bundled set. See ADR 0003.
 - **Encryption of face DB on disk** — required for privacy story? If yes, use SQLCipher for the `faces` + `clusters` tables, adds ~3 MB binary.
 
 ## TODO log

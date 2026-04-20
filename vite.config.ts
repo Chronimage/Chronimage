@@ -40,7 +40,10 @@ export default defineConfig(() => ({
   },
 
   build: {
-    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
+    // Windows Tauri ships WebView2 (chrome105-compatible); the non-Windows
+    // fallback exists for local dev builds on mac/linux and can be modern —
+    // vite 8 + rolldown-vite dropped transform support for pre-safari16.
+    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari16',
     minify: process.env.TAURI_ENV_DEBUG ? false : 'esbuild',
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
     rollupOptions: {

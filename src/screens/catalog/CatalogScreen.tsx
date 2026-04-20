@@ -4,7 +4,14 @@ import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { SEARCH_SUGGESTIONS } from '../../state/fixtures';
-import { useAlbums, useOnThisDay, usePhotos, useSearchPhotos, useUnseenPhotos } from '../../state/queries';
+import {
+  useAlbums,
+  useOnThisDay,
+  usePhotos,
+  useRecordPhotoView,
+  useSearchPhotos,
+  useUnseenPhotos,
+} from '../../state/queries';
 import type { PhotoRow } from '../../tauri/invoke';
 
 export interface CatalogScreenProps {
@@ -335,9 +342,18 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
     });
   }, []);
 
+  const recordView = useRecordPhotoView();
   const openDetail = useCallback(
-    (index: number) => setFocusedIndex(Math.max(0, Math.min(index, photos.length - 1))),
-    [photos.length],
+    (index: number) => {
+      const clamped = Math.max(0, Math.min(index, photos.length - 1));
+      setFocusedIndex(clamped);
+      const photo = photos[clamped];
+      if (photo) {
+        // Fire-and-forget: errors are non-fatal (no UI consequence).
+        recordView.mutate(photo.id);
+      }
+    },
+    [photos, recordView],
   );
   const closeDetail = useCallback(() => setFocusedIndex(null), []);
 
