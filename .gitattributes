@@ -34,6 +34,13 @@ tests/fixtures/photos/**/*.heic filter=lfs diff=lfs merge=lfs -text
 tests/fixtures/photos/**/*.HEIC filter=lfs diff=lfs merge=lfs -text
 tests/fixtures/photos/**/*.heif filter=lfs diff=lfs merge=lfs -text
 
+# Small committable fixtures (face-detect integration test) — kept under LFS
+# because even a single 7 MB JPG becomes annoying in plain-git history.
+tests/fixtures/face-detect/**/*.jpg  filter=lfs diff=lfs merge=lfs -text
+tests/fixtures/face-detect/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
+tests/fixtures/face-detect/**/*.heic filter=lfs diff=lfs merge=lfs -text
+tests/fixtures/face-detect/**/*.HEIC filter=lfs diff=lfs merge=lfs -text
+
 # Visual regression goldens
 tests/visual-goldens/baseline/**/*.png filter=lfs diff=lfs merge=lfs -text
 

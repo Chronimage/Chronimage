@@ -6,13 +6,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chronimage::{
+    ai::faces::init_global_faces_session,
     catalog::{
         db::{open_pool, PoolOptions},
         seed_default_smart_albums,
     },
     commands,
     state::AppState,
-    util::paths::catalog_db_path,
+    util::paths::{bundled_models_dir, catalog_db_path, models_dir},
 };
 use tauri::Manager;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -162,18 +163,40 @@ fn main() {
                 });
             }
 
-            // AI sessions intentionally NOT eagerly loaded during setup.
-            // Previous attempts (up through 24d4ab0) ran FacesSession::load —
-            // which commits two ONNX files totalling ~190MB through ort —
-            // synchronously on the main thread. Setup couldn't return until
-            // init completed; Tauri's webview waited for setup; user saw a
-            // blank window for 3-5 seconds on every launch.
-            //
-            // Pipeline stage-5 builds its own FacesSession per import run, so
-            // nothing currently reads AppState.faces. If a future command
-            // needs a shared session, move it behind a tokio::sync::OnceCell
-            // rather than blocking setup.
             app.manage(AppState { pool });
+
+            // Memoise the SCRFD + ArcFace `FacesSession` for pipeline stage-5
+            // (see docs/prds/phase-1.md §5). This runs in a background blocking
+            // task so setup() returns immediately — ort loads ~190 MB through
+            // `commit_from_file` on first use, which we don't want on the
+            // webview critical path.
+            //
+            // Resolution order matches ADR 0003: bundled installer dir first,
+            // user data dir second. Missing-in-both → session init returns
+            // `None` and stage-5 becomes a no-op for this process.
+            let handle_for_faces = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let bundled = bundled_models_dir(&handle_for_faces);
+                let user = models_dir().ok();
+                let resolve = |filename: &str| -> Option<std::path::PathBuf> {
+                    if let Some(b) = &bundled {
+                        let p = b.join(filename);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                    if let Some(u) = &user {
+                        let p = u.join(filename);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                    None
+                };
+                let scrfd = resolve("det_10g.onnx");
+                let arcface = resolve("w600k_r50.onnx");
+                init_global_faces_session(scrfd.as_deref(), arcface.as_deref());
+            });
 
             Ok(())
         })

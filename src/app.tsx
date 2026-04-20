@@ -20,6 +20,12 @@ export function App() {
   const screen = useUi((s) => s.screen);
   const setScreen = useUi((s) => s.setScreen);
   const tweaks = useUi((s) => s.tweaks);
+  const hydrateFromStore = useUi((s) => s.hydrateFromStore);
+
+  useEffect(() => {
+    // Restore persisted Settings tweaks from plugin-store exactly once at boot.
+    hydrateFromStore().catch((e) => logError('hydrateFromStore failed', e));
+  }, [hydrateFromStore]);
 
   const [albumId, setAlbumId] = useState<string>('all');
   const [version, setVersion] = useState<string>('0.0.0-dev');

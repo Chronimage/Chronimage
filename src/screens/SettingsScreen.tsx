@@ -490,15 +490,17 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
 // ── Root ──────────────────────────────────────────────────────────────────────
 
 export function SettingsScreen() {
+  // All persisted tweaks live in useUi (backed by @tauri-apps/plugin-store
+  // via hydrateFromStore + savePersisted). Local mirror state is only used
+  // for the app-name input which needs onBlur-commit semantics.
   const appName = useUi((s) => s.tweaks.appName);
+  const dupeSimilarity = useUi((s) => s.tweaks.dupeSimilarity);
+  const sharpnessCutoff = useUi((s) => s.tweaks.sharpnessCutoff);
+  const requireReview = useUi((s) => s.tweaks.requireReview);
+  const nightlyReindex = useUi((s) => s.tweaks.nightlyReindex);
   const setTweaks = useUi((s) => s.setTweaks);
 
-  // TODO(cc): persist all of these via tauri-plugin-store once the plugin is wired
   const [localAppName, setLocalAppName] = useState<string>(appName);
-  const [dupeSimilarity, setDupeSimilarity] = useState<number>(85);
-  const [sharpnessCutoff, setSharpnessCutoff] = useState<number>(32);
-  const [requireReview, setRequireReview] = useState<boolean>(true);
-  const [nightlyReindex, setNightlyReindex] = useState<boolean>(true);
 
   const {
     data: models = [],
@@ -642,7 +644,7 @@ export function SettingsScreen() {
               <Slider
                 label="Duplicate similarity threshold"
                 value={dupeSimilarity}
-                onChange={setDupeSimilarity}
+                onChange={(v) => setTweaks({ dupeSimilarity: v })}
                 min={50}
                 max={100}
                 suffix="%"
@@ -666,7 +668,7 @@ export function SettingsScreen() {
               <Slider
                 label="Sharpness cutoff score"
                 value={sharpnessCutoff}
-                onChange={setSharpnessCutoff}
+                onChange={(v) => setTweaks({ sharpnessCutoff: v })}
                 min={0}
                 max={100}
               />
@@ -689,7 +691,7 @@ export function SettingsScreen() {
                 {/* TODO(cc): persist via tauri-plugin-store */}
                 <Toggle
                   on={requireReview}
-                  onChange={setRequireReview}
+                  onChange={(v) => setTweaks({ requireReview: v })}
                   label="Require final review before deletion"
                 />
                 <span className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
@@ -742,7 +744,11 @@ export function SettingsScreen() {
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 {/* TODO(cc): persist via tauri-plugin-store */}
-                <Toggle on={nightlyReindex} onChange={setNightlyReindex} label="Enable nightly re-index" />
+                <Toggle
+                  on={nightlyReindex}
+                  onChange={(v) => setTweaks({ nightlyReindex: v })}
+                  label="Enable nightly re-index"
+                />
                 <span className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
                   02:00 · Wake from sleep
                 </span>
