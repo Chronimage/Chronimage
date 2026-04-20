@@ -129,82 +129,91 @@ fn main() {
             }
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "chronimage starting");
 
+            // Open the pool + build AI sessions SYNCHRONOUSLY before setup
+            // returns, so `AppState` is managed before the webview loads and
+            // the frontend can issue commands immediately. A previous
+            // `async_runtime::spawn` registration caused a race where
+            // `create_source` / other commands would fire before state was
+            // managed, surfacing as "state not managed for field `state`".
             let db_path = catalog_db_path()?;
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                match open_pool(PoolOptions::new(db_path)).await {
-                    Ok(pool) => {
-                        if let Err(e) = seed_default_smart_albums(&pool).await {
-                            tracing::warn!(error = %e, "smart album seed failed (non-fatal)");
-                        }
-                        // Spawn the background re-evaluator (10-minute cadence).
-                        // Guarded with cfg(not(test)) so integration tests don't
-                        // start runaway background tasks.
-                        #[cfg(not(test))]
-                        {
-                            use chronimage::albums::reevaluator::spawn_reevaluator;
-                            // JoinHandle dropped intentionally — the task runs until process exit.
-                            std::mem::drop(spawn_reevaluator(pool.clone()));
-                        }
-                        // Build AI sessions (stub when model files absent).
-                        // Resolution order: bundled installer dir first, then
-                        // user data dir (downloaded on-demand). A missing bundled
-                        // dir is not an error — fall through silently.
-                        let bundled = bundled_models_dir(&handle);
-                        let md = models_dir().ok();
-
-                        /// Resolve a model filename: bundled dir first, user
-                        /// data dir second. Returns None when absent in both.
-                        fn resolve_model(
-                            bundled: &Option<std::path::PathBuf>,
-                            user: &Option<std::path::PathBuf>,
-                            filename: &str,
-                        ) -> Option<std::path::PathBuf> {
-                            if let Some(b) = bundled {
-                                let p = b.join(filename);
-                                if p.exists() {
-                                    tracing::debug!(path = %p.display(), "model resolved from bundled dir");
-                                    return Some(p);
-                                }
-                            }
-                            if let Some(u) = user {
-                                let p = u.join(filename);
-                                if p.exists() {
-                                    tracing::debug!(path = %p.display(), "model resolved from user data dir");
-                                    return Some(p);
-                                }
-                            }
-                            None
-                        }
-
-                        let retina_path = resolve_model(&bundled, &md, "det_10g.onnx");
-                        let arcface_path = resolve_model(&bundled, &md, "w600k_r50.onnx");
-                        let faces = Arc::new(FacesSession::load_or_stub(
-                            retina_path.as_deref(),
-                            arcface_path.as_deref(),
-                        ));
-
-                        // Moondream2 is never bundled — user data dir only.
-                        let gguf_path = md
-                            .as_deref()
-                            .map(|d| d.join("moondream2-text-model-f16.gguf"))
-                            .filter(|p| p.exists());
-                        let tier = budget::detect().tier;
-                        let caption = Arc::new(CaptionSession::load_or_stub(
-                            gguf_path.as_deref(),
-                            // TODO(cc): resolve sidecar binary path from bundled dir in phase-1b
-                            None,
-                            tier,
-                        ));
-
-                        handle.manage(AppState {
-                            pool,
-                            faces,
-                            caption,
-                        });
-                    }
-                    Err(e) => tracing::error!(error = %e, "failed to open catalog pool"),
+            let pool = tauri::async_runtime::block_on(async move {
+                open_pool(PoolOptions::new(db_path)).await
+            })
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to open catalog pool");
+                Box::new(e) as Box<dyn std::error::Error>
+            })?;
+            tauri::async_runtime::block_on(async {
+                if let Err(e) = seed_default_smart_albums(&pool).await {
+                    tracing::warn!(error = %e, "smart album seed failed (non-fatal)");
                 }
+            });
+
+            // Spawn the background re-evaluator (10-minute cadence). This can
+            // safely live on the async runtime since it doesn't need to be
+            // registered before commands start flowing.
+            #[cfg(not(test))]
+            {
+                use chronimage::albums::reevaluator::spawn_reevaluator;
+                // JoinHandle dropped intentionally — the task runs until process exit.
+                std::mem::drop(spawn_reevaluator(pool.clone()));
+            }
+
+            // Build AI sessions (stub when model files absent).
+            // Resolution order: bundled installer dir first, then user data
+            // dir (downloaded on-demand). Missing paths fall through to stub.
+            let bundled = bundled_models_dir(&handle);
+            let md = models_dir().ok();
+
+            /// Resolve a model filename: bundled dir first, user data dir
+            /// second. Returns None when absent in both.
+            fn resolve_model(
+                bundled: &Option<std::path::PathBuf>,
+                user: &Option<std::path::PathBuf>,
+                filename: &str,
+            ) -> Option<std::path::PathBuf> {
+                if let Some(b) = bundled {
+                    let p = b.join(filename);
+                    if p.exists() {
+                        tracing::debug!(path = %p.display(), "model resolved from bundled dir");
+                        return Some(p);
+                    }
+                }
+                if let Some(u) = user {
+                    let p = u.join(filename);
+                    if p.exists() {
+                        tracing::debug!(path = %p.display(), "model resolved from user data dir");
+                        return Some(p);
+                    }
+                }
+                None
+            }
+
+            let retina_path = resolve_model(&bundled, &md, "det_10g.onnx");
+            let arcface_path = resolve_model(&bundled, &md, "w600k_r50.onnx");
+            let faces = Arc::new(FacesSession::load_or_stub(
+                retina_path.as_deref(),
+                arcface_path.as_deref(),
+            ));
+
+            // Moondream2 is never bundled — user data dir only.
+            let gguf_path = md
+                .as_deref()
+                .map(|d| d.join("moondream2-text-model-f16.gguf"))
+                .filter(|p| p.exists());
+            let tier = budget::detect().tier;
+            let caption = Arc::new(CaptionSession::load_or_stub(
+                gguf_path.as_deref(),
+                // TODO(cc): resolve sidecar binary path from bundled dir in phase-1b
+                None,
+                tier,
+            ));
+
+            app.manage(AppState {
+                pool,
+                faces,
+                caption,
             });
 
             Ok(())
