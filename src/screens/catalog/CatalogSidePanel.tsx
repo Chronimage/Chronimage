@@ -57,7 +57,7 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
             <div style={{ width: '99.6%' }} />
           </div>
           <div className="pc-stats">
-            <span>gemma4 · scenes</span>
+            <span>moondream2 · scenes</span>
             <span>~2m left</span>
           </div>
         </div>
