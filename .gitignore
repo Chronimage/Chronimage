@@ -55,6 +55,17 @@ tests/visual-goldens/diff/
 playwright-report/
 test-results/
 
+# Large phase-1 exit-criteria fixtures. Too big for LFS (~150–300 GB);
+# regenerate locally with scripts/scan-raw-jpg-pairs.ps1 and friends. The
+# exit tests gracefully skip when these dirs are absent.
+tests/fixtures/raw-jpg-pairs/
+tests/fixtures/catalog-size/
+tests/fixtures/import-throughput/
+tests/fixtures/source-cleanup/
+tests/fixtures/rediscovery/
+tests/fixtures/face-clusters/
+# Only the tiny face-detect `group.jpg` is small enough to commit via LFS.
+
 # OS / editors
 .DS_Store
 Thumbs.db
