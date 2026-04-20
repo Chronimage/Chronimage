@@ -91,11 +91,15 @@ fn raw_jpg_pair_precision_ge_99_5_percent() {
         panic!("fixture dir does not exist: {root:?}");
     }
 
-    // 1. Load ground-truth manifest.
+    // 1. Load ground-truth manifest. PowerShell writes UTF-8 with a BOM
+    // by default; strip it before handing to serde_json.
     let manifest_path = root.join("manifest.json");
-    let manifest_bytes =
+    let raw_bytes =
         std::fs::read(&manifest_path).unwrap_or_else(|e| panic!("read {manifest_path:?}: {e}"));
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+    let manifest_bytes: &[u8] = raw_bytes
+        .strip_prefix(&[0xEF_u8, 0xBB, 0xBF])
+        .unwrap_or(&raw_bytes);
+    let manifest: Manifest = serde_json::from_slice(manifest_bytes)
         .unwrap_or_else(|e| panic!("parse {manifest_path:?}: {e}"));
     assert!(
         !manifest.pairs.is_empty(),

@@ -164,5 +164,7 @@ $manifestBody = [PSCustomObject]@{
   timestamp_tolerance = $TimestampTolerance
   pairs               = $manifest
 }
-$manifestBody | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+$manifestJson = $manifestBody | ConvertTo-Json -Depth 6
+# Write UTF-8 without BOM — serde_json (and most JSON parsers) choke on BOM.
+[System.IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "manifest: $manifestPath" -ForegroundColor Green
