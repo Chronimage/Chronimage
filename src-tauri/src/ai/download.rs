@@ -73,21 +73,23 @@ pub struct ModelSpec {
 pub static KNOWN_MODELS: &[ModelSpec] = &[
     // Image embeddings — CLIP-style semantic vectors.
     // Upgraded from SigLIP-1 to SigLIP-2 (2025) — same footprint, ~5pt better retrieval.
+    // 224-patch16 size ONNX export from onnx-community.
     ModelSpec {
         name: "siglip2-b16-image",
         kind: "embedding",
         version: "2.0.0",
-        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-naflex/resolve/main/onnx/vision_model.onnx",
+        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/vision_model.onnx",
         sha256: "tbd",
         size_bytes: 375_000_000,
         filename: "siglip2-b16-image.onnx",
     },
     // Aesthetic score (NIMA) — ride on top of CLIP for Phase 2 ranking.
+    // Community ONNX export at cromsc/nima-mobilenet-aesthetic (tf2onnx-converted).
     ModelSpec {
         name: "nima-aesthetic",
         kind: "aesthetic",
         version: "1.0.0",
-        url: "https://huggingface.co/Chronimage/models/resolve/main/nima.onnx",
+        url: "https://huggingface.co/cromsc/nima-mobilenet-aesthetic/resolve/main/nima_mobilenet_aesthetic.onnx",
         sha256: "tbd",
         size_bytes: 14_000_000,
         filename: "nima.onnx",
@@ -123,11 +125,14 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
     // argument in addition to the text prompt.
     // TODO(cc): update CaptionSession::load to pass image_path to the sidecar
     // via the LLaVA-style image_url content block once Phase-1b wires the HTTP call.
+    // Official GGUF at moondream/moondream2-gguf (moondream org, not vikhyatk user).
+    // vikhyatk/moondream2 ships safetensors only; the GGUF quant lives in the
+    // sibling -gguf repo. Phase-1b also needs the mmproj companion for vision.
     ModelSpec {
         name: "moondream2-q4",
         kind: "caption-gguf",
         version: "2024.08.26",
-        url: "https://huggingface.co/vikhyatk/moondream2/resolve/main/moondream2-text-model-f16.gguf",
+        url: "https://huggingface.co/moondream/moondream2-gguf/resolve/main/moondream2-text-model-f16.gguf",
         sha256: "tbd",
         size_bytes: 1_700_000_000,
         filename: "moondream2-text-model-f16.gguf",
@@ -406,17 +411,14 @@ mod tests {
 
     #[test]
     fn known_models_use_community_urls() {
-        // All models must NOT require the private Chronimage HF repo for the
-        // face / caption / embedding models. Only nima is still on the private
-        // repo (pending a community alternative).
+        // No model should point at the private Chronimage HF repo — all five
+        // are now backed by freely-available community sources.
         for m in KNOWN_MODELS {
-            if m.kind == "face-detect" || m.kind == "face-embed" || m.kind == "caption-gguf" {
-                assert!(
-                    !m.url.contains("Chronimage/models"),
-                    "model {} still points at the private Chronimage HF repo",
-                    m.name
-                );
-            }
+            assert!(
+                !m.url.contains("Chronimage/models"),
+                "model {} still points at the private Chronimage HF repo",
+                m.name
+            );
         }
     }
 

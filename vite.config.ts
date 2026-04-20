@@ -4,12 +4,12 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 // Tauri's dev server uses a fixed port; Vite must match. See tauri.conf.json.
-// TanStack Router plugin is deferred until Phase 1 when we switch from the
-// Zustand-driven screen state to file-based routes. When added back, create
-// src/routes/__root.tsx + per-screen routes first.
+// Routing is Zustand-driven via `useUi` in src/state/ui.ts — no file-based
+// router yet. If we ever wire TanStack Router, add `TanStackRouterVite()` here
+// and create src/routes/__root.tsx + per-screen routes.
 const host = process.env.TAURI_DEV_HOST ?? '127.0.0.1';
 
-export default defineConfig(async () => ({
+export default defineConfig(() => ({
   plugins: [react(), tailwindcss()],
 
   // Don't rewrite `process.env.TAURI_*` — they're passed through by Tauri.
@@ -20,7 +20,6 @@ export default defineConfig(async () => ({
     port: 1420,
     strictPort: true,
     watch: {
-      // Don't crawl these
       ignored: ['**/src-tauri/target/**', '**/design-handoff/**', '**/models/**', '**/node_modules/**'],
     },
     hmr: host === '127.0.0.1' ? undefined : { protocol: 'ws', host, port: 1430 },
@@ -42,22 +41,26 @@ export default defineConfig(async () => ({
 
   build: {
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
-    minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
-    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    minify: process.env.TAURI_ENV_DEBUG ? false : 'esbuild',
+    sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
     rollupOptions: {
       output: {
-        manualChunks: {
-          react: ['react', 'react-dom'],
-          router: ['@tanstack/react-router'],
-          radix: [
-            '@radix-ui/react-dialog',
-            '@radix-ui/react-dropdown-menu',
-            '@radix-ui/react-popover',
-            '@radix-ui/react-scroll-area',
-            '@radix-ui/react-slider',
-            '@radix-ui/react-tabs',
-            '@radix-ui/react-tooltip',
-          ],
+        // Id-based vendor split. React + its scheduler dep must share a chunk
+        // (separating them creates a circular `vendor -> react -> vendor`).
+        // @tanstack packages get their own chunk because they're sizeable and
+        // stable across releases — keeps long-term browser caching effective.
+        // Everything else (including small Radix primitives) stays in vendor.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (
+            id.includes('node_modules/react/') ||
+            id.includes('node_modules/react-dom/') ||
+            id.includes('node_modules/scheduler/')
+          ) {
+            return 'react';
+          }
+          if (id.includes('node_modules/@tanstack/')) return 'tanstack';
+          return 'vendor';
         },
       },
     },
