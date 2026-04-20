@@ -1,0 +1,183 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    Download the four Phase-1 bundled ONNX models into src-tauri/models/bundled/.
+
+.DESCRIPTION
+    Fetches siglip2-b16-image.onnx, nima.onnx, det_10g.onnx, and w600k_r50.onnx
+    from their upstream URLs and verifies SHA256 hashes before writing to the
+    destination directory.
+
+    buffalo_l.zip (InsightFace) is downloaded once and both SCRFD + ArcFace files
+    are extracted before the zip is deleted.
+
+    CI invokes this script in the packaging job before `tauri build`.
+    Developers run it once after cloning: `pwsh scripts/fetch-bundled-models.ps1`
+
+.OUTPUTS
+    One status line per model:
+      [ok] <filename> <size>
+      [fail] <reason>
+    Exits non-zero if any model fails.
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$BundledDir = Join-Path $RepoRoot 'src-tauri' 'models' 'bundled'
+
+if (-not (Test-Path $BundledDir)) {
+    New-Item -ItemType Directory -Path $BundledDir | Out-Null
+}
+
+# ---------------------------------------------------------------------------
+# Model definitions — keep in sync with src-tauri/src/ai/download.rs KNOWN_MODELS
+# ---------------------------------------------------------------------------
+$Models = @(
+    [PSCustomObject]@{
+        Filename  = 'siglip2-b16-image.onnx'
+        Url       = 'https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/vision_model.onnx'
+        Sha256    = 'c0573e3f4140c3a7c4e9cc5912bd6b26a033b46a6a8e8af26cbea262b163bcad'
+        ZipEntry  = $null
+    },
+    [PSCustomObject]@{
+        Filename  = 'nima.onnx'
+        Url       = 'https://huggingface.co/cromsc/nima-mobilenet-aesthetic/resolve/main/nima_mobilenet_aesthetic.onnx'
+        Sha256    = 'c58b0c39b5b8f752b1b0ebf10e07e48406780ce3bf9d4647f8c43898748fe69c'
+        ZipEntry  = $null
+    },
+    [PSCustomObject]@{
+        Filename  = 'det_10g.onnx'
+        Url       = 'https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip'
+        Sha256    = '5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91'
+        ZipEntry  = 'buffalo_l/det_10g.onnx'
+    },
+    [PSCustomObject]@{
+        Filename  = 'w600k_r50.onnx'
+        Url       = 'https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip'
+        Sha256    = '4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43'
+        ZipEntry  = 'buffalo_l/w600k_r50.onnx'
+    }
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+function Get-FileSha256 {
+    param([string]$Path)
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLower()
+    return $hash
+}
+
+function Format-Bytes {
+    param([long]$Bytes)
+    if ($Bytes -ge 1MB) { return '{0:F1} MB' -f ($Bytes / 1MB) }
+    return '{0:F0} KB' -f ($Bytes / 1KB)
+}
+
+# ---------------------------------------------------------------------------
+# Download buffalo_l.zip once (covers both SCRFD + ArcFace)
+# ---------------------------------------------------------------------------
+$BuffaloZipUrl = 'https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip'
+$BuffaloZipPath = Join-Path $BundledDir 'buffalo_l.zip.tmp'
+$NeedBuffalo = $Models | Where-Object { $_.ZipEntry -ne $null } |
+    Where-Object { -not (Test-Path (Join-Path $BundledDir $_.Filename)) }
+
+if ($NeedBuffalo) {
+    Write-Host "Downloading buffalo_l.zip (288 MB)..."
+    try {
+        $wc = [System.Net.WebClient]::new()
+        $wc.DownloadFile($BuffaloZipUrl, $BuffaloZipPath)
+        $wc.Dispose()
+    } catch {
+        Write-Host "[fail] buffalo_l.zip download failed: $_"
+        exit 1
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Process each model
+# ---------------------------------------------------------------------------
+$Failures = 0
+
+foreach ($m in $Models) {
+    $Dest = Join-Path $BundledDir $m.Filename
+
+    # Skip if already present and hash matches.
+    if (Test-Path $Dest) {
+        $existing = Get-FileSha256 -Path $Dest
+        if ($existing -eq $m.Sha256) {
+            $size = (Get-Item $Dest).Length
+            Write-Host "[ok] $($m.Filename) $(Format-Bytes $size) (cached)"
+            continue
+        }
+        Write-Host "  Hash mismatch on cached $($m.Filename) — re-fetching"
+        Remove-Item $Dest -Force
+    }
+
+    if ($m.ZipEntry -ne $null) {
+        # Extract from the already-downloaded buffalo_l.zip.
+        try {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($BuffaloZipPath)
+            $entry = $zip.Entries | Where-Object { $_.FullName -ieq $m.ZipEntry } | Select-Object -First 1
+            if (-not $entry) {
+                $zip.Dispose()
+                throw "Entry '$($m.ZipEntry)' not found in buffalo_l.zip"
+            }
+            $stream = $entry.Open()
+            $tmp = $Dest + '.extract.tmp'
+            $fs = [System.IO.File]::OpenWrite($tmp)
+            $stream.CopyTo($fs)
+            $fs.Close()
+            $stream.Close()
+            $zip.Dispose()
+            Move-Item -Path $tmp -Destination $Dest -Force
+        } catch {
+            Write-Host "[fail] $($m.Filename): $_"
+            $Failures++
+            continue
+        }
+    } else {
+        # Direct download.
+        $tmp = $Dest + '.download.tmp'
+        try {
+            $wc = [System.Net.WebClient]::new()
+            $wc.DownloadFile($m.Url, $tmp)
+            $wc.Dispose()
+            Move-Item -Path $tmp -Destination $Dest -Force
+        } catch {
+            Write-Host "[fail] $($m.Filename): $_"
+            if (Test-Path $tmp) { Remove-Item $tmp -Force }
+            $Failures++
+            continue
+        }
+    }
+
+    # Verify hash.
+    $actual = Get-FileSha256 -Path $Dest
+    if ($actual -ne $m.Sha256) {
+        Write-Host "[fail] $($m.Filename): SHA256 mismatch (got $actual, want $($m.Sha256))"
+        Remove-Item $Dest -Force
+        $Failures++
+        continue
+    }
+
+    $size = (Get-Item $Dest).Length
+    Write-Host "[ok] $($m.Filename) $(Format-Bytes $size)"
+}
+
+# Clean up the zip after both entries are extracted.
+if (Test-Path $BuffaloZipPath) {
+    Remove-Item $BuffaloZipPath -Force
+}
+
+if ($Failures -gt 0) {
+    Write-Host "$Failures model(s) failed — see above"
+    exit 1
+}
+
+Write-Host "All bundled models ready in $BundledDir"
+exit 0

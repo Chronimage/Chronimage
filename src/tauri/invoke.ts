@@ -350,16 +350,25 @@ export async function faceClusterMerge(a: number, b: number): Promise<number> {
 
 // ── AI Models status ────────────────────────────────────────────────────────
 
+export type ModelSource = 'bundled' | 'downloaded' | 'missing';
+
 export interface ModelStatus {
   name: string;
   kind: string;
   filename: string;
   installed: boolean;
   sizeBytes: number;
+  source: ModelSource;
 }
 
 export async function aiModelsStatus(): Promise<ModelStatus[]> {
   return tauriInvoke<ModelStatus[]>('ai_models_status');
+}
+
+/** Trigger a re-index for a specific model kind after swapping the active model.
+ *  Returns the number of rows affected. */
+export async function aiReindex(kind: string): Promise<number> {
+  return tauriInvoke<number>('ai_reindex', { kind });
 }
 
 // ── Lift & Shift ────────────────────────────────────────────────────────────

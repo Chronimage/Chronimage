@@ -55,6 +55,10 @@ pub struct ModelSpec {
     /// Filename to write in the `models/` directory (the file extracted from
     /// the zip, or the direct download target).
     pub filename: &'static str,
+    /// True when this model ships pre-extracted inside the installer's
+    /// resource directory. Phase 1 defaults (siglip-2, scrfd, arcface, nima)
+    /// are bundled. Moondream2 (caption, 1.7 GB) is false.
+    pub bundled: bool,
 }
 
 /// All models that Chronimage can download.
@@ -84,6 +88,7 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         sha256: "c0573e3f4140c3a7c4e9cc5912bd6b26a033b46a6a8e8af26cbea262b163bcad",
         size_bytes: 371_807_752,
         filename: "siglip2-b16-image.onnx",
+        bundled: true,
     },
     // Aesthetic score (NIMA) — ride on top of CLIP for Phase 2 ranking.
     // Community ONNX export at cromsc/nima-mobilenet-aesthetic (tf2onnx-converted).
@@ -95,6 +100,7 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         sha256: "c58b0c39b5b8f752b1b0ebf10e07e48406780ce3bf9d4647f8c43898748fe69c",
         size_bytes: 12_867_270,
         filename: "nima.onnx",
+        bundled: true,
     },
     // Face detection (SCRFD-10g) + Face embedding (ArcFace W600K R50).
     // Both ship in InsightFace's buffalo_l.zip (MIT). Downloader extracts the
@@ -111,6 +117,7 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         // InsightFace renamed the SCRFD model to `det_10g.onnx` inside
         // buffalo_l.zip (was `scrfd_10g_bnkps.onnx` in the standalone release).
         filename: "det_10g.onnx",
+        bundled: true,
     },
     ModelSpec {
         name: "arcface-w600k-r50",
@@ -120,6 +127,7 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         sha256: "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
         size_bytes: 288_621_354,
         filename: "w600k_r50.onnx",
+        bundled: true,
     },
     // Caption: Moondream2 (1.9B, Apache 2.0) — purpose-built for "describe this photo"
     // prompts, runs on CPU at ~1s/image. Community GGUF quantization.
@@ -140,6 +148,7 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         sha256: "4e17e9107fb8781629b3c8ce177de57ffeae90fe14adcf7b99f0eef025889696",
         size_bytes: 2_839_534_976,
         filename: "moondream2-text-model-f16.gguf",
+        bundled: false,
     },
 ];
 
@@ -402,6 +411,33 @@ mod tests {
                 required
             );
         }
+    }
+
+    #[test]
+    fn phase_1_defaults_are_bundled() {
+        // The four models required for Phase 1 exit must be bundled so first-run
+        // works without network access. Moondream2 (caption-gguf) is on-demand only.
+        let bundled_kinds: std::collections::HashSet<&str> = KNOWN_MODELS
+            .iter()
+            .filter(|m| m.bundled)
+            .map(|m| m.kind)
+            .collect();
+        for required_bundled in &["embedding", "aesthetic", "face-detect", "face-embed"] {
+            assert!(
+                bundled_kinds.contains(required_bundled),
+                "phase-1 kind {:?} must have bundled=true",
+                required_bundled
+            );
+        }
+        // Caption model must NOT be bundled (too large for installer).
+        let caption = KNOWN_MODELS
+            .iter()
+            .find(|m| m.kind == "caption-gguf")
+            .expect("caption-gguf entry must exist");
+        assert!(
+            !caption.bundled,
+            "moondream2 (caption-gguf) must not be bundled — it is 1.7 GB"
+        );
     }
 
     #[test]

@@ -51,7 +51,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [],
+    "resources": ["models/bundled/*"],
     "copyright": "© 2026 Jay Amirineni",
     "shortDescription": "On-device AI photo organizer.",
     "longDescription": "Chronimage consolidates your fragmented photo library across Google Photos, iCloud, iPhone, and local disks; detects duplicates (including RAW+JPG pairs); and lets you reclaim cloud storage with verified local copies.",

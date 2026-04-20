@@ -100,6 +100,7 @@ Don't rely on the pre-commit / pre-push hook alone — it skips `cargo deny` and
 
 ### Paths
 - Never commit `models/`, `catalog.db`, `tests/fixtures/photos/*.arw`-`*.heic` (LFS-only), `src-tauri/target/`, `dist/`, `.vite/`, OneDrive temp files, or anything in `tmp/`.
+- Never commit `src-tauri/models/bundled/` binary files (`.onnx`, `.gguf`). The directory is tracked via `.gitkeep`; the binaries are populated at build time by `scripts/fetch-bundled-models.*`.
 
 ---
 
@@ -117,6 +118,11 @@ Layout tokens are in `src/styles/tokens.css` (ported from the design's `styles.c
 # Install
 pnpm install
 cargo fetch --manifest-path src-tauri/Cargo.toml
+# Populate the bundled-model staging dir (Windows):
+pwsh scripts/fetch-bundled-models.ps1
+# On Linux CI / packaging runners:
+# bash scripts/fetch-bundled-models.sh
+# (CI does this automatically in the packaging job before `tauri build`)
 
 # Dev
 pnpm tauri dev

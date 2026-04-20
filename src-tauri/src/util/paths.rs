@@ -2,6 +2,7 @@
 
 use crate::{AppError, AppResult, APP_ID};
 use std::path::PathBuf;
+use tauri::Manager as _;
 
 /// Per-user app data directory. Falls back to the current directory only in
 /// tests (where `dirs::data_local_dir` may be unset).
@@ -29,6 +30,27 @@ pub fn models_dir() -> AppResult<PathBuf> {
         return Ok(PathBuf::from(override_path));
     }
     Ok(app_data_dir()?.join("models"))
+}
+
+/// Resolve the installer's bundled-models resource directory.
+///
+/// In production this resolves to `<resource_dir>/models/bundled/` via Tauri's
+/// path API, which maps to the resource directory declared in `tauri.conf.json`.
+///
+/// In tests and dev builds, `CHRONIMAGE_BUNDLED_MODELS_DIR` overrides the path
+/// so callers can seed a tempdir with fake model files without requiring a
+/// full Tauri runtime. Returns `None` when neither the env override nor a
+/// valid Tauri resource path is available (e.g. during `cargo test` without
+/// the env var).
+pub fn bundled_models_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    // Test / CI override — mirrors the CHRONIMAGE_MODELS_DIR pattern.
+    if let Ok(override_path) = std::env::var("CHRONIMAGE_BUNDLED_MODELS_DIR") {
+        return Some(PathBuf::from(override_path));
+    }
+    // Production: resolve via Tauri's resource directory.
+    app.path()
+        .resolve("models/bundled", tauri::path::BaseDirectory::Resource)
+        .ok()
 }
 
 #[cfg(test)]

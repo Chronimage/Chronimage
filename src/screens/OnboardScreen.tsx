@@ -1,11 +1,14 @@
 /**
- * OnboardScreen — 5-step stepper onboarding flow.
+ * OnboardScreen — 4-step stepper onboarding flow.
  *
  * Step 1: Welcome   — catalog home location picker (UI only; move pipeline is Phase 1b)
  * Step 2: Sources   — connect libraries (local, iCloud, iPhone, Google Photos)
  * Step 3: Import    — live import progress wired to IMPORT_PROGRESS_EVENT
- * Step 4: Models    — AI model picker with GPU auto-detect + download progress
- * Step 5: People    — face cluster naming grid
+ * Step 4: People    — face cluster naming grid
+ *
+ * Model selection is NOT part of onboarding. Default models ship bundled in
+ * the installer; power users swap per-feature from Settings → AI Models
+ * (see `docs/adr/0003-bundled-default-models.md`).
  */
 
 import { listen } from '@tauri-apps/api/event';
@@ -22,7 +25,6 @@ import {
   useCreateSource,
   useDeleteSource,
   useDetectIcloudPath,
-  useDownloadModels,
   useImportGoogleTakeout,
   useIphoneDevices,
   useLiftShiftDryRun,
@@ -31,12 +33,6 @@ import {
   useStartImport,
 } from '../state/queries';
 import { useUi } from '../state/ui';
-import {
-  DOWNLOAD_PROGRESS_EVENT,
-  type DownloadProgressEvent,
-  detectHardware,
-  type HardwareInfo,
-} from '../tauri/invoke';
 import { debug } from '../util/log';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -52,16 +48,9 @@ interface ActiveImport {
   finished: boolean;
 }
 
-interface ModelDownloadState {
-  downloadedBytes: number;
-  totalBytes: number;
-  done: boolean;
-  alreadyInstalled: boolean;
-}
-
 type CatalogMode = 'consolidate' | 'index_in_place';
 
-type StepId = 'welcome' | 'sources' | 'import' | 'models' | 'people';
+type StepId = 'welcome' | 'sources' | 'import' | 'people';
 
 interface Step {
   id: StepId;
@@ -71,11 +60,12 @@ interface Step {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+// Default models ship bundled in the installer (see ADR 0003); there is no
+// "Models" step — power users swap models from Settings → AI Models.
 const STEPS: Step[] = [
   { id: 'welcome', t: 'Welcome', s: 'Choose your catalog home' },
   { id: 'sources', t: 'Sources', s: 'Connect every library' },
   { id: 'import', t: 'Import', s: 'Indexing in progress' },
-  { id: 'models', t: 'Models', s: 'Pick your AI' },
   { id: 'people', t: 'Name people', s: 'So faces stick for life' },
 ];
 
@@ -765,233 +755,6 @@ function OnbLiftPanel() {
   );
 }
 
-// ── Step 4: Models ────────────────────────────────────────────────────────────
-
-interface ModelTier {
-  category: string;
-  name: string;
-  alternates: string;
-  sub: string;
-  downloadKey: string;
-}
-
-const MODEL_TIERS: ModelTier[] = [
-  {
-    category: 'Captions & scenes',
-    name: 'Moondream2',
-    alternates: 'Apache-2.0 · 1.9B params',
-    sub: '~1.7 GB · CPU-usable · no license gate',
-    downloadKey: 'moondream2-q4',
-  },
-  {
-    category: 'Semantic search',
-    name: 'SigLIP-2 B/16',
-    alternates: 'Apache-2.0 · Google',
-    sub: '~375 MB · fast retrieval · CPU',
-    downloadKey: 'siglip2-b16-image',
-  },
-  {
-    category: 'Face detection',
-    name: 'SCRFD-10g',
-    alternates: 'MIT · InsightFace buffalo_l',
-    sub: '~17 MB ONNX (extracted from 275 MB bundle)',
-    downloadKey: 'scrfd-10g',
-  },
-  {
-    category: 'Face embedding',
-    name: 'ArcFace W600K R50',
-    alternates: 'MIT · InsightFace buffalo_l',
-    sub: '~166 MB ONNX · 512-dim identity vector',
-    downloadKey: 'arcface-w600k-r50',
-  },
-  {
-    category: 'Aesthetic score',
-    name: 'NIMA',
-    alternates: 'Google Research',
-    sub: '~14 MB · rediscovery + culling',
-    downloadKey: 'nima-aesthetic',
-  },
-];
-
-function OnbModels() {
-  const downloadModels = useDownloadModels();
-  const [hardware, setHardware] = useState<HardwareInfo | null>(null);
-  const [modelProgress, setModelProgress] = useState<Map<string, ModelDownloadState>>(new Map());
-  const unlistenRef = useRef<(() => void) | null>(null);
-
-  useEffect(() => {
-    detectHardware()
-      .then((hw) => setHardware(hw))
-      .catch((err: unknown) => {
-        debug('detectHardware failed', err);
-      });
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    listen<DownloadProgressEvent>(DOWNLOAD_PROGRESS_EVENT, (event) => {
-      const p = event.payload;
-      setModelProgress((prev) => {
-        const next = new Map(prev);
-        next.set(p.model_name, {
-          downloadedBytes: p.downloaded_bytes,
-          totalBytes: p.total_bytes,
-          done: p.done,
-          alreadyInstalled: p.already_installed,
-        });
-        return next;
-      });
-    })
-      .then((unlisten) => {
-        if (cancelled) unlisten();
-        else unlistenRef.current = unlisten;
-      })
-      .catch((err: unknown) => {
-        debug('DOWNLOAD_PROGRESS_EVENT listen failed', err);
-      });
-    return () => {
-      cancelled = true;
-      unlistenRef.current?.();
-    };
-  }, []);
-
-  function handleDownloadAll() {
-    downloadModels.mutate(undefined);
-  }
-
-  function handleDownloadOne(modelKey: string) {
-    downloadModels.mutate([modelKey]);
-  }
-
-  const hwBadge =
-    hardware == null
-      ? null
-      : hardware.tier === 'CpuOnly'
-        ? 'CPU only'
-        : `${hardware.adapter_name} · ${(hardware.vram_mb / 1024).toFixed(0)} GB VRAM`;
-
-  return (
-    <div>
-      <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginBottom: 8 }}>
-        STEP 4 · MODELS
-      </div>
-      <h1 className="onb-title">
-        Pick the models
-        <br />
-        that <em>read your photos.</em>
-      </h1>
-
-      {hwBadge && (
-        <div
-          className="mono"
-          style={{
-            fontSize: 11,
-            color: 'var(--accent)',
-            marginBottom: 14,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-          }}
-        >
-          <Icon name="ai" size={13} />
-          {hwBadge}
-        </div>
-      )}
-
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 18 }}>
-        {MODEL_TIERS.map((r) => {
-          const prog = modelProgress.get(r.downloadKey);
-          const pct =
-            prog && prog.totalBytes > 0 ? Math.round((prog.downloadedBytes / prog.totalBytes) * 100) : 0;
-          const isInstalled = prog?.done || prog?.alreadyInstalled;
-          const isDownloading = prog != null && !prog.done && !prog.alreadyInstalled;
-
-          return (
-            <div
-              key={r.category}
-              style={{
-                padding: 14,
-                border: '1px solid var(--stroke)',
-                borderRadius: 10,
-                background: 'var(--bg-elev)',
-              }}
-            >
-              <div className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)', marginBottom: 6 }}>
-                {r.category.toUpperCase()}
-              </div>
-              <div style={{ fontSize: 16, fontFamily: 'var(--display-font)', marginBottom: 4 }}>{r.name}</div>
-              <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginBottom: 10 }}>
-                {r.sub}
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 10 }}>
-                Alternates · {r.alternates}
-              </div>
-
-              {isDownloading && (
-                <div className="progress" style={{ marginBottom: 8 }}>
-                  <div style={{ width: `${pct}%`, background: 'var(--info)' }} />
-                </div>
-              )}
-
-              {isInstalled ? (
-                <Chip variant="solid">Installed</Chip>
-              ) : (
-                <button
-                  type="button"
-                  className="btn2"
-                  style={{ padding: '5px 12px', fontSize: 11 }}
-                  disabled={downloadModels.isPending}
-                  onClick={() => handleDownloadOne(r.downloadKey)}
-                >
-                  <Icon name="download" size={12} />
-                  {isDownloading ? `${pct}%` : 'Download'}
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      <div
-        style={{
-          marginTop: 18,
-          padding: '12px 14px',
-          background: 'color-mix(in oklch, var(--accent) 8%, var(--bg-elev))',
-          border: '1px solid color-mix(in oklch, var(--accent) 30%, var(--stroke))',
-          borderRadius: 10,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-        }}
-      >
-        <Icon name="ai" size={20} />
-        <div style={{ flex: 1, fontSize: 12.5, color: 'var(--fg-dim)' }}>
-          <strong style={{ color: 'var(--fg)' }}>All on-device.</strong> Nothing leaves your PC unless you
-          pick a cloud model. You can swap models later without re-indexing.
-        </div>
-        <button
-          type="button"
-          className="btn2 primary"
-          style={{ padding: '7px 14px', fontSize: 12, flexShrink: 0 }}
-          onClick={handleDownloadAll}
-          disabled={downloadModels.isPending}
-        >
-          <Icon name="download" size={13} />
-          {downloadModels.isPending ? 'Downloading…' : 'Download all'}
-        </button>
-      </div>
-
-      {downloadModels.error && (
-        <div className="mono" style={{ fontSize: 11, color: 'var(--danger)', marginTop: 10 }}>
-          {downloadModels.error instanceof Error
-            ? downloadModels.error.message
-            : String(downloadModels.error)}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Step 5: People ────────────────────────────────────────────────────────────
 
 interface FaceCluster {
@@ -1337,7 +1100,6 @@ export function OnboardScreen() {
               {catalogMode === 'consolidate' && <OnbLiftPanel />}
             </>
           )}
-          {step === 'models' && <OnbModels />}
           {step === 'people' && <OnbPeople />}
 
           {/* ── Navigation actions ── */}

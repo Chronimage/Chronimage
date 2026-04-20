@@ -13,7 +13,7 @@ use chronimage::{
     },
     commands,
     state::AppState,
-    util::paths::{catalog_db_path, models_dir},
+    util::paths::{bundled_models_dir, catalog_db_path, models_dir},
 };
 use std::sync::Arc;
 use tauri::Manager;
@@ -121,6 +121,7 @@ fn main() {
             commands::face_cluster_name,
             commands::face_cluster_merge,
             commands::record_photo_view,
+            commands::ai_reindex,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -146,21 +147,51 @@ fn main() {
                             std::mem::drop(spawn_reevaluator(pool.clone()));
                         }
                         // Build AI sessions (stub when model files absent).
+                        // Resolution order: bundled installer dir first, then
+                        // user data dir (downloaded on-demand). A missing bundled
+                        // dir is not an error — fall through silently.
+                        let bundled = bundled_models_dir(&handle);
                         let md = models_dir().ok();
 
-                        let retina_path = md.as_deref().map(|d| d.join("det_10g.onnx"));
-                        let arcface_path = md.as_deref().map(|d| d.join("w600k_r50.onnx"));
+                        /// Resolve a model filename: bundled dir first, user
+                        /// data dir second. Returns None when absent in both.
+                        fn resolve_model(
+                            bundled: &Option<std::path::PathBuf>,
+                            user: &Option<std::path::PathBuf>,
+                            filename: &str,
+                        ) -> Option<std::path::PathBuf> {
+                            if let Some(b) = bundled {
+                                let p = b.join(filename);
+                                if p.exists() {
+                                    tracing::debug!(path = %p.display(), "model resolved from bundled dir");
+                                    return Some(p);
+                                }
+                            }
+                            if let Some(u) = user {
+                                let p = u.join(filename);
+                                if p.exists() {
+                                    tracing::debug!(path = %p.display(), "model resolved from user data dir");
+                                    return Some(p);
+                                }
+                            }
+                            None
+                        }
+
+                        let retina_path = resolve_model(&bundled, &md, "det_10g.onnx");
+                        let arcface_path = resolve_model(&bundled, &md, "w600k_r50.onnx");
                         let faces = Arc::new(FacesSession::load_or_stub(
-                            retina_path.as_deref().filter(|p| p.exists()),
-                            arcface_path.as_deref().filter(|p| p.exists()),
+                            retina_path.as_deref(),
+                            arcface_path.as_deref(),
                         ));
 
+                        // Moondream2 is never bundled — user data dir only.
                         let gguf_path = md
                             .as_deref()
-                            .map(|d| d.join("moondream2-text-model-f16.gguf"));
+                            .map(|d| d.join("moondream2-text-model-f16.gguf"))
+                            .filter(|p| p.exists());
                         let tier = budget::detect().tier;
                         let caption = Arc::new(CaptionSession::load_or_stub(
-                            gguf_path.as_deref().filter(|p| p.exists()),
+                            gguf_path.as_deref(),
                             // TODO(cc): resolve sidecar binary path from bundled dir in phase-1b
                             None,
                             tier,
