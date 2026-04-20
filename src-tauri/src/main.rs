@@ -6,16 +6,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chronimage::{
-    ai::{budget, caption::CaptionSession, faces::FacesSession},
     catalog::{
         db::{open_pool, PoolOptions},
         seed_default_smart_albums,
     },
     commands,
     state::AppState,
-    util::paths::{bundled_models_dir, catalog_db_path, models_dir},
+    util::paths::catalog_db_path,
 };
-use std::sync::Arc;
 use tauri::Manager;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -136,7 +134,6 @@ fn main() {
             // `create_source` / other commands would fire before state was
             // managed, surfacing as "state not managed for field `state`".
             let db_path = catalog_db_path()?;
-            let handle = app.handle().clone();
             let pool = tauri::async_runtime::block_on(async move {
                 open_pool(PoolOptions::new(db_path)).await
             })
@@ -165,61 +162,18 @@ fn main() {
                 });
             }
 
-            // Build AI sessions (stub when model files absent).
-            // Resolution order: bundled installer dir first, then user data
-            // dir (downloaded on-demand). Missing paths fall through to stub.
-            let bundled = bundled_models_dir(&handle);
-            let md = models_dir().ok();
-
-            /// Resolve a model filename: bundled dir first, user data dir
-            /// second. Returns None when absent in both.
-            fn resolve_model(
-                bundled: &Option<std::path::PathBuf>,
-                user: &Option<std::path::PathBuf>,
-                filename: &str,
-            ) -> Option<std::path::PathBuf> {
-                if let Some(b) = bundled {
-                    let p = b.join(filename);
-                    if p.exists() {
-                        tracing::debug!(path = %p.display(), "model resolved from bundled dir");
-                        return Some(p);
-                    }
-                }
-                if let Some(u) = user {
-                    let p = u.join(filename);
-                    if p.exists() {
-                        tracing::debug!(path = %p.display(), "model resolved from user data dir");
-                        return Some(p);
-                    }
-                }
-                None
-            }
-
-            let retina_path = resolve_model(&bundled, &md, "det_10g.onnx");
-            let arcface_path = resolve_model(&bundled, &md, "w600k_r50.onnx");
-            let faces = Arc::new(FacesSession::load_or_stub(
-                retina_path.as_deref(),
-                arcface_path.as_deref(),
-            ));
-
-            // Moondream2 is never bundled — user data dir only.
-            let gguf_path = md
-                .as_deref()
-                .map(|d| d.join("moondream2-text-model-f16.gguf"))
-                .filter(|p| p.exists());
-            let tier = budget::detect().tier;
-            let caption = Arc::new(CaptionSession::load_or_stub(
-                gguf_path.as_deref(),
-                // TODO(cc): resolve sidecar binary path from bundled dir in phase-1b
-                None,
-                tier,
-            ));
-
-            app.manage(AppState {
-                pool,
-                faces,
-                caption,
-            });
+            // AI sessions intentionally NOT eagerly loaded during setup.
+            // Previous attempts (up through 24d4ab0) ran FacesSession::load —
+            // which commits two ONNX files totalling ~190MB through ort —
+            // synchronously on the main thread. Setup couldn't return until
+            // init completed; Tauri's webview waited for setup; user saw a
+            // blank window for 3-5 seconds on every launch.
+            //
+            // Pipeline stage-5 builds its own FacesSession per import run, so
+            // nothing currently reads AppState.faces. If a future command
+            // needs a shared session, move it behind a tokio::sync::OnceCell
+            // rather than blocking setup.
+            app.manage(AppState { pool });
 
             Ok(())
         })

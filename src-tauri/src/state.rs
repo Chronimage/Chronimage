@@ -1,15 +1,13 @@
-use crate::ai::{caption::CaptionSession, faces::FacesSession};
 use sqlx::SqlitePool;
-use std::sync::Arc;
 
 /// Global application state managed by Tauri. Injected into commands via
 /// `tauri::State<'_, AppState>`.
+///
+/// Intentionally minimal: heavy AI sessions are constructed on-demand by the
+/// code paths that actually need them (e.g. import pipeline stage-5 builds its
+/// own `FacesSession` per run, the future captioning sidecar will spawn its
+/// process lazily). Keeping sessions out of setup-time state means the webview
+/// shows immediately on launch instead of waiting seconds for ONNX init.
 pub struct AppState {
     pub pool: SqlitePool,
-    /// SCRFD-10g + ArcFace W600K R50 sessions. Always present; stubs when model
-    /// files are absent. `is_stub == true` until model files are downloaded.
-    pub faces: Arc<FacesSession>,
-    /// llama.cpp caption session. Always present; stubs on CPU-only hardware
-    /// or when the GGUF model / sidecar binary are absent.
-    pub caption: Arc<CaptionSession>,
 }
