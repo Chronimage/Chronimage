@@ -16,8 +16,8 @@ that require no HuggingFace token:
 |---|---|---|
 | RetinaFace-R50 (private HF repo) | SCRFD-10g (InsightFace MIT, buffalo_l.zip) | Gated private URL → freely-downloadable GitHub release |
 | ArcFace-R100 (private HF repo) | ArcFace W600K R50 (InsightFace MIT, buffalo_l.zip) | Gated private URL → freely-downloadable GitHub release |
-| Gemma-4-9B-it Q4_K_M (gated HF repo) | Moondream2 1.9B f16 (Apache 2.0, vikhyatk/moondream2) | 5.8 GB gated model replaced with 1.7 GB open model |
-| SigLIP-1 B/16 (private HF repo) | SigLIP-2 B/16 naflex (Apache 2.0, onnx-community) | ~5pt retrieval improvement; same ~375 MB footprint |
+| Gemma-4-9B-it Q4_K_M (gated HF repo) | Moondream2 1.9B f16 (Apache 2.0, moondream/moondream2-gguf) | 5.8 GB gated model replaced with 1.7 GB open model |
+| SigLIP-1 B/16 (private HF repo) | SigLIP-2 B/16 224 ONNX (Apache 2.0, onnx-community/siglip2-base-patch16-224-ONNX) | ~5pt retrieval improvement; same ~375 MB footprint |
 
 ---
 
@@ -34,7 +34,7 @@ licensing), and must degrade gracefully when absent.
 
 | Name | Kind | Format | Size | Licence | Notes |
 |---|---|---|---|---|---|
-| `siglip2-b16-image.onnx` | embedding | ONNX | ~375 MB | Apache 2.0 | onnx-community/siglip2-base-patch16-naflex |
+| `siglip2-b16-image.onnx` | embedding | ONNX | ~375 MB | Apache 2.0 | onnx-community/siglip2-base-patch16-224-ONNX (vision_model.onnx) |
 | `nima.onnx` | aesthetic | ONNX | ~14 MB | — | MobileNet; very fast on CPU |
 | `det_10g.onnx` | face-detect | ONNX | ~30 MB (extracted from buffalo_l.zip ~275 MB) | MIT | SCRFD-10g with keypoints (named `det_10g.onnx` inside the buffalo_l bundle; was `scrfd_10g_bnkps.onnx` in the standalone release) |
 | `w600k_r50.onnx` | face-embed | ONNX | ~130 MB (extracted from buffalo_l.zip ~275 MB) | MIT | ArcFace W600K R50, 512-dim |
@@ -167,8 +167,6 @@ Model files land in:
 
 ## Open issues
 
-- **NIMA** is still on the private `Chronimage/models` HF repo. A community
-  NIMA ONNX export should be found or produced before stable release.
 - **Moondream2 mmproj:** The llama.cpp Moondream2 integration may require a
   separate `moondream2-mmproj-*.gguf` vision projector file. Verify against
   llama.cpp docs in Phase-1b and add a second `ModelSpec` entry if needed.

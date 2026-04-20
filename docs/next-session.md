@@ -1,52 +1,53 @@
-# Next session · Phase 1 week 3 → week 4
+# Next session · Phase 1 week 4
 
-Landed on `feature/phase1-community-models` (this session): swapped `KNOWN_MODELS` to 5 community-licensed sources (SigLIP-2, NIMA, SCRFD-10g, ArcFace W600K R50, Moondream2), added zip-extract support for InsightFace's `buffalo_l.zip`, updated ADR 0002. First-run download drops ~6.6 GB → ~2.3 GB; no gated licenses. 193 Rust + 64 frontend tests green.
+On develop after PRs #22 (KNOWN_MODELS swap to community), #23 (FE model names), #24 (SCRFD filename fix). Pending commit on local develop: **URL fixes** for siglip-2 (`naflex` repo 401 → `224-ONNX` repo), nima (`Chronimage/models` 401 → `cromsc/nima-mobilenet-aesthetic`), moondream2 (`vikhyatk/moondream2` 404 → `moondream/moondream2-gguf`). Ship that as PR #25 first thing. 193 Rust lib tests + 64 frontend green.
 
 ## Starts (in order)
 
-### 1. Lock real SHA256s by downloading each model once · 30 min
+### 1. Ship the URL-fix commit + full-download smoke · 30 min
+First command: `git status` — push the uncommitted `ai/download.rs` + `docs/adr/0002-model-download.md` changes as `fix(ai): correct siglip-2, nima, moondream2 repo urls`. Then `rm` the old failed files in `%LOCALAPPDATA%/app.chronimage.desktop/models/` and click "Download all" in Onboarding → Models.
+
+All 5 models should now install end-to-end. If any fails, the extract error now lists archive contents — use that to debug.
+
+Why: this closes the smoke-test loop the user hit tonight. Every other next-session item assumes models are actually present on disk.
+
+### 2. Lock real SHA256s · 30 min (after #1 confirms downloads work)
 First file: `src-tauri/src/ai/download.rs` — replace each `sha256: "tbd"` with the real hex hash.
 
-Commands:
+After a successful "Download all" run:
 ```bash
-# each URL from KNOWN_MODELS, compute sha256
-curl -L <url> -o /tmp/model.bin && sha256sum /tmp/model.bin
+cd "$LOCALAPPDATA/app.chronimage.desktop/models"
+for f in *.onnx *.gguf; do echo "$f $(sha256sum $f)"; done
 ```
+Copy into the specs. For `det_10g.onnx` and `w600k_r50.onnx` the hashes are the post-extract ONNX files, not the zip. Add an integration test `known_model_hashes_are_hex_64` asserting no entry still says `"tbd"`.
 
-For the two buffalo_l.zip entries, hash the zip once and record the same value for both SCRFD + ArcFace specs (they resolve to the same URL). The download path hash-checks the post-extract ONNX, so also record the per-ONNX hash after extraction (easier: first-run extraction populates them, then lock).
+Why: `"tbd"` disables the MITM check entirely. Required before any v0.1 release.
 
-Why highest leverage: `"tbd"` disables hash verification entirely — a MITM could swap a model file silently. Locking the hashes is required before any v0.1 release. One-hour action, permanent win.
+### 3. First real inference path: SCRFD-10g preprocess + decode · 90 min (needs #1)
+First file: `src-tauri/src/ai/faces.rs` — the `detect_faces` function at the `TODO(cc): scrfd inference` marker.
 
-### 2. Manual smoke of the swapped models + boot path · 45 min
-First command: `pnpm tauri dev`. Then:
-- Trigger model download from Settings or Onboarding (whichever surface invokes `download_models`).
-- Verify the buffalo_l zip downloads once, gets extracted, ONNX files land in `%LOCALAPPDATA%/app.chronimage.desktop/models/`, temp zip is cleaned up.
-- Check `ai_models_status()` reports 5 models, `installed: true` for whatever landed.
-- Walk `/people` + `/settings` — AI Models list shows the new 5 names.
+Steps: resize + letterbox to 640×640 RGB f32, normalise `(x − 127.5)/128.0`, `session.run([pixel_values])`, decode 3-scale anchor outputs (stride 8/16/32), NMS at IoU 0.45 + conf 0.5, map boxes back to original coords. Keep the 5-point landmarks in `FaceBox` for downstream ArcFace alignment.
 
-Why: zip-extract is new code on the critical path. Unit tests cover the extract function in isolation but not the end-to-end download → zip → extract → file-on-disk pipeline.
+Add a small fixture (1 public-domain group photo) under `tests/fixtures/face-detect/` and an `#[ignore]` integration test that drives the real SCRFD session and asserts N faces detected.
 
-### 3. First real inference path: SCRFD-10g preprocessing + decode · 90 min (needs #1 + #2)
-First file: `src-tauri/src/ai/faces.rs`, the `detect_faces` function at the `TODO(cc): retinaface inference` marker (rename to `TODO(cc): scrfd inference` while there).
+Why: first `todo!(…)` → live transition of Phase 1. Starts populating the `faces` table so `face_clusters_list` has non-empty data in PeopleScreen.
 
-Steps: resize+letterbox image to 640×640 RGB f32, normalise `(x - 127.5) / 128.0`, `session.run([pixel_values])`, decode 3-scale anchor outputs (stride 8/16/32), apply NMS at IoU 0.45 + conf 0.5, map bboxes back to original image coords. Include 5-point landmarks for ArcFace alignment later.
+### 4. Fill `phase_1_catalog_size` exit test · 45 min
+First file: `src-tauri/tests/phase_1_catalog_size.rs` — drop `#[ignore]`, replace `unimplemented!()` with real code.
 
-Why: first real `todo!(…)`→live transition of Phase 1. Unlocks the `faces` table actually populating, which in turn unlocks the face_clusters_list command returning non-empty data in PeopleScreen.
+Generate 10k tiny 100×100 JPEGs (`image::save_buffer` in a setup helper, ~30 MB total), import via the pipeline, assert catalog.db size / fixture bytes ≤ 0.02.
 
-### 4. Fill `phase_1_catalog_size` exit test with a real fixture · 45 min
-First file: `src-tauri/tests/phase_1_catalog_size.rs` — remove `#[ignore]`, replace `unimplemented!()` with real code. Pre-generate 10k tiny 100×100 JPEGs (~30 MB) via `image::save_buffer`, import via the pipeline, assert catalog.db / fixture_bytes ≤ 0.02.
-
-Why: cheapest of the 8 exit-criteria scaffolds; proves the scaffold→passing path works. One green exit criterion leaves 7.
+Why: cheapest of the 8 exit-criteria scaffolds — proves one `.skip()` → passing. One solved criterion leaves 7.
 
 ### 5. Wire `record_photo_view` from Detail overlay · 20 min
-First file: `src/screens/catalog/CatalogScreen.tsx` — find the Detail overlay open handler. Call `useRecordPhotoView().mutate(photoId)` on open.
+First file: `src/screens/catalog/CatalogScreen.tsx` — find the Detail overlay open handler. Add `useRecordPhotoView().mutate(photoId)` on open.
 
-Why: command landed in PR #16 but nothing calls it yet. Until it fires, `last_viewed_at` stays NULL across the library and "Unseen in 2 years" can't distinguish never-viewed from 3y-ago-viewed.
+Why: command landed in PR #16 but is never called. Until it fires, `last_viewed_at` stays NULL across the catalog and "Unseen in 2 years" can't distinguish never-viewed from 3y-ago-viewed.
 
-## Deferred (known-blocked or large-scope)
+## Deferred (known-blocked)
 
-- ArcFace W600K R50 real inference (blocked: needs #3 first + landmark-based 112×112 alignment)
-- Moondream2 vision-language sidecar protocol (blocked: sidecar needs image-input path, not just text — caption.rs TODO explicitly notes this)
-- HDBSCAN real clustering (blocked: needs ArcFace embeddings flowing)
-- Remaining 7 exit-criteria tests (blocked: fixtures don't exist yet)
-- SigLIP-2 `naflex` variable-aspect-ratio support (current path uses fixed 224 preprocess)
+- ArcFace real inference (chained after #3 — needs landmark-based 112×112 alignment)
+- HDBSCAN real clustering (needs ArcFace embeddings flowing)
+- Moondream2 llama.cpp sidecar + mmproj companion download (vision-language protocol design; see ADR 0002 open issues)
+- Remaining 7 exit-criteria tests (fixtures don't exist yet)
+- Settings "change model with re-index warning" + tauri-plugin-store persistence
