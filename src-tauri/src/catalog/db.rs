@@ -5,7 +5,62 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     SqlitePool,
 };
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Once, time::Duration};
+
+// ── sqlite-vec auto-extension registration ───────────────────────────────────
+
+/// Called exactly once per process lifetime (guarded by [`Once`]).
+///
+/// Registers `sqlite3_vec_init` as a SQLite auto-extension so that every new
+/// connection (including every connection sqlx opens from the pool) automatically
+/// loads the vec0 virtual-table module.
+///
+/// # Safety
+/// `sqlite3_auto_extension` is a stable C API. We call it before any pool
+/// opens a connection, so there is no concurrent connection state to race
+/// against. The transmute converts the C `sqlite3_vec_init` function pointer
+/// to the nullable-function-pointer type that `sqlite3_auto_extension` expects;
+/// this is the canonical pattern used by the sqlite-vec crate itself.
+///
+/// Critically, `sqlite-vec` is compiled with `-DSQLITE_CORE`, meaning it links
+/// against the same SQLite symbols as `libsqlite3-sys` (and therefore sqlx).
+/// Registering here is guaranteed to reach the same SQLite instance that every
+/// sqlx pool connection uses.
+static SQLITE_VEC_REGISTERED: Once = Once::new();
+
+fn ensure_sqlite_vec_registered() {
+    SQLITE_VEC_REGISTERED.call_once(|| {
+        // SAFETY: see module-level comment above.
+        // SAFETY: sqlite3_auto_extension takes a nullable fn pointer typed as
+        // `unsafe extern "C" fn(*mut sqlite3, *mut *mut i8, *const sqlite3_api_routines) -> i32`.
+        // sqlite3_vec_init has C linkage and is the correct entry-point; its
+        // actual C signature matches the auto-extension contract. We transmute
+        // through *const () to paper over the Rust-side declaration mismatch in
+        // the sqlite-vec crate (which declares it as `fn()`).
+        unsafe {
+            let init_fn = sqlite_vec::sqlite3_vec_init as *const ();
+            let auto_ext_fn = std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut libsqlite3_sys::sqlite3,
+                    *mut *mut std::ffi::c_char,
+                    *const libsqlite3_sys::sqlite3_api_routines,
+                ) -> std::ffi::c_int,
+            >(init_fn);
+            let rc = libsqlite3_sys::sqlite3_auto_extension(Some(auto_ext_fn));
+            if rc != libsqlite3_sys::SQLITE_OK {
+                // This is a hard startup failure — vec0 is a required module.
+                // tracing may not be initialised yet at process start, so we
+                // also write to stderr so it shows up in crash logs.
+                let msg = format!("sqlite3_auto_extension(sqlite_vec) failed, rc={rc}");
+                tracing::error!("{}", msg);
+                eprintln!("FATAL: {msg}");
+            }
+        }
+    });
+}
+
+// ── Pool options ─────────────────────────────────────────────────────────────
 
 /// Knobs for [`open_pool`]. Sensible defaults match the Phase 1 NFRs
 /// (200k-photo catalog, < 500ms 95p search).
@@ -28,17 +83,23 @@ impl PoolOptions {
     }
 }
 
-/// Open (or create) the catalog database, apply migrations if requested, and
-/// return a [`SqlitePool`].
+// ── open_pool ────────────────────────────────────────────────────────────────
+
+/// Open (or create) the catalog database, apply migrations, register the
+/// sqlite-vec extension, and create the `vec_photo_embeddings` and
+/// `vec_face_embeddings` virtual tables.
 ///
-/// Configures WAL, foreign keys, normal-sync — match what the initial
-/// migration also pragmas. Doing it twice is harmless.
+/// sqlite-vec is statically linked and registered as an auto-extension before
+/// the first connection opens. `vec0` is therefore always available; any
+/// failure to create the virtual tables is a hard error (not a best-effort
+/// fallback).
 ///
-/// After migrations run, attempts a best-effort load of the sqlite-vec
-/// extension and creation of `vec_photo_embeddings`. If the extension is
-/// absent the error is logged as a warning and the app continues using the
-/// BLOB fallback in `photo_embeddings.embedding`.
+/// WAL + FK + normal-sync pragmas are applied via the connection options.
+/// Applying them a second time on an existing DB is harmless.
 pub async fn open_pool(opts: PoolOptions) -> AppResult<SqlitePool> {
+    // Register vec0 before any connection is opened.
+    ensure_sqlite_vec_registered();
+
     if let Some(parent) = opts.db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -59,46 +120,63 @@ pub async fn open_pool(opts: PoolOptions) -> AppResult<SqlitePool> {
         .await?;
 
     if opts.run_migrations {
-        // Run all migrations except those that require sqlite-vec. The
-        // 20260421000000_sqlite_vec.sql migration contains a CREATE VIRTUAL
-        // TABLE statement that will fail if the vec0 extension is not loaded.
-        // We skip that statement here and attempt it ourselves below via
-        // best-effort extension loading.
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
             .map_err(|e| AppError::Internal(format!("catalog migration failed: {e}")))?;
     }
 
-    // Best-effort: try to ensure the sqlite-vec virtual table exists.
-    // If the extension or the vec0 module is unavailable we log a warning and
-    // continue — the BLOB fallback path in photo_embeddings handles this case.
-    try_init_sqlite_vec(&pool).await;
+    init_sqlite_vec_virtual_tables(&pool).await?;
 
     Ok(pool)
 }
 
-/// Attempt to create `vec_photo_embeddings` using the sqlite-vec vec0 module.
+// ── Virtual-table creation ───────────────────────────────────────────────────
+
+/// Create the sqlite-vec virtual tables required by the AI pipeline.
 ///
-/// sqlite-vec is a loadable extension; on some machines it may not be present.
-/// Any error here is non-fatal — the app falls back to brute-force cosine
-/// over `photo_embeddings.embedding` BLOBs.
-async fn try_init_sqlite_vec(pool: &SqlitePool) {
-    let result = sqlx::query(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_photo_embeddings USING vec0(embedding float[768])",
+/// This function is NOT best-effort: if vec0 is unavailable after static
+/// linking, that indicates a build configuration error and the caller receives
+/// `AppError::Internal`.
+///
+/// Tables created:
+/// - `vec_photo_embeddings float[768]` — SigLIP-2 (phase 1 embeddings)
+/// - `vec_face_embeddings  float[512]` — ArcFace W600K R50 (phase 2 faces)
+///
+/// Both use `IF NOT EXISTS` so repeated calls (e.g. from `open_pool_is_idempotent`)
+/// are safe.
+async fn init_sqlite_vec_virtual_tables(pool: &SqlitePool) -> AppResult<()> {
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_photo_embeddings \
+         USING vec0(embedding float[768])",
     )
     .execute(pool)
-    .await;
+    .await
+    .map_err(|e| {
+        AppError::Internal(format!(
+            "failed to create vec_photo_embeddings — \
+             sqlite-vec not registered correctly: {e}"
+        ))
+    })?;
 
-    match result {
-        Ok(_) => tracing::debug!("sqlite-vec: vec_photo_embeddings ready"),
-        Err(e) => tracing::warn!(
-            error = %e,
-            "sqlite-vec extension unavailable — falling back to BLOB cosine search. \
-             Install vec0 to enable ANN search."
-        ),
-    }
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_face_embeddings \
+         USING vec0(embedding float[512])",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        AppError::Internal(format!(
+            "failed to create vec_face_embeddings — \
+             sqlite-vec not registered correctly: {e}"
+        ))
+    })?;
+
+    tracing::debug!("sqlite-vec: vec_photo_embeddings(768) and vec_face_embeddings(512) ready");
+    Ok(())
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -146,7 +224,8 @@ mod tests {
         let _p2 = open_pool(PoolOptions::new(db.clone()))
             .await
             .expect("second");
-        // If this passes, migrations ran twice without error.
+        // If this passes, migrations ran twice without error and IF NOT EXISTS
+        // on the vec virtual tables was honoured.
     }
 
     #[tokio::test]
@@ -172,6 +251,85 @@ mod tests {
                     .await
                     .expect("sqlite_master query");
             assert!(found.is_some(), "missing phase 1 table: {tbl}");
+        }
+    }
+
+    /// Verifies that both sqlite-vec virtual tables are created by `open_pool`.
+    ///
+    /// This test will fail (and surface `no such module: vec0`) if
+    /// `ensure_sqlite_vec_registered` or the auto-extension path is broken,
+    /// giving a clear signal rather than a silent BLOB fallback.
+    #[tokio::test]
+    async fn open_pool_registers_vec0_and_virtual_tables_exist() {
+        let tmp = TempDir::new().expect("tempdir");
+        let db = tmp.path().join("catalog.db");
+        let pool = open_pool(PoolOptions::new(db)).await.expect("pool");
+
+        for vtbl in ["vec_photo_embeddings", "vec_face_embeddings"] {
+            // sqlite-vec virtual tables appear in sqlite_master with type='table'.
+            let found: Option<(String,)> =
+                sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' AND name = ?1")
+                    .bind(vtbl)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("sqlite_master query");
+
+            assert!(
+                found.is_some(),
+                "sqlite-vec virtual table '{vtbl}' not found — vec0 module not registered"
+            );
+        }
+    }
+
+    /// Insert a 768-dim vector into `vec_photo_embeddings`, then read it back
+    /// by rowid and assert byte-exact round-trip preservation.
+    #[tokio::test]
+    async fn vec0_insert_and_knn_round_trip() {
+        let tmp = TempDir::new().expect("tempdir");
+        let db = tmp.path().join("catalog.db");
+        let pool = open_pool(PoolOptions::new(db)).await.expect("pool");
+
+        // Build a deterministic 768-element f32 vector.
+        let dims: usize = 768;
+        let input_vec: Vec<f32> = (0..dims).map(|i| i as f32 * 0.001).collect();
+
+        // sqlite-vec accepts vectors as raw little-endian f32 bytes.
+        let blob: Vec<u8> = input_vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        // Insert.
+        sqlx::query("INSERT INTO vec_photo_embeddings(embedding) VALUES (?1)")
+            .bind(&blob)
+            .execute(&pool)
+            .await
+            .expect("vec insert");
+
+        // Read back by rowid = 1 (first insert).
+        let row: (Vec<u8>,) =
+            sqlx::query_as("SELECT embedding FROM vec_photo_embeddings WHERE rowid = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("vec select");
+
+        assert_eq!(
+            row.0.len(),
+            dims * 4,
+            "returned blob length mismatch: expected {} bytes, got {}",
+            dims * 4,
+            row.0.len()
+        );
+
+        // Decode and compare element-by-element.
+        let returned_vec: Vec<f32> = row
+            .0
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        for (i, (expected, got)) in input_vec.iter().zip(returned_vec.iter()).enumerate() {
+            assert!(
+                (expected - got).abs() < f32::EPSILON,
+                "element {i}: expected {expected}, got {got}"
+            );
         }
     }
 

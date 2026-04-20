@@ -56,6 +56,16 @@ tracing-loki = { version = "0.2", default-features = false, features = ["compat-
 # Storage + migrations (Phase 1 will flesh these out)
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "uuid"] }
 
+# sqlite-vec: statically-linked vec0 extension for ANN search (MIT OR Apache-2.0).
+# The crate compiles sqlite-vec.c with -DSQLITE_CORE so it shares the same
+# SQLite instance that sqlx/libsqlite3-sys links against — no symbol duplication.
+sqlite-vec = "0.1.9"
+
+# Explicit top-level dep to guarantee we call sqlite3_auto_extension on the
+# same libsqlite3 that sqlx opens connections against. Must stay version-locked
+# to whatever sqlx-sqlite pulls in (currently 0.30.1).
+libsqlite3-sys = "0.30.1"
+
 # Hashing + perceptual hash
 sha2 = "0.10"
 hex = "0.4"
