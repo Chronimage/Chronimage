@@ -11,7 +11,7 @@ export function StatusBar({ screen, version, channel }: StatusBarProps) {
     <div className="statusbar">
       <span className="pill">
         <span className="dot" />
-        gemma4-9b · on-device
+        moondream2 · on-device
       </span>
       <span>Chronimage — {screen.label}</span>
       <div className="right">

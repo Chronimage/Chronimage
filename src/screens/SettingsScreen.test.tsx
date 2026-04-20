@@ -22,7 +22,7 @@ describe('SettingsScreen', () => {
 
   it('shows the two mocked AI model rows', async () => {
     render(<SettingsScreen />, { wrapper });
-    expect(await screen.findByText('siglip-b16-image')).toBeInTheDocument();
-    expect(await screen.findByText('retinaface-r50')).toBeInTheDocument();
+    expect(await screen.findByText('siglip2-b16-image')).toBeInTheDocument();
+    expect(await screen.findByText('scrfd-10g')).toBeInTheDocument();
   });
 });

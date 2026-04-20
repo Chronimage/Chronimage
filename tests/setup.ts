@@ -101,18 +101,18 @@ vi.mock('@tauri-apps/api/core', () => ({
       case 'ai_models_status':
         return [
           {
-            name: 'siglip-b16-image',
+            name: 'siglip2-b16-image',
             kind: 'embedding',
-            filename: 'siglip-b16-image.onnx',
+            filename: 'siglip2-b16-image.onnx',
             installed: false,
-            sizeBytes: 350_000_000,
+            sizeBytes: 375_000_000,
           },
           {
-            name: 'retinaface-r50',
+            name: 'scrfd-10g',
             kind: 'face-detect',
-            filename: 'retinaface-r50.onnx',
+            filename: 'scrfd_10g_bnkps.onnx',
             installed: false,
-            sizeBytes: 110_000_000,
+            sizeBytes: 275_000_000,
           },
         ];
       default:
