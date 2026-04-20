@@ -150,14 +150,19 @@ fn main() {
                 }
             });
 
-            // Spawn the background re-evaluator (10-minute cadence). This can
-            // safely live on the async runtime since it doesn't need to be
-            // registered before commands start flowing.
+            // Spawn the background re-evaluator (10-minute cadence).
+            // spawn_reevaluator calls tokio::spawn internally, which requires a
+            // running Tokio reactor on the current thread. Setup runs on the
+            // main thread (no reactor); async_runtime::block_on enters Tauri's
+            // runtime context just long enough for tokio::spawn to succeed.
             #[cfg(not(test))]
             {
                 use chronimage::albums::reevaluator::spawn_reevaluator;
-                // JoinHandle dropped intentionally — the task runs until process exit.
-                std::mem::drop(spawn_reevaluator(pool.clone()));
+                let reeval_pool = pool.clone();
+                tauri::async_runtime::block_on(async move {
+                    // JoinHandle dropped intentionally — the task runs until process exit.
+                    std::mem::drop(spawn_reevaluator(reeval_pool));
+                });
             }
 
             // Build AI sessions (stub when model files absent).
