@@ -1,31 +1,40 @@
-//! RetinaFace detection + ArcFace R50 embedding via ONNX Runtime.
+//! SCRFD-10g face detection + ArcFace W600K R50 embedding via ONNX Runtime.
 //!
 //! Phase 1 scaffold: sessions are stubbed (return empty / zero results) when
 //! model files are absent. Real inference wiring lands in Phase 1b once the
 //! model-download flow is complete.
 //!
+//! Both models ship inside `buffalo_l.zip` from InsightFace (MIT licence) and
+//! are extracted by `ai::download` on first run.
+//!
 //! ## Phase-1b plan
 //!
-//! 1. RetinaFace preprocess: resize image to 640×640, BGR f32 channels-first,
-//!    mean-subtract [104, 117, 123] (no stddev divide).
-//! 2. Parse the three anchor-scale output tensors (`face_rpn_cls_prob_reshape`,
-//!    `face_rpn_bbox_pred`, `face_rpn_landmark_pred`), decode anchors, run NMS.
+//! 1. SCRFD-10g preprocess: resize image to 640×640, convert to RGB f32
+//!    channels-first, then normalise each pixel as `(x - 127.5) / 128.0`.
+//!    Input shape `[1, 3, 640, 640]`. (**Different from the old RetinaFace
+//!    BGR mean-subtract — do not reuse that normalisation.**)
+//! 2. Parse the stride-8 / stride-16 / stride-32 output head triplets
+//!    (`score`, `bbox`, `kps`), decode anchors, run NMS.
 //! 3. For each surviving box crop + align a 112×112 face chip via the 5-point
 //!    landmarks using an affine transform (standard ArcFace alignment matrix).
-//! 4. ArcFace preprocess: RGB f32 channels-first, normalise to [-1, 1].
+//! 4. ArcFace preprocess: RGB f32 channels-first, normalise to `[-1, 1]`.
 //! 5. L2-normalise the 512-dim output embedding before returning.
 //!
-//! ## Model files (downloaded on first run)
+//! ## Model files (extracted from buffalo_l.zip on first run)
 //!
-//! - `retinaface.onnx`  — RetinaFace MobileNet0.25 (CPU) / ResNet50 (GPU)
-//! - `arcface-r50.onnx` — ArcFace ResNet50, int8-quantised for CPU
+//! - `scrfd_10g_bnkps.onnx`  — SCRFD-10g with keypoints (InsightFace MIT)
+//! - `w600k_r50.onnx`        — ArcFace W600K R50 (InsightFace MIT)
+//!
+//! Note: the `FacesSession` struct retains the field names `retina` and
+//! `arcface` internally to minimise churn — they map to SCRFD and ArcFace
+//! W600K respectively.
 //!
 //! ## Input/output shapes
 //!
-//! | Model      | Input name   | Shape           | dtype | Normalisation      |
-//! |------------|--------------|-----------------|-------|--------------------|
-//! | RetinaFace | `input.1`    | [1, 3, 640, 640]| f32   | BGR, mean-subtract |
-//! | ArcFace    | `input.1`    | [1, 3, 112, 112]| f32   | RGB, [-1, 1]       |
+//! | Model         | Input name | Shape            | dtype | Normalisation              |
+//! |---------------|------------|------------------|-------|----------------------------|
+//! | SCRFD-10g     | `input.1`  | [1, 3, 640, 640] | f32   | RGB, (x-127.5)/128.0       |
+//! | ArcFace W600K | `input.1`  | [1, 3, 112, 112] | f32   | RGB, [-1, 1]               |
 //!
 //! Output: ArcFace `683` — [1, 512] f32 (L2-normalise before cosine compare).
 
@@ -75,7 +84,7 @@ impl FacesSession {
     pub fn load(retina_path: &Path, arcface_path: &Path) -> AppResult<Self> {
         if !retina_path.exists() {
             return Err(AppError::NotFound(
-                "retinaface model not found — run model download first".into(),
+                "scrfd detector model not found — run model download first".into(),
             ));
         }
         if !arcface_path.exists() {
@@ -112,13 +121,13 @@ impl FacesSession {
 
         if retina_exists && arcface_exists {
             tracing::info!(
-                "Face models found (retina={:?}, arcface={:?}) — stub only in Phase 1, wiring in Phase 1b",
+                "Face models found (scrfd={:?}, arcface={:?}) — stub only in Phase 1, wiring in Phase 1b",
                 retina_path,
                 arcface_path,
             );
         } else {
             tracing::debug!(
-                "Face models absent (retina_found={retina_exists}, arcface_found={arcface_exists}) — using stub"
+                "Face models absent (scrfd_found={retina_exists}, arcface_found={arcface_exists}) — using stub"
             );
         }
 
@@ -147,11 +156,12 @@ impl FacesSession {
             .lock()
             .map_err(|_| AppError::Internal("retinaface session mutex poisoned".into()))?;
 
-        // TODO(cc): retinaface inference — preprocess image to [1,3,640,640]
-        // BGR f32, run session, decode anchor boxes, apply NMS, map back to
+        // TODO(cc): SCRFD-10g inference — preprocess image to [1,3,640,640]
+        // RGB f32 normalised as (x-127.5)/128.0, run session, decode SCRFD
+        // anchor boxes across stride-8/16/32 heads, apply NMS, map back to
         // original image coordinates. Tracked in PRD §5 item 2 (phase-1b).
         Err(AppError::Internal(
-            "retinaface inference not yet wired (phase-1b)".into(),
+            "scrfd detector inference not yet wired (phase-1b)".into(),
         ))
     }
 
@@ -234,9 +244,9 @@ mod tests {
 
     #[test]
     fn missing_model_returns_not_found() {
-        let retina = PathBuf::from("/nonexistent/retinaface.onnx");
-        let arcface = PathBuf::from("/nonexistent/arcface-r50.onnx");
-        let err = FacesSession::load(&retina, &arcface).unwrap_err();
+        let scrfd = PathBuf::from("/nonexistent/scrfd_10g_bnkps.onnx");
+        let arcface = PathBuf::from("/nonexistent/w600k_r50.onnx");
+        let err = FacesSession::load(&scrfd, &arcface).unwrap_err();
         assert!(
             matches!(err, AppError::NotFound(_)),
             "expected NotFound, got: {err:?}"
@@ -244,8 +254,8 @@ mod tests {
     }
 
     #[test]
-    fn face_embed_dim_constant_matches_arcface_r50_spec() {
-        // ArcFace R50 always produces 512-dimensional embeddings.
+    fn face_embed_dim_constant_matches_arcface_w600k_r50_spec() {
+        // ArcFace W600K R50 always produces 512-dimensional embeddings.
         assert_eq!(FACE_EMBED_DIM, 512);
     }
 }

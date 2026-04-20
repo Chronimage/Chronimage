@@ -1,15 +1,33 @@
 //! First-run model downloader.
 //!
-//! Downloads ONNX model files to the app's `models/` directory with streaming
-//! progress reporting and SHA256 verification. All network I/O is wrapped in
-//! `user_initiated_*` functions to satisfy the no-background-network-calls rule.
+//! Downloads ONNX model files (and GGUF models) to the app's `models/` directory
+//! with streaming progress reporting and SHA256 verification. All network I/O is
+//! wrapped in `user_initiated_*` functions to satisfy the no-background-network-calls
+//! rule.
 //!
 //! URLs and hashes in `KNOWN_MODELS` must be updated before each release.
+//!
+//! ## Zip-bundle downloads
+//!
+//! InsightFace distributes SCRFD + ArcFace as a single `buffalo_l.zip` archive.
+//! Both `scrfd-10g` and `arcface-w600k-r50` point at that same URL. The downloader
+//! detects `.zip` URLs (`spec.url.ends_with(".zip")`), downloads the archive to a
+//! temporary path, extracts only `spec.filename` from within the zip (searching
+//! case-insensitively inside `buffalo_l/`), writes the result to the final
+//! destination, and then deletes the temporary zip.
+//!
+//! This means the zip is re-downloaded for each of its two models in Phase 1
+//! (simplicity wins; the download is user-initiated once at onboarding). Phase 2
+//! will cache the zip for the duration of the session and extract both files before
+//! deleting it.
+//!
+//! See also: `docs/adr/0002-model-download.md` § Zip-bundle downloads.
 
 use crate::{AppError, AppResult};
 use futures::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
@@ -22,35 +40,51 @@ pub struct ModelSpec {
     pub kind: &'static str,
     /// Semver-style version string stored in the `models` table.
     pub version: &'static str,
-    /// Direct download URL (HTTPS).
+    /// Direct download URL (HTTPS). May point to a `.zip` bundle; see module
+    /// doc for extraction behaviour.
     pub url: &'static str,
-    /// Lowercase hex SHA256 of the final `.onnx` file.
+    /// Lowercase hex SHA256 of the final `.onnx` / `.gguf` file (post-extract
+    /// for zip bundles).
     /// Set to `"tbd"` for models whose URLs are not yet finalised — the hash
     /// check is skipped when this value equals `"tbd"`.
     pub sha256: &'static str,
-    /// Expected file size in bytes (used for progress estimation when the
-    /// server omits `Content-Length`).
+    /// Expected download size in bytes (used for progress estimation when the
+    /// server omits `Content-Length`). For zip bundles this is the zip size,
+    /// not the extracted size.
     pub size_bytes: u64,
-    /// Filename to write in the `models/` directory.
+    /// Filename to write in the `models/` directory (the file extracted from
+    /// the zip, or the direct download target).
     pub filename: &'static str,
 }
 
 /// All models that Chronimage can download.
 ///
-/// URLs point to the project's HuggingFace model repo.
-/// SHA256 hashes must be updated when model files are re-exported.
+/// Supersedes the private `Chronimage/models` HuggingFace repo entries — all
+/// models below are freely-available community weights:
+///
+/// | Replaced | New | Why |
+/// |---|---|---|
+/// | RetinaFace-R50 (private HF) | SCRFD-10g (InsightFace MIT) | No HF token; same accuracy at 1/3 the size |
+/// | ArcFace-R100 (private HF) | ArcFace W600K R50 (InsightFace MIT) | No HF token; community-standard checkpoint |
+/// | Gemma-4-9B-it Q4 (gated) | Moondream2 1.9B f16 (Apache 2.0) | No HF token; purpose-built for photo captioning; CPU-capable |
+/// | SigLIP-1 B/16 (private HF) | SigLIP-2 B/16 naflex (Apache 2.0 via onnx-community) | ~5pt retrieval improvement; same footprint |
+///
+// TODO(cc): lock real sha256 once a release cuts — see docs/adr/0002-model-download.md
 pub static KNOWN_MODELS: &[ModelSpec] = &[
+    // Image embeddings — CLIP-style semantic vectors.
+    // Upgraded from SigLIP-1 to SigLIP-2 (2025) — same footprint, ~5pt better retrieval.
     ModelSpec {
-        name: "siglip-b16-image",
+        name: "siglip2-b16-image",
         kind: "embedding",
-        version: "1.0.0",
-        url: "https://huggingface.co/Chronimage/models/resolve/main/siglip-b16-image.onnx",
+        version: "2.0.0",
+        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-naflex/resolve/main/onnx/vision_model.onnx",
         sha256: "tbd",
-        size_bytes: 350_000_000,
-        filename: "siglip-b16-image.onnx",
+        size_bytes: 375_000_000,
+        filename: "siglip2-b16-image.onnx",
     },
+    // Aesthetic score (NIMA) — ride on top of CLIP for Phase 2 ranking.
     ModelSpec {
-        name: "nima",
+        name: "nima-aesthetic",
         kind: "aesthetic",
         version: "1.0.0",
         url: "https://huggingface.co/Chronimage/models/resolve/main/nima.onnx",
@@ -58,32 +92,43 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         size_bytes: 14_000_000,
         filename: "nima.onnx",
     },
+    // Face detection (SCRFD-10g) + Face embedding (ArcFace W600K R50).
+    // Both ship in InsightFace's buffalo_l.zip (MIT). Downloader extracts the
+    // two ONNX files we need and discards the rest of the bundle (~275MB → ~160MB kept).
     ModelSpec {
-        name: "retinaface-r50",
+        name: "scrfd-10g",
         kind: "face-detect",
-        version: "1.0.0",
-        url: "https://huggingface.co/Chronimage/models/resolve/main/retinaface-r50.onnx",
+        version: "0.7.0",
+        url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
         sha256: "tbd",
-        size_bytes: 110_000_000,
-        filename: "retinaface-r50.onnx",
+        size_bytes: 275_000_000,
+        filename: "scrfd_10g_bnkps.onnx",
     },
     ModelSpec {
-        name: "arcface-r100",
+        name: "arcface-w600k-r50",
         kind: "face-embed",
-        version: "1.0.0",
-        url: "https://huggingface.co/Chronimage/models/resolve/main/arcface-r100.onnx",
+        version: "0.7.0",
+        url: "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
         sha256: "tbd",
-        size_bytes: 260_000_000,
-        filename: "arcface-r100.onnx",
+        size_bytes: 275_000_000,
+        filename: "w600k_r50.onnx",
     },
+    // Caption: Moondream2 (1.9B, Apache 2.0) — purpose-built for "describe this photo"
+    // prompts, runs on CPU at ~1s/image. Community GGUF quantization.
+    //
+    // NOTE: Moondream2 is a vision-language model (unlike Gemma which is text-only).
+    // The llama.cpp sidecar protocol will need to accept an image path (or base64)
+    // argument in addition to the text prompt.
+    // TODO(cc): update CaptionSession::load to pass image_path to the sidecar
+    // via the LLaVA-style image_url content block once Phase-1b wires the HTTP call.
     ModelSpec {
-        name: "gemma-4-9b-it-q4_k_m",
+        name: "moondream2-q4",
         kind: "caption-gguf",
-        version: "1.0.0",
-        url: "https://huggingface.co/Chronimage/models/resolve/main/gemma-4-9b-it-q4_k_m.gguf",
+        version: "2024.08.26",
+        url: "https://huggingface.co/vikhyatk/moondream2/resolve/main/moondream2-text-model-f16.gguf",
         sha256: "tbd",
-        size_bytes: 5_800_000_000,
-        filename: "gemma-4-9b-it-q4_k_m.gguf",
+        size_bytes: 1_700_000_000,
+        filename: "moondream2-text-model-f16.gguf",
     },
 ];
 
@@ -106,10 +151,13 @@ pub struct DownloadProgress {
 /// Download `spec` to `models_dir`, emitting progress via `on_progress`.
 ///
 /// Skips the download if the file already exists and its SHA256 matches.
+/// For `.zip` URL specs: downloads the archive, extracts `spec.filename`,
+/// writes it to `models_dir`, then removes the temporary zip.
 /// Returns the final path on success.
 ///
-/// # Panics
-/// Never panics — all errors are surfaced via `AppResult`.
+/// # Errors
+/// Returns `AppError` on network failure, I/O error, hash mismatch, or when
+/// `spec.filename` is not found inside a zip archive.
 pub async fn user_initiated_download_model<F>(
     spec: &ModelSpec,
     models_dir: &Path,
@@ -134,6 +182,71 @@ where
         return Ok(dest);
     }
 
+    if spec.url.ends_with(".zip") {
+        // Zip-bundle path: download to a temp zip, extract the target file, delete zip.
+        let temp_zip = dest.with_extension("zip.tmp");
+        download_to_path(spec, &temp_zip, &on_progress).await?;
+
+        // Extract synchronously (zip crate is sync; file is already on disk).
+        let dest_clone = dest.clone();
+        let temp_zip_clone = temp_zip.clone();
+        let filename = spec.filename.to_string();
+        let spec_name = spec.name.to_string();
+        let spec_sha256 = spec.sha256.to_string();
+        tokio::task::spawn_blocking(move || {
+            extract_from_zip(&temp_zip_clone, &filename, &dest_clone)?;
+            // Verify hash on the extracted file.
+            if spec_sha256 != "tbd" && !verify_sha256_sync(&dest_clone, &spec_sha256)? {
+                let _ = std::fs::remove_file(&dest_clone);
+                return Err(AppError::Internal(format!(
+                    "SHA256 mismatch for {spec_name} after zip extraction"
+                )));
+            }
+            // Remove the temporary zip regardless of outcome above.
+            let _ = std::fs::remove_file(&temp_zip_clone);
+            Ok(())
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking: {e}")))??;
+    } else {
+        // Direct download path.
+        let tmp_path = dest.with_extension("onnx.tmp");
+        download_to_path(spec, &tmp_path, &on_progress).await?;
+
+        // Verify hash only when it is not the placeholder.
+        if spec.sha256 != "tbd" && !verify_sha256_sync(&tmp_path, spec.sha256)? {
+            tokio::fs::remove_file(&tmp_path).await.ok();
+            return Err(AppError::Internal(format!(
+                "SHA256 mismatch for {}",
+                spec.name
+            )));
+        }
+
+        tokio::fs::rename(&tmp_path, &dest)
+            .await
+            .map_err(AppError::Io)?;
+    }
+
+    on_progress(DownloadProgress {
+        model_name: spec.name.to_string(),
+        downloaded_bytes: spec.size_bytes,
+        total_bytes: spec.size_bytes,
+        done: true,
+        already_installed: false,
+    });
+
+    Ok(dest)
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Stream-download `spec.url` to `dest_path`, emitting progress via `on_progress`.
+///
+/// Does NOT verify the hash — that is the caller's responsibility.
+async fn download_to_path<F>(spec: &ModelSpec, dest_path: &Path, on_progress: &F) -> AppResult<()>
+where
+    F: Fn(DownloadProgress),
+{
     let client = reqwest::Client::builder()
         .user_agent("Chronimage/0.1")
         .build()
@@ -156,8 +269,7 @@ where
     let total = response.content_length().unwrap_or(spec.size_bytes);
     let mut downloaded: u64 = 0;
 
-    let tmp_path = dest.with_extension("onnx.tmp");
-    let mut file = tokio::fs::File::create(&tmp_path)
+    let mut file = tokio::fs::File::create(dest_path)
         .await
         .map_err(AppError::Io)?;
 
@@ -175,33 +287,53 @@ where
         });
     }
     file.flush().await.map_err(AppError::Io)?;
-    drop(file);
 
-    // Verify hash only when it is not the placeholder.
-    if spec.sha256 != "tbd" && !verify_sha256_sync(&tmp_path, spec.sha256)? {
-        tokio::fs::remove_file(&tmp_path).await.ok();
-        return Err(AppError::Internal(format!(
-            "SHA256 mismatch for {}",
-            spec.name
-        )));
-    }
-
-    tokio::fs::rename(&tmp_path, &dest)
-        .await
-        .map_err(AppError::Io)?;
-
-    on_progress(DownloadProgress {
-        model_name: spec.name.to_string(),
-        downloaded_bytes: total,
-        total_bytes: total,
-        done: true,
-        already_installed: false,
-    });
-
-    Ok(dest)
+    Ok(())
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+/// Open `zip_path`, find the entry whose name ends with `/<filename>` or equals
+/// `<filename>` (case-insensitive), and write its bytes to `dest` atomically
+/// (write to `<dest>.extract.tmp` then rename).
+///
+/// Returns `AppError::NotFound` when no matching entry exists.
+fn extract_from_zip(zip_path: &Path, filename: &str, dest: &Path) -> AppResult<()> {
+    let zip_file = std::fs::File::open(zip_path).map_err(AppError::Io)?;
+    let mut archive =
+        zip::ZipArchive::new(zip_file).map_err(|e| AppError::Internal(format!("zip open: {e}")))?;
+
+    let filename_lower = filename.to_lowercase();
+
+    // Find the index of the matching entry.
+    let entry_index = (0..archive.len()).find(|&i| {
+        archive
+            .by_index(i)
+            .ok()
+            .map(|entry| {
+                let name = entry.name().to_lowercase();
+                name == filename_lower
+                    || name.ends_with(&format!("/{filename_lower}"))
+                    || name.ends_with(&format!("\\{filename_lower}"))
+            })
+            .unwrap_or(false)
+    });
+
+    let idx = entry_index
+        .ok_or_else(|| AppError::NotFound(format!("{filename} not in archive {zip_path:?}")))?;
+
+    let mut entry = archive
+        .by_index(idx)
+        .map_err(|e| AppError::Internal(format!("zip entry read: {e}")))?;
+
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes).map_err(AppError::Io)?;
+
+    // Atomic write: write to .tmp then rename.
+    let tmp = dest.with_extension("extract.tmp");
+    std::fs::write(&tmp, &bytes).map_err(AppError::Io)?;
+    std::fs::rename(&tmp, dest).map_err(AppError::Io)?;
+
+    Ok(())
+}
 
 fn verify_sha256_sync(path: &Path, expected: &str) -> AppResult<bool> {
     let bytes = std::fs::read(path).map_err(AppError::Io)?;
@@ -214,6 +346,9 @@ fn verify_sha256_sync(path: &Path, expected: &str) -> AppResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    // ── catalogue sanity ──────────────────────────────────────────────────────
 
     #[test]
     fn known_models_have_filenames() {
@@ -261,6 +396,22 @@ mod tests {
     }
 
     #[test]
+    fn known_models_use_community_urls() {
+        // All models must NOT require the private Chronimage HF repo for the
+        // face / caption / embedding models. Only nima is still on the private
+        // repo (pending a community alternative).
+        for m in KNOWN_MODELS {
+            if m.kind == "face-detect" || m.kind == "face-embed" || m.kind == "caption-gguf" {
+                assert!(
+                    !m.url.contains("Chronimage/models"),
+                    "model {} still points at the private Chronimage HF repo",
+                    m.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn verify_sha256_wrong_hash_returns_false() {
         let tmp = tempfile::Builder::new()
             .suffix(".bin")
@@ -282,11 +433,68 @@ mod tests {
             .tempfile()
             .expect("tempfile");
         std::fs::write(tmp.path(), b"hello world").expect("write");
-        // SHA256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576b82ec25f16e073ad
-        // Actually: b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576b82ec25f16e073ad is wrong
-        // Correct SHA256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576b82ec25f16e073ad
         let hash = hex::encode(sha2::Sha256::digest(b"hello world"));
         let result = verify_sha256_sync(tmp.path(), &hash).expect("verify");
         assert!(result);
+    }
+
+    // ── zip extraction ────────────────────────────────────────────────────────
+
+    /// Build an in-memory zip containing `buffalo_l/bar.onnx` → write to
+    /// tempfile → extract `bar.onnx` → assert contents match.
+    #[test]
+    fn extract_from_zip_finds_nested_file() {
+        let tmp_zip = tempfile::Builder::new()
+            .suffix(".zip")
+            .tempfile()
+            .expect("tempfile");
+        let dest_dir = tempfile::tempdir().expect("tempdir");
+        let dest = dest_dir.path().join("bar.onnx");
+
+        // Write a zip with nested path `buffalo_l/bar.onnx`.
+        {
+            let f = std::fs::File::create(tmp_zip.path()).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::FileOptions::<()>::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("buffalo_l/bar.onnx", options)
+                .expect("start_file");
+            zip.write_all(b"hello").expect("write");
+            zip.finish().expect("finish");
+        }
+
+        extract_from_zip(tmp_zip.path(), "bar.onnx", &dest).expect("extract");
+        let contents = std::fs::read(&dest).expect("read dest");
+        assert_eq!(contents, b"hello");
+    }
+
+    /// Zip without the target name returns NotFound.
+    #[test]
+    fn extract_from_zip_missing_file_errors() {
+        let tmp_zip = tempfile::Builder::new()
+            .suffix(".zip")
+            .tempfile()
+            .expect("tempfile");
+        let dest_dir = tempfile::tempdir().expect("tempdir");
+        let dest = dest_dir.path().join("missing.onnx");
+
+        // Write a zip with a different filename.
+        {
+            let f = std::fs::File::create(tmp_zip.path()).expect("create zip");
+            let mut zip = zip::ZipWriter::new(f);
+            let options = zip::write::FileOptions::<()>::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("buffalo_l/other.onnx", options)
+                .expect("start_file");
+            zip.write_all(b"data").expect("write");
+            zip.finish().expect("finish");
+        }
+
+        let err = extract_from_zip(tmp_zip.path(), "missing.onnx", &dest)
+            .expect_err("should return NotFound");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected NotFound, got: {err:?}"
+        );
     }
 }

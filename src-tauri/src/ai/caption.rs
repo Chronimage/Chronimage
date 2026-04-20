@@ -1,25 +1,32 @@
-//! Image captioning via llama.cpp sidecar (gemma4-9b quantized GGUF).
+//! Image captioning via llama.cpp sidecar (Moondream2 1.9B GGUF).
 //!
 //! ## Overview
 //!
 //! This module manages a `llama-server.exe` subprocess that exposes an
 //! OpenAI-compatible `/v1/chat/completions` endpoint on an ephemeral localhost
-//! port. Images are passed as base64 data-URLs using the LLaVA-style
-//! `image_url` content block so the model receives both the image and a text
-//! prompt in a single request.
+//! port. Moondream2 is a **vision-language** model (unlike Gemma which is
+//! text-only), so images must be passed as base64 data-URLs using the LLaVA-style
+//! `image_url` content block alongside the text prompt.
 //!
 //! **GPU-only path (Phase 1 policy):** if the detected hardware tier is not
 //! `GpuLow` or `GpuHigh`, or if either required file is absent, the session
 //! degrades to a stub that returns a placeholder string without spawning any
-//! subprocess.
+//! subprocess. Moondream2 is capable of CPU inference (~1 s/image), but the
+//! GPU gate is kept for Phase 1 parity; relaxing it is tracked for Phase 2.
 //!
 //! ## Files expected on disk
 //!
-//! - Model: `gemma4-9b-q4_k_m.gguf` (downloaded on first run to
+//! - Model: `moondream2-text-model-f16.gguf` (downloaded on first run to
 //!   `%LOCALAPPDATA%\Chronimage\models\` or the user-chosen catalog root).
 //! - Sidecar binary: `llama-server.exe` — declared in `tauri.conf.json →
 //!   bundle.externalBin` and resolved at runtime via
 //!   `tauri::utils::platform::current_exe()` sibling lookup.
+//!
+//! TODO(cc): Moondream2 requires the image path (or base64) to be passed to
+//! the sidecar. Update `CaptionSession::load` in Phase-1b to send the
+//! LLaVA-style `image_url` content block alongside the text prompt. The
+//! `moondream2-mmproj-*.gguf` projector file may also be required depending on
+//! the llama.cpp build; check InsightFace / llama.cpp Moondream2 docs.
 //!
 //! ## Phase-1b wiring plan
 //!
@@ -51,7 +58,7 @@ use std::sync::Mutex;
 
 /// Canonical model filename consumed by the model-download manifest.
 pub fn model_filename() -> &'static str {
-    "gemma4-9b-q4_k_m.gguf"
+    "moondream2-text-model-f16.gguf"
 }
 
 // ── sidecar process handle ────────────────────────────────────────────────────
@@ -338,7 +345,7 @@ mod tests {
     #[test]
     fn load_with_missing_model_errors() {
         // Model path does not exist.
-        let missing_model = PathBuf::from("/nonexistent/gemma4-9b-q4_k_m.gguf");
+        let missing_model = PathBuf::from("/nonexistent/moondream2-text-model-f16.gguf");
         // Use a path that does exist for the binary to isolate the model error.
         let existing_bin = PathBuf::from("C:/Windows/System32/cmd.exe");
         let err = CaptionSession::load(&missing_model, &existing_bin).unwrap_err();
@@ -349,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn model_filename_is_gemma4_gguf() {
-        assert_eq!(model_filename(), "gemma4-9b-q4_k_m.gguf");
+    fn model_filename_is_moondream2_gguf() {
+        assert_eq!(model_filename(), "moondream2-text-model-f16.gguf");
     }
 }

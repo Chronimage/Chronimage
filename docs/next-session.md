@@ -1,46 +1,52 @@
-# Next session · Phase 1 week 2 → week 3
+# Next session · Phase 1 week 3 → week 4
 
-Landed since last plan (PR #14 + #15 merged to `develop`): faces/cluster/caption scaffolds, rule-engine composition (All/Any/Not/CapturedAt/Camera/FaceCluster/Starred/on_mmdd), lift & shift Rust + UI, source cleanup end-to-end, rediscovery (3 seeded albums), background re-evaluator (10-min tokio), `chronimage-cli migrate` wired, migrations `is_starred` + `smart_albums.kind` + `photos.last_viewed_at`. 171 Rust + 60 frontend tests green on develop (`05388bf`).
+Landed on `feature/phase1-community-models` (this session): swapped `KNOWN_MODELS` to 5 community-licensed sources (SigLIP-2, NIMA, SCRFD-10g, ArcFace W600K R50, Moondream2), added zip-extract support for InsightFace's `buffalo_l.zip`, updated ADR 0002. First-run download drops ~6.6 GB → ~2.3 GB; no gated licenses. 193 Rust + 64 frontend tests green.
 
 ## Starts (in order)
 
-### 1. Fix FTS5 contentless-trigger defect · 20 min
-First file: new migration `src-tauri/migrations/20260424000000_fts5_triggers_fix.sql`.
+### 1. Lock real SHA256s by downloading each model once · 30 min
+First file: `src-tauri/src/ai/download.rs` — replace each `sha256: "tbd"` with the real hex hash.
 
-The existing `tags_fts_insert` / `tags_fts_delete` triggers do `UPDATE photos_fts SET tags = ...` — SQLite's contentless FTS5 (`content=''`) rejects UPDATE on column values. Fix: drop both triggers, recreate as DELETE + INSERT of the rowid with refreshed columns. Unblocks end-to-end imports the moment AI-tagging writes any row to `tags`.
+Commands:
+```bash
+# each URL from KNOWN_MODELS, compute sha256
+curl -L <url> -o /tmp/model.bin && sha256sum /tmp/model.bin
+```
 
-Why highest leverage: silent data-path bug with a ~15-line migration. Noted in PR #15 as deferred. Catch-early before Phase 2 culling wires up tag filters.
+For the two buffalo_l.zip entries, hash the zip once and record the same value for both SCRFD + ArcFace specs (they resolve to the same URL). The download path hash-checks the post-extract ONNX, so also record the per-ONNX hash after extraction (easier: first-run extraction populates them, then lock).
 
-### 2. PeopleScreen shell + `face_clusters_list` / `face_cluster_name` commands · 90 min
-First file: `src-tauri/src/commands.rs` (add 3 Tauri commands per PRD §10 API surface). Then port `design-handoff/chronimage/screens_people.jsx` → `src/screens/PeopleScreen.tsx` via `/port-screen`.
+Why highest leverage: `"tbd"` disables hash verification entirely — a MITM could swap a model file silently. Locking the hashes is required before any v0.1 release. One-hour action, permanent win.
 
-Data can be stub-shaped (cluster rows synthesized from the catalog's `clusters` table — empty until real HDBSCAN runs). The point is to land the routing, the side-panel entry, and the typed `Cluster` model so the UI can iterate independently of inference.
+### 2. Manual smoke of the swapped models + boot path · 45 min
+First command: `pnpm tauri dev`. Then:
+- Trigger model download from Settings or Onboarding (whichever surface invokes `download_models`).
+- Verify the buffalo_l zip downloads once, gets extracted, ONNX files land in `%LOCALAPPDATA%/app.chronimage.desktop/models/`, temp zip is cleaned up.
+- Check `ai_models_status()` reports 5 models, `installed: true` for whatever landed.
+- Walk `/people` + `/settings` — AI Models list shows the new 5 names.
 
-Why: unblocks the second-largest missing PRD surface (§10). The UI layer is independent of the blocked `todo!()` inference paths.
+Why: zip-extract is new code on the critical path. Unit tests cover the extract function in isolation but not the end-to-end download → zip → extract → file-on-disk pipeline.
 
-### 3. Settings screen (PRD §14) · 75 min
-First file: `design-handoff/chronimage/screens_settings.jsx` → `src/screens/SettingsScreen.tsx` via `/port-screen`.
+### 3. First real inference path: SCRFD-10g preprocessing + decode · 90 min (needs #1 + #2)
+First file: `src-tauri/src/ai/faces.rs`, the `detect_faces` function at the `TODO(cc): retinaface inference` marker (rename to `TODO(cc): scrfd inference` while there).
 
-Backing commands mostly exist or are trivial — `ai_model_list`, `budget_report`, `catalog_stats`. The "change model with re-index warning", "updater channel picker", and "nightly re-index toggle" need small Rust-side wiring but no new schema.
+Steps: resize+letterbox image to 640×640 RGB f32, normalise `(x - 127.5) / 128.0`, `session.run([pixel_values])`, decode 3-scale anchor outputs (stride 8/16/32), apply NMS at IoU 0.45 + conf 0.5, map bboxes back to original image coords. Include 5-point landmarks for ArcFace alignment later.
 
-Why: leaves the onboarding + catalog + people + settings triad complete — every frame in the design that isn't the Detail overlay (Phase 2) or the Develop screen (Phase 3).
+Why: first real `todo!(…)`→live transition of Phase 1. Unlocks the `faces` table actually populating, which in turn unlocks the face_clusters_list command returning non-empty data in PeopleScreen.
 
-### 4. Wire `photo_views` recording · 30 min
-First file: `src-tauri/src/commands.rs` (add `record_photo_view(photo_id)` command). Call from `src/screens/catalog/CatalogScreen.tsx` in the Detail overlay open handler.
+### 4. Fill `phase_1_catalog_size` exit test with a real fixture · 45 min
+First file: `src-tauri/tests/phase_1_catalog_size.rs` — remove `#[ignore]`, replace `unimplemented!()` with real code. Pre-generate 10k tiny 100×100 JPEGs (~30 MB) via `image::save_buffer`, import via the pipeline, assert catalog.db / fixture_bytes ≤ 0.02.
 
-Inserts into `photo_views` with `ON CONFLICT(photo_id) DO UPDATE SET last_viewed_at = excluded.last_viewed_at, view_count = view_count + 1`. The trigger on `photo_views` (migration `20260423000001`) already syncs `photos.last_viewed_at`, so the re-evaluator picks it up automatically.
+Why: cheapest of the 8 exit-criteria scaffolds; proves the scaffold→passing path works. One green exit criterion leaves 7.
 
-Why: unlocks the fourth rediscovery album "Unseen in 2 years" (seed it in `catalog/rediscovery.rs` once the insertion path exists). One of the two user-visible payoffs of the `last_viewed_at` migration that shipped this session but has no writer yet.
+### 5. Wire `record_photo_view` from Detail overlay · 20 min
+First file: `src/screens/catalog/CatalogScreen.tsx` — find the Detail overlay open handler. Call `useRecordPhotoView().mutate(photoId)` on open.
 
-### 5. Exit-criteria test scaffolds · 45 min
-First files: `src-tauri/tests/phase_1_face_clustering.rs`, `src-tauri/tests/phase_1_catalog_size.rs`, `tests/e2e/phase-1-source-cleanup.spec.ts`.
+Why: command landed in PR #16 but nothing calls it yet. Until it fires, `last_viewed_at` stays NULL across the library and "Unseen in 2 years" can't distinguish never-viewed from 3y-ago-viewed.
 
-PRD lists 8 exit-criteria test files (see § Exit criteria). Most don't exist yet. Create the empty shells with `#[ignore]` or `.skip()` markers and a `// TODO(cc): drive the 100-photo fixture through cleanup dry-run → execute → SHA256 post-check` comment. Phase 1 can't exit until these are green, so having the skeleton visible forces the remaining work to be concrete.
+## Deferred (known-blocked or large-scope)
 
-Why: makes the "how do we know Phase 1 is done?" question answerable with `cargo test --ignored` + `playwright test --grep phase-1`.
-
-## Deferred (known-blocked)
-
-- Real RetinaFace / ArcFace / HDBSCAN / llama.cpp inference — blocked on end-to-end model-download smoke (next-next session)
-- Phase 1 performance tests (100k import throughput, 200k search latency, 5k RAW+JPG pair F1, 8h stress) — need real fixtures
-- `photo_album_membership` schema — Phase 2 per ADR 0001
+- ArcFace W600K R50 real inference (blocked: needs #3 first + landmark-based 112×112 alignment)
+- Moondream2 vision-language sidecar protocol (blocked: sidecar needs image-input path, not just text — caption.rs TODO explicitly notes this)
+- HDBSCAN real clustering (blocked: needs ArcFace embeddings flowing)
+- Remaining 7 exit-criteria tests (blocked: fixtures don't exist yet)
+- SigLIP-2 `naflex` variable-aspect-ratio support (current path uses fixed 224 preprocess)
