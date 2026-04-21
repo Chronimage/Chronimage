@@ -573,6 +573,18 @@ export async function gphotosAccountInfo(clientId?: string): Promise<GphotosUser
   });
 }
 
+/**
+ * Synchronously ensure a `sources` row exists for the currently-connected
+ * Google account. Returns the row (existing or freshly inserted). Call
+ * right after `gphotosPollOauthFlow` reports `completed` — the backend
+ * no longer spawns a background task to do this.
+ */
+export async function gphotosEnsureSourceRow(clientId?: string): Promise<SourceRow> {
+  return tauriInvoke<SourceRow>('gphotos_ensure_source_row', {
+    clientId: clientId ?? null,
+  });
+}
+
 export async function gphotosCreatePickerSession(clientId?: string): Promise<GphotosPickerSession> {
   return tauriInvoke<GphotosPickerSession>('gphotos_create_picker_session', {
     clientId: clientId ?? null,

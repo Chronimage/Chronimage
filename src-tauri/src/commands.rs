@@ -1023,25 +1023,16 @@ pub struct BeginOauthResponse {
 /// browser plus a flow-id for polling. `client_id` is optional — omitting
 /// it falls back to [`google_photos::DEFAULT_CLIENT_ID`].
 #[tauri::command]
-pub async fn gphotos_begin_oauth_flow(
-    state_: State<'_, AppState>,
-    client_id: Option<String>,
-) -> AppResult<BeginOauthResponse> {
+pub async fn gphotos_begin_oauth_flow(client_id: Option<String>) -> AppResult<BeginOauthResponse> {
     use crate::sources::google_photos;
     let cid = client_id
         .as_deref()
         .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
     let (auth_url, flow_id) = google_photos::begin_oauth_flow(cid).await?;
-
-    // Spawn a follow-up that creates the sources row once the flow
-    // completes. We watch the status map; polling is cheap and we stop
-    // when we hit a terminal state.
-    let pool = state_.pool.clone();
-    let flow_id_clone = flow_id.clone();
-    tokio::spawn(async move {
-        ensure_google_photos_source_row(&pool, &flow_id_clone).await;
-    });
-
+    // Deliberately no background task here — the frontend is responsible
+    // for calling `gphotos_ensure_source_row` after it observes Completed
+    // status. That keeps row creation deterministic and avoids races
+    // against the TanStack Query cache.
     Ok(BeginOauthResponse { auth_url, flow_id })
 }
 
@@ -1109,6 +1100,85 @@ pub async fn gphotos_sign_out(state_: State<'_, AppState>) -> AppResult<()> {
         .execute(&state_.pool)
         .await?;
     Ok(())
+}
+
+/// Ensure a `sources` row exists for the currently-connected Google
+/// account. Called by the frontend immediately after OAuth completes so
+/// the row is guaranteed to be present before `listSources()` runs.
+/// Idempotent — returns the existing row if one already exists for this
+/// email.
+///
+/// Replaces the old `ensure_google_photos_source_row` background task,
+/// which raced against frontend cache invalidation and could leave the UI
+/// without a visible source for seconds after auth.
+#[tauri::command]
+pub async fn gphotos_ensure_source_row(
+    state_: State<'_, AppState>,
+    client_id: Option<String>,
+) -> AppResult<SourceRow> {
+    use crate::sources::google_photos;
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+    // If we can't even load tokens, fail fast — the user isn't connected.
+    let _ = google_photos::load_tokens()?
+        .ok_or_else(|| AppError::PermissionDenied("google photos not signed in".into()))?;
+
+    // Best-effort fetch the email; non-fatal. Used for the source name +
+    // the dedupe key.
+    let email = match google_photos::user_initiated_current_access_token(cid).await {
+        Ok(token) => google_photos::user_initiated_fetch_userinfo(&token)
+            .await
+            .ok()
+            .and_then(|u| u.email),
+        Err(e) => {
+            tracing::warn!(error = %e, "gphotos: userinfo fetch failed, proceeding with anonymous source row");
+            None
+        }
+    };
+
+    let name = email
+        .clone()
+        .map(|e| format!("Google Photos · {e}"))
+        .unwrap_or_else(|| "Google Photos".to_string());
+    let config = serde_json::json!({ "email": email }).to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM sources WHERE kind = 'google_photos' \
+         AND json_extract(config_json, '$.email') IS ?1",
+    )
+    .bind(&email)
+    .fetch_optional(&state_.pool)
+    .await?;
+
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar(
+                "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES (?1, 'google_photos', 'idle', ?2, ?3) RETURNING id",
+            )
+            .bind(&name)
+            .bind(&config)
+            .bind(&now)
+            .fetch_one(&state_.pool)
+            .await?
+        }
+    };
+
+    // Return the row with its derived photo_count (may be 0 on first auth).
+    let row = sqlx::query_as::<_, SourceRow>(
+        "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
+         COUNT(DISTINCT sc.photo_id) AS photo_count \
+         FROM sources s LEFT JOIN source_copies sc ON sc.source_id = s.id \
+         WHERE s.id = ?1 GROUP BY s.id",
+    )
+    .bind(id)
+    .fetch_one(&state_.pool)
+    .await?;
+    tracing::info!(source_id = id, ?email, "google photos source row ensured");
+    Ok(row)
 }
 
 /// Connected-account info. Uses the current access token (refreshing if
@@ -1286,60 +1356,6 @@ async fn download_picker_items(
     }
     tracing::info!(downloaded = n, "google photos picker download complete");
     Ok(())
-}
-
-/// Background helper for `gphotos_begin_oauth_flow`: polls the flow status
-/// until it hits a terminal state, then on `Completed` creates (or
-/// upserts) the `sources` row so the frontend can list it.
-async fn ensure_google_photos_source_row(pool: &sqlx::SqlitePool, flow_id: &str) {
-    use crate::sources::google_photos::{peek_flow_status, FlowStatus};
-    // Simple polling loop — cheap and avoids reaching into the flow
-    // module's internal channel machinery.
-    let started = std::time::Instant::now();
-    loop {
-        if started.elapsed() > std::time::Duration::from_secs(330) {
-            // Slightly past the listener's 300 s timeout.
-            return;
-        }
-        match peek_flow_status(flow_id) {
-            Some(FlowStatus::Pending) | None => {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                continue;
-            }
-            Some(FlowStatus::Completed { email, .. }) => {
-                let name = email.clone().unwrap_or_else(|| "Google Photos".to_string());
-                let config = serde_json::json!({
-                    "email": email,
-                })
-                .to_string();
-                let now = chrono::Utc::now().to_rfc3339();
-                // Deduplicate by email: if a source for this account
-                // already exists, leave it alone. Otherwise insert.
-                let existing: Option<i64> = sqlx::query_scalar(
-                    "SELECT id FROM sources WHERE kind = 'google_photos' \
-                     AND json_extract(config_json, '$.email') = ?1",
-                )
-                .bind(&email)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
-                if existing.is_none() {
-                    let _ = sqlx::query(
-                        "INSERT INTO sources (name, kind, status, config_json, created_at) \
-                         VALUES (?1, 'google_photos', 'idle', ?2, ?3)",
-                    )
-                    .bind(&name)
-                    .bind(&config)
-                    .bind(&now)
-                    .execute(pool)
-                    .await;
-                }
-                return;
-            }
-            Some(FlowStatus::Failed { .. }) | Some(FlowStatus::TimedOut) => return,
-        }
-    }
 }
 
 // ── Debug-only test fixtures ──────────────────────────────────────────────

@@ -112,6 +112,7 @@ fn main() {
             commands::gphotos_auth_status,
             commands::gphotos_sign_out,
             commands::gphotos_account_info,
+            commands::gphotos_ensure_source_row,
             commands::gphotos_manual_cleanup_instructions,
             commands::gphotos_create_picker_session,
             commands::gphotos_poll_picker_session,
