@@ -1534,50 +1534,101 @@ pub async fn search_photos(
         return Ok(Vec::new());
     }
 
-    // 3. Fetch all photo_id + embedding BLOBs (BLOB fallback path).
-    //    We only pull rows that have a non-null embedding BLOB.
-    let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
-        "SELECT photo_id, embedding FROM photo_embeddings \
-         WHERE embedding IS NOT NULL",
+    // 3. Encode the query vector in two forms: f32 LE bytes (fallback) and
+    //    int8 quantised (primary — 4× smaller, 4× faster brute-force).
+    let query_f32_bytes: Vec<u8> = query_vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let query_i8_bytes = crate::catalog::db::quantize_unit_f32_to_i8_bytes(&query_vec);
+
+    // 4. Primary: int8 vec0 KNN (`vec_photo_embeddings_int8`, populated by
+    //    stage-4). 768 bytes per row vs. 3072 for f32 → ~4× throughput on
+    //    the brute-force scan. Distance ordering is preserved under
+    //    symmetric i8 quantisation of L2-normed vectors.
+    let knn_rows: Vec<(i64, f32)> = sqlx::query_as(
+        "SELECT rowid, distance FROM vec_photo_embeddings_int8 \
+         WHERE embedding MATCH vec_int8(?1) ORDER BY distance LIMIT ?2",
     )
+    .bind(&query_i8_bytes)
+    .bind(max_results)
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .unwrap_or_else(|e| {
+        tracing::debug!(error = %e, "int8 KNN failed, trying f32 KNN");
+        Vec::new()
+    });
 
-    if rows.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // 4. Decode each BLOB (768 × f32 LE), L2-normalise, compute dot product.
-    let expected_bytes = crate::ai::EMBED_DIM * std::mem::size_of::<f32>();
-    let mut scored: Vec<(i64, f32)> = rows
-        .into_iter()
-        .filter_map(|(photo_id, blob)| {
-            if blob.len() != expected_bytes {
-                tracing::warn!(
-                    photo_id,
-                    blob_len = blob.len(),
-                    expected = expected_bytes,
-                    "photo_embeddings BLOB has wrong length — skipping"
-                );
-                return None;
-            }
-            let mut emb: Vec<f32> = blob
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
-            l2_normalise(&mut emb);
-            let score = dot_product(&query_vec, &emb);
-            Some((photo_id, score))
+    // 4b. Fallback: f32 vec0 KNN (`vec_photo_embeddings`) — some catalogs
+    //     may have been populated before the int8 table existed.
+    let knn_rows = if knn_rows.is_empty() {
+        sqlx::query_as::<_, (i64, f32)>(
+            "SELECT rowid, distance FROM vec_photo_embeddings \
+             WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+        )
+        .bind(&query_f32_bytes)
+        .bind(max_results)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "vec0 KNN query failed — falling back to BLOB scan");
+            Vec::new()
         })
-        .collect();
+    } else {
+        knn_rows
+    };
 
-    // 5. Sort by score descending, take top N.
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(max_results as usize);
+    let mut scored: Vec<(i64, f32)> = if !knn_rows.is_empty() {
+        // distance-asc → map to similarity-desc so the rest of the code keeps
+        // the "higher is better" convention.
+        knn_rows
+            .into_iter()
+            .map(|(rowid, dist)| (rowid, 1.0 - dist * 0.5))
+            .collect()
+    } else {
+        // Legacy BLOB fallback: catalogs populated before stage-4 started
+        // writing vec_photo_embeddings, or installs where sqlite-vec failed.
+        let blob_rows: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT photo_id, embedding FROM photo_embeddings WHERE embedding IS NOT NULL",
+        )
+        .fetch_all(&state.pool)
+        .await?;
+
+        if blob_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let expected_bytes = crate::ai::EMBED_DIM * std::mem::size_of::<f32>();
+        let mut scored: Vec<(i64, f32)> = blob_rows
+            .into_iter()
+            .filter_map(|(photo_id, blob)| {
+                if blob.len() != expected_bytes {
+                    tracing::warn!(
+                        photo_id,
+                        blob_len = blob.len(),
+                        expected = expected_bytes,
+                        "photo_embeddings BLOB has wrong length — skipping"
+                    );
+                    return None;
+                }
+                let mut emb: Vec<f32> = blob
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect();
+                l2_normalise(&mut emb);
+                let score = dot_product(&query_vec, &emb);
+                Some((photo_id, score))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(max_results as usize);
+        scored
+    };
 
     if scored.is_empty() {
         return Ok(Vec::new());
     }
+
+    // vec0 already returns in ascending-distance order (best first), so no
+    // re-sort needed for that branch. The BLOB branch sorted above.
+    let _ = &mut scored;
 
     // 6. Fetch full PhotoRow data for the ranked photo IDs.
     //    We preserve the score order by fetching all and re-sorting.

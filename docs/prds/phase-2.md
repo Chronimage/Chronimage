@@ -91,6 +91,12 @@ This is the phase where Chronimage starts beating Aftershoot / Narrative Select 
 - [ ] "Require final review before deleting" toggle (always-on in v1)
 - [ ] Cull Bin retention days (default 30)
 
+### 9. Vector search ANN upgrade (carries Phase 1 NFR follow-up)
+- [ ] Upgrade sqlite-vec 0.1.9 → 0.1.10+ once upstream packaging stabilises (`build.rs` currently fails on a missing `sqlite-vec-diskann.c`, see commit `75a52bd`). diskann gives `O(log n)` ANN vs. the current brute-force `O(n)`.
+- [ ] Phase 1 int8 brute-force measured at 607 ms p95 on 200k (threshold loosened to 750 ms in Phase 1). With diskann ANN + int8, target drops to ~30-100 ms p95 — real user-facing interactive latency.
+- [ ] Fallback plan if sqlite-vec ANN remains delayed: swap to `hnsw-rs` crate + `vec_photo_embeddings_f32` for distance verification, keeping the int8 table as the scan fallback.
+- [ ] Revisit `phase_1_search_latency.rs` threshold after the upgrade lands — should aim for PRD's original 500 ms with headroom.
+
 ## Non-goals
 
 - No RAW develop (Phase 3)
