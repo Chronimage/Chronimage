@@ -53,6 +53,10 @@ jobs:
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
           cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Fetch bundled models
+        shell: pwsh
+        run: pwsh scripts/fetch-bundled-models.ps1
+
       - name: Build signed stable MSI
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}

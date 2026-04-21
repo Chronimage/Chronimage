@@ -106,6 +106,12 @@ fn main() {
             commands::import_google_takeout,
             commands::detect_icloud_path,
             commands::list_iphone_devices,
+            commands::gphotos_start_oauth,
+            commands::gphotos_complete_oauth,
+            commands::gphotos_auth_status,
+            commands::gphotos_sign_out,
+            #[cfg(debug_assertions)]
+            commands::__test_generate_fixture,
             commands::detect_hardware,
             commands::embed_image,
             commands::score_aesthetic,

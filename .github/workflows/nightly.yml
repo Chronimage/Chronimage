@@ -61,6 +61,10 @@ jobs:
           $stamp = Get-Date -Format "yyyyMMdd"
           "tag=v$base-nightly.$stamp" | Out-File -Append $env:GITHUB_OUTPUT
 
+      - name: Fetch bundled models
+        shell: pwsh
+        run: pwsh scripts/fetch-bundled-models.ps1
+
       - name: Build signed nightly MSI
         env:
           # Non-EV test cert for nightly; OK that SmartScreen warns
