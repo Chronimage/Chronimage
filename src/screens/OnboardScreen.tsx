@@ -38,7 +38,7 @@ import {
   useStartImport,
 } from '../state/queries';
 import { useUi } from '../state/ui';
-import { debug } from '../util/log';
+import { debug, errorMessage } from '../util/log';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1241,9 +1241,8 @@ export function OnboardScreen() {
         debug('gphotos onboard: delete picker session failed (non-fatal)', err);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       debug('gphotos onboard: connect flow failed', err);
-      setGphotosStatus({ kind: 'error', message: msg });
+      setGphotosStatus({ kind: 'error', message: errorMessage(err) });
     }
   }
 

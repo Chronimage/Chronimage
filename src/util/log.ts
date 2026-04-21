@@ -61,3 +61,24 @@ export function error(...args: unknown[]): void {
   console.error(msg);
   lokiPush('error', msg);
 }
+
+/**
+ * Extract a human-readable string from any value thrown/rejected. Handles
+ * three cases in order:
+ *   1. `Error` instance → `err.message`
+ *   2. Tauri command rejection → `{ code, message }` plain object (our
+ *      AppError serialises this way; see `src-tauri/src/error.rs`)
+ *   3. Anything else → `String(value)`
+ *
+ * Use this everywhere we surface errors to the UI; `String(err)` on a
+ * plain object returns `"[object Object]"`, which is useless.
+ */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null) {
+    const e = err as { message?: unknown; code?: unknown };
+    if (typeof e.message === 'string' && e.message.length > 0) return e.message;
+    if (typeof e.code === 'string') return `AppError(${e.code})`;
+  }
+  return String(err);
+}

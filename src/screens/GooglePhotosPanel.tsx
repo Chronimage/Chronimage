@@ -33,7 +33,7 @@ import {
   importGooglePhotos,
   listSources,
 } from '../tauri/invoke';
-import { debug } from '../util/log';
+import { debug, errorMessage } from '../util/log';
 
 type ConnectState =
   | { kind: 'idle' }
@@ -119,7 +119,7 @@ export function GooglePhotosPanel() {
       } catch (err) {
         setConnect({
           kind: 'error',
-          message: err instanceof Error ? err.message : String(err),
+          message: errorMessage(err),
         });
       }
     };
@@ -168,7 +168,7 @@ export function GooglePhotosPanel() {
           } catch (err) {
             setPick({
               kind: 'error',
-              message: err instanceof Error ? err.message : String(err),
+              message: errorMessage(err),
             });
           }
           return;
@@ -177,7 +177,7 @@ export function GooglePhotosPanel() {
       } catch (err) {
         setPick({
           kind: 'error',
-          message: err instanceof Error ? err.message : String(err),
+          message: errorMessage(err),
         });
       }
     };
@@ -198,7 +198,7 @@ export function GooglePhotosPanel() {
     } catch (err) {
       setConnect({
         kind: 'error',
-        message: err instanceof Error ? err.message : String(err),
+        message: errorMessage(err),
       });
     }
   }, []);
@@ -233,7 +233,7 @@ export function GooglePhotosPanel() {
     } catch (err) {
       setPick({
         kind: 'error',
-        message: err instanceof Error ? err.message : String(err),
+        message: errorMessage(err),
       });
     }
   }, []);
