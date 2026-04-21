@@ -89,7 +89,16 @@ chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
 
 # HTTP client (model downloader — user-initiated only)
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls", "json"] }
+
+# Google Photos OAuth2: base64url-encoded PKCE challenges + CSRF state tokens.
+base64 = "0.22"
+# Cryptographic RNG for PKCE verifier + state token (OS entropy source).
+getrandom = "0.2"
+# Cross-platform secret store. On Windows this routes to Credential Manager; on
+# macOS to Keychain; on Linux to Secret Service. OAuth refresh tokens for cloud
+# source connectors are persisted here — never in the catalog DB.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
 # Zip extraction for InsightFace buffalo_l.zip bundle (MIT licence)
 zip = "2"

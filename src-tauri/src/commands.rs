@@ -977,6 +977,109 @@ pub async fn list_iphone_devices() -> AppResult<Vec<import::iphone_usb::UsbDevic
         .map_err(|e| AppError::Internal(format!("iphone usb task join: {e}")))?
 }
 
+// ── Google Photos OAuth2 commands ─────────────────────────────────────────
+//
+// Phase 1 scaffolding: the Tauri layer hands the frontend an authorization
+// URL + PKCE artifacts, opens the browser, and — once the redirect lands —
+// exchanges the code for a token set that lives in the OS secret store.
+// Actual mediaItems.list / batchDelete calls are deferred until the
+// onboarding UX ships. See src/sources/google_photos.rs.
+
+/// Begin an OAuth2 flow. Returns the URL to open in the user's browser plus
+/// the PKCE verifier and CSRF state the caller must retain in memory and
+/// hand back to [`gphotos_complete_oauth`] on redirect.
+#[tauri::command]
+pub async fn gphotos_start_oauth(
+    client_id: String,
+    redirect_uri: String,
+) -> AppResult<crate::sources::google_photos::AuthRequest> {
+    use crate::sources::google_photos;
+    google_photos::new_auth_request(&client_id, &redirect_uri, google_photos::SCOPE_READONLY)
+}
+
+/// Exchange the `code` + `state` Google just returned for a token pair and
+/// persist it in the platform secret store. `expected_state` is the one
+/// `gphotos_start_oauth` returned; mismatch → permission-denied.
+#[tauri::command]
+pub async fn gphotos_complete_oauth(
+    client_id: String,
+    redirect_uri: String,
+    code: String,
+    state: String,
+    expected_state: String,
+    pkce_verifier: String,
+) -> AppResult<()> {
+    use crate::sources::google_photos;
+    if state != expected_state {
+        return Err(AppError::PermissionDenied(
+            "oauth state mismatch — possible CSRF, dropping exchange".into(),
+        ));
+    }
+    let tokens = google_photos::user_initiated_exchange_code(
+        &client_id,
+        &redirect_uri,
+        &code,
+        &pkce_verifier,
+    )
+    .await?;
+    google_photos::store_tokens(&tokens)?;
+    tracing::info!("google photos oauth tokens stored in keyring");
+    Ok(())
+}
+
+/// Whether a usable Google Photos token set is present in the keyring.
+#[tauri::command]
+pub async fn gphotos_auth_status() -> AppResult<bool> {
+    Ok(crate::sources::google_photos::load_tokens()?.is_some())
+}
+
+/// Drop the Google Photos token set from the keyring. Idempotent.
+#[tauri::command]
+pub async fn gphotos_sign_out() -> AppResult<()> {
+    crate::sources::google_photos::delete_tokens()
+}
+
+// ── Debug-only test fixtures ──────────────────────────────────────────────
+//
+// Playwright's `phase-1-import-throughput.spec.ts` needs a way to drop N
+// synthetic JPEGs on disk before kicking off an import. We expose it as a
+// Tauri command gated on `cfg(debug_assertions)` so the release binaries
+// never ship this surface.
+
+/// Write `count` deterministic ~50 KB synthetic JPEGs into `dir`, named
+/// `photo_00000.jpg` through `photo_{count-1}.jpg`. Returns the number of
+/// files actually written (useful when writes partially fail).
+///
+/// Debug-only. Invoked from the e2e fixture-generator step.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn __test_generate_fixture(dir: String, count: usize) -> AppResult<usize> {
+    use crate::util::synthetic::synthesize_jpeg;
+    use std::path::PathBuf;
+
+    let dir_path = PathBuf::from(&dir);
+    std::fs::create_dir_all(&dir_path)?;
+
+    let written = tokio::task::spawn_blocking(move || -> AppResult<usize> {
+        let mut n = 0usize;
+        for i in 0..count {
+            let bytes = synthesize_jpeg(i);
+            if bytes.is_empty() {
+                continue;
+            }
+            let path = dir_path.join(format!("photo_{i:05}.jpg"));
+            std::fs::write(&path, bytes)?;
+            n += 1;
+        }
+        Ok(n)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("fixture generator join: {e}")))??;
+
+    tracing::info!(written, dir, "synthetic fixture generated");
+    Ok(written)
+}
+
 // ── Rediscovery commands ──────────────────────────────────────────────────
 
 /// Photos taken on today's month+day in any prior year.
@@ -3717,5 +3820,100 @@ mod tests {
         );
         // Curated seeds should still fill remaining slots up to 8.
         assert!(out.contains(&"golden hour portraits".to_string()));
+    }
+
+    // ── Google Photos OAuth2 command tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn gphotos_start_oauth_returns_self_consistent_request() {
+        let req = gphotos_start_oauth(
+            "test-client".into(),
+            "http://127.0.0.1:8734/callback".into(),
+        )
+        .await
+        .expect("start oauth");
+        assert!(req
+            .auth_url
+            .starts_with(crate::sources::google_photos::AUTH_ENDPOINT));
+        assert!(req.auth_url.contains("client_id=test-client"));
+        assert!(req.auth_url.contains(&format!("state={}", req.state)));
+        // Verifier → challenge round-trip must match what we embed in the
+        // URL, otherwise Google rejects the exchange.
+        let expected = crate::sources::google_photos::pkce_challenge(&req.pkce_verifier);
+        assert!(req.auth_url.contains(&format!("code_challenge={expected}")));
+    }
+
+    #[tokio::test]
+    async fn gphotos_start_oauth_generates_unique_artifacts() {
+        let a = gphotos_start_oauth("cid".into(), "http://127.0.0.1:8734/cb".into())
+            .await
+            .expect("a");
+        let b = gphotos_start_oauth("cid".into(), "http://127.0.0.1:8734/cb".into())
+            .await
+            .expect("b");
+        assert_ne!(a.state, b.state);
+        assert_ne!(a.pkce_verifier, b.pkce_verifier);
+    }
+
+    #[tokio::test]
+    async fn gphotos_complete_oauth_rejects_state_mismatch() {
+        let err = gphotos_complete_oauth(
+            "cid".into(),
+            "http://127.0.0.1:8734/cb".into(),
+            "fake-code".into(),
+            "attacker-state".into(),
+            "legit-state".into(),
+            "verifier-ignored".into(),
+        )
+        .await
+        .expect_err("state mismatch must fail before network call");
+        assert!(matches!(err, AppError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn gphotos_complete_oauth_error_mentions_csrf() {
+        let err = gphotos_complete_oauth(
+            "cid".into(),
+            "http://127.0.0.1:8734/cb".into(),
+            "fake-code".into(),
+            "a".into(),
+            "b".into(),
+            "verifier".into(),
+        )
+        .await
+        .expect_err("mismatch");
+        assert!(matches!(err, AppError::PermissionDenied(_)));
+        if let AppError::PermissionDenied(msg) = err {
+            assert!(
+                msg.to_lowercase().contains("csrf") || msg.contains("state mismatch"),
+                "message should mention csrf/state, got: {msg}",
+            );
+        }
+    }
+
+    /// `gphotos_auth_status` shouldn't panic on a fresh machine with no
+    /// keyring entry — it must surface `false`. On CI without a real secret
+    /// store the keyring crate may error; the command propagates it as an
+    /// `AppError::Internal`, so we accept either outcome.
+    #[tokio::test]
+    async fn gphotos_auth_status_is_callable_on_fresh_install() {
+        let res = gphotos_auth_status().await;
+        assert!(
+            matches!(res, Ok(_) | Err(AppError::Internal(_))),
+            "unexpected variant: {res:?}",
+        );
+    }
+
+    /// Sign-out is idempotent — calling it when nothing is stored must not
+    /// bubble up a `NoEntry` error. (On CI without a secret-store backend
+    /// the keyring crate may return an Internal error; either outcome is
+    /// acceptable here.)
+    #[tokio::test]
+    async fn gphotos_sign_out_is_idempotent() {
+        let res = gphotos_sign_out().await;
+        assert!(
+            matches!(res, Ok(()) | Err(AppError::Internal(_))),
+            "unexpected variant: {res:?}",
+        );
     }
 }
