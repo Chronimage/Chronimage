@@ -417,7 +417,23 @@ fn parse_token_error(body: &str, status: reqwest::StatusCode) -> String {
 pub fn store_tokens(tokens: &TokenSet) -> AppResult<()> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_DEFAULT_USER)
         .map_err(|e| AppError::Internal(format!("keyring entry: {e}")))?;
-    let blob = serde_json::to_string(tokens)?;
+    // Strip the OIDC id_token before persistence. Windows Credential
+    // Manager caps the password blob at 2560 UTF-16 chars; the JWT
+    // id_token alone is often ~1500-2000 chars and would blow the limit.
+    // We don't consume id_token anywhere — account info comes from the
+    // /userinfo endpoint via the access token — so dropping it here is
+    // safe and shrinks the stored blob to ~600 chars.
+    let persisted = TokenSet {
+        id_token: None,
+        ..tokens.clone()
+    };
+    let blob = serde_json::to_string(&persisted)?;
+    if blob.len() > 2400 {
+        tracing::warn!(
+            blob_len = blob.len(),
+            "google photos token blob is large; Windows Credential Manager caps at ~2560 UTF-16 chars — may fail to store",
+        );
+    }
     entry
         .set_password(&blob)
         .map_err(|e| AppError::Internal(format!("keyring set: {e}")))?;
