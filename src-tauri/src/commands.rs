@@ -283,10 +283,25 @@ async fn execute_cleanup_plan(
         // ── Gate 2: local-only sources ───────────────────────────────────────
         let local_kinds = ["local", "external", "nas", "sd"];
         if !local_kinds.contains(&source.source_kind.as_str()) {
-            errors.push(format!(
-                "source {} (kind={}) not yet implemented for source-side deletion",
-                source.source_id, source.source_kind
-            ));
+            // Google Photos specifically falls back to manual cleanup
+            // because the Photo Picker API is read-only — no batchDelete.
+            // See PRD § 12 per-source adapter. Surface a pointer to the
+            // manual-cleanup surface rather than a vague "not implemented".
+            let msg = if source.source_kind == "google_photos" {
+                format!(
+                    "source {} (google_photos) cannot be deleted from the app — \
+                     the Photo Picker API is read-only. Open photos.google.com or \
+                     takeout.google.com to remove the uploaded copy manually. \
+                     (see gphotos_manual_cleanup_instructions command)",
+                    source.source_id,
+                )
+            } else {
+                format!(
+                    "source {} (kind={}) not yet implemented for source-side deletion",
+                    source.source_id, source.source_kind
+                )
+            };
+            errors.push(msg);
             continue;
         }
 
@@ -977,53 +992,74 @@ pub async fn list_iphone_devices() -> AppResult<Vec<import::iphone_usb::UsbDevic
         .map_err(|e| AppError::Internal(format!("iphone usb task join: {e}")))?
 }
 
-// ── Google Photos OAuth2 commands ─────────────────────────────────────────
+// ── Google Photos OAuth2 + Picker commands ────────────────────────────────
 //
-// Phase 1 scaffolding: the Tauri layer hands the frontend an authorization
-// URL + PKCE artifacts, opens the browser, and — once the redirect lands —
-// exchanges the code for a token set that lives in the OS secret store.
-// Actual mediaItems.list / batchDelete calls are deferred until the
-// onboarding UX ships. See src/sources/google_photos.rs.
+// The frontend drives the OAuth flow via three steps:
+//   1. gphotos_begin_oauth_flow() → spawns loopback listener + returns
+//      (auth_url, flow_id). Frontend opens auth_url in system browser.
+//   2. gphotos_poll_oauth_flow(flow_id) → polled every ~1 s until the
+//      status is `completed` or `failed`; on success the sources row is
+//      created and the account email is returned.
+//   3. (Optional) gphotos_cancel_oauth_flow(flow_id) if the user closes the
+//      modal.
+//
+// Imports happen via the Photo Picker API:
+//   4. gphotos_create_picker_session() → returns pickerUri + session_id.
+//      Frontend opens pickerUri in the browser; user chooses photos.
+//   5. gphotos_poll_picker_session(session_id) → polled until
+//      media_items_set = true.
+//   6. import_google_photos(source_id, session_id) → streams picked items
+//      through the import pipeline. See [`import_google_photos`].
+//   7. gphotos_delete_picker_session(session_id) cleans up after ingest.
 
-/// Begin an OAuth2 flow. Returns the URL to open in the user's browser plus
-/// the PKCE verifier and CSRF state the caller must retain in memory and
-/// hand back to [`gphotos_complete_oauth`] on redirect.
-#[tauri::command]
-pub async fn gphotos_start_oauth(
-    client_id: String,
-    redirect_uri: String,
-) -> AppResult<crate::sources::google_photos::AuthRequest> {
-    use crate::sources::google_photos;
-    google_photos::new_auth_request(&client_id, &redirect_uri, google_photos::SCOPE_READONLY)
+#[derive(Debug, Serialize)]
+pub struct BeginOauthResponse {
+    pub auth_url: String,
+    pub flow_id: String,
 }
 
-/// Exchange the `code` + `state` Google just returned for a token pair and
-/// persist it in the platform secret store. `expected_state` is the one
-/// `gphotos_start_oauth` returned; mismatch → permission-denied.
+/// Begin an OAuth2 flow. Spawns a one-shot loopback listener, generates
+/// PKCE + state, and returns the URL the frontend opens in the system
+/// browser plus a flow-id for polling. `client_id` is optional — omitting
+/// it falls back to [`google_photos::DEFAULT_CLIENT_ID`].
 #[tauri::command]
-pub async fn gphotos_complete_oauth(
-    client_id: String,
-    redirect_uri: String,
-    code: String,
-    state: String,
-    expected_state: String,
-    pkce_verifier: String,
-) -> AppResult<()> {
+pub async fn gphotos_begin_oauth_flow(
+    state_: State<'_, AppState>,
+    client_id: Option<String>,
+) -> AppResult<BeginOauthResponse> {
     use crate::sources::google_photos;
-    if state != expected_state {
-        return Err(AppError::PermissionDenied(
-            "oauth state mismatch — possible CSRF, dropping exchange".into(),
-        ));
-    }
-    let tokens = google_photos::user_initiated_exchange_code(
-        &client_id,
-        &redirect_uri,
-        &code,
-        &pkce_verifier,
-    )
-    .await?;
-    google_photos::store_tokens(&tokens)?;
-    tracing::info!("google photos oauth tokens stored in keyring");
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+    let (auth_url, flow_id) = google_photos::begin_oauth_flow(cid).await?;
+
+    // Spawn a follow-up that creates the sources row once the flow
+    // completes. We watch the status map; polling is cheap and we stop
+    // when we hit a terminal state.
+    let pool = state_.pool.clone();
+    let flow_id_clone = flow_id.clone();
+    tokio::spawn(async move {
+        ensure_google_photos_source_row(&pool, &flow_id_clone).await;
+    });
+
+    Ok(BeginOauthResponse { auth_url, flow_id })
+}
+
+/// Poll the status of a running OAuth flow. Returns `completed` / `failed`
+/// / `pending` / `timed_out`.
+#[tauri::command]
+pub async fn gphotos_poll_oauth_flow(
+    flow_id: String,
+) -> AppResult<crate::sources::google_photos::FlowStatus> {
+    use crate::sources::google_photos;
+    google_photos::peek_flow_status(&flow_id)
+        .ok_or_else(|| AppError::NotFound(format!("oauth flow {flow_id} unknown or expired")))
+}
+
+/// Abort a running OAuth flow. Idempotent — no-op for unknown ids.
+#[tauri::command]
+pub async fn gphotos_cancel_oauth_flow(flow_id: String) -> AppResult<()> {
+    crate::sources::google_photos::abort_flow(&flow_id);
     Ok(())
 }
 
@@ -1033,10 +1069,277 @@ pub async fn gphotos_auth_status() -> AppResult<bool> {
     Ok(crate::sources::google_photos::load_tokens()?.is_some())
 }
 
-/// Drop the Google Photos token set from the keyring. Idempotent.
+/// Return the manual-cleanup guidance the UI should surface when the user
+/// tries to source-delete Google Photos copies. Photo Picker API is
+/// read-only; per PRD § 12 we point the user at photos.google.com and
+/// takeout.google.com for the actual deletion. Structured so the frontend
+/// can render a dialog with working links.
+#[derive(Debug, Serialize)]
+pub struct GphotosManualCleanupInstructions {
+    pub headline: String,
+    pub body: String,
+    pub google_photos_url: String,
+    pub takeout_url: String,
+}
+
 #[tauri::command]
-pub async fn gphotos_sign_out() -> AppResult<()> {
-    crate::sources::google_photos::delete_tokens()
+pub async fn gphotos_manual_cleanup_instructions() -> AppResult<GphotosManualCleanupInstructions> {
+    Ok(GphotosManualCleanupInstructions {
+        headline: "Delete Google Photos copies manually".into(),
+        body: "Chronimage uses Google's Photo Picker API, which is \
+            read-only — it can't delete photos on your behalf. Open Google \
+            Photos in your browser to remove the uploaded copies, or use \
+            Google Takeout to bulk-remove if you already have a local \
+            backup."
+            .into(),
+        google_photos_url: "https://photos.google.com/".into(),
+        takeout_url: "https://takeout.google.com/".into(),
+    })
+}
+
+/// Drop the Google Photos token set from the keyring + delete any
+/// `sources` rows of kind `google_photos`. Idempotent.
+#[tauri::command]
+pub async fn gphotos_sign_out(state_: State<'_, AppState>) -> AppResult<()> {
+    crate::sources::google_photos::delete_tokens()?;
+    // Cascade: drop any gphotos source rows so the UI doesn't list stale
+    // connections. delete_source_copies + imports are handled by the
+    // existing DELETE CASCADE paths.
+    sqlx::query("DELETE FROM sources WHERE kind = 'google_photos'")
+        .execute(&state_.pool)
+        .await?;
+    Ok(())
+}
+
+/// Connected-account info. Uses the current access token (refreshing if
+/// expired) and returns whatever Google's /userinfo endpoint gives us.
+#[tauri::command]
+pub async fn gphotos_account_info(
+    client_id: Option<String>,
+) -> AppResult<crate::sources::google_photos::UserInfo> {
+    use crate::sources::google_photos;
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+    let access = google_photos::user_initiated_current_access_token(cid).await?;
+    google_photos::user_initiated_fetch_userinfo(&access).await
+}
+
+/// Create a Google Photo Picker session. Returns `picker_uri` (open in
+/// browser) + `id` (poll against this).
+#[tauri::command]
+pub async fn gphotos_create_picker_session(
+    client_id: Option<String>,
+) -> AppResult<crate::sources::google_photos::PickerSession> {
+    use crate::sources::google_photos;
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+    let access = google_photos::user_initiated_current_access_token(cid).await?;
+    google_photos::user_initiated_create_picker_session(&access).await
+}
+
+/// Poll a picker session. `media_items_set = true` signals the user has
+/// finished selecting and the caller can start listing items.
+#[tauri::command]
+pub async fn gphotos_poll_picker_session(
+    client_id: Option<String>,
+    session_id: String,
+) -> AppResult<crate::sources::google_photos::PickerSession> {
+    use crate::sources::google_photos;
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+    let access = google_photos::user_initiated_current_access_token(cid).await?;
+    google_photos::user_initiated_poll_picker_session(&access, &session_id).await
+}
+
+/// Delete a picker session. Idempotent.
+#[tauri::command]
+pub async fn gphotos_delete_picker_session(
+    client_id: Option<String>,
+    session_id: String,
+) -> AppResult<()> {
+    use crate::sources::google_photos;
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+    let access = google_photos::user_initiated_current_access_token(cid).await?;
+    google_photos::user_initiated_delete_picker_session(&access, &session_id).await
+}
+
+/// Run the import pipeline over the media items the user picked in
+/// `session_id`. Downloads each picked item to a tempdir and hands the
+/// directory to the standard import pipeline — the pipeline hashes,
+/// de-duplicates, embeds, face-detects, and persists as with any local
+/// source.
+#[tauri::command]
+pub async fn import_google_photos(
+    state_: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    source_id: i64,
+    session_id: String,
+    client_id: Option<String>,
+) -> AppResult<StartImportResponse> {
+    use crate::sources::google_photos;
+
+    let cid_owned = client_id.unwrap_or_else(|| google_photos::DEFAULT_CLIENT_ID.to_string());
+
+    // Persist downloads under the user's data dir so they survive the
+    // command returning (the pipeline runs spawn_blocking across awaits).
+    let staging_root = crate::util::paths::app_data_dir()
+        .map_err(|e| AppError::Internal(format!("resolve app_data_dir: {e}")))?
+        .join("_gphotos_staging")
+        .join(format!("session-{session_id}"));
+    std::fs::create_dir_all(&staging_root)?;
+
+    // Issue imports row early so the UI can track progress via list_imports.
+    let pool = state_.pool.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    let import_id: i64 = sqlx::query_scalar(
+        "INSERT INTO imports (source_id, started_at, total_files, imported_count, \
+         skipped_count, error_count) VALUES (?1, ?2, 0, 0, 0, 0) RETURNING id",
+    )
+    .bind(source_id)
+    .bind(&now)
+    .fetch_one(&pool)
+    .await?;
+
+    // Kick off a background task that streams mediaItems, downloads each,
+    // then runs the standard pipeline against the staging dir.
+    tokio::spawn(async move {
+        if let Err(e) = download_picker_items(&cid_owned, &session_id, &staging_root).await {
+            tracing::error!(error = %e, import_id, "google photos download phase failed");
+            // Record error count so the import row reflects failure.
+            let _ = sqlx::query("UPDATE imports SET error_count = error_count + 1 WHERE id = ?1")
+                .bind(import_id)
+                .execute(&pool)
+                .await;
+            return;
+        }
+
+        if let Err(e) = import::pipeline::run_pipeline_from_import_id(
+            source_id,
+            import_id,
+            staging_root.clone(),
+            pool.clone(),
+            app_handle,
+        )
+        .await
+        {
+            tracing::error!(error = %e, import_id, "google photos pipeline failed");
+        }
+    });
+
+    Ok(StartImportResponse { import_id })
+}
+
+/// Iterate `mediaItems.list` for `session_id` and download each item's
+/// `baseUrl` into `target_dir`. Returns when the list is exhausted.
+async fn download_picker_items(
+    client_id: &str,
+    session_id: &str,
+    target_dir: &std::path::Path,
+) -> AppResult<()> {
+    use crate::sources::google_photos;
+
+    let mut page_token: Option<String> = None;
+    let mut n = 0usize;
+    loop {
+        let access = google_photos::user_initiated_current_access_token(client_id).await?;
+        let page = google_photos::user_initiated_list_picked_media_items(
+            &access,
+            session_id,
+            page_token.as_deref(),
+            Some(100),
+        )
+        .await?;
+        for item in &page.media_items {
+            let Some(file) = item.media_file.as_ref() else {
+                continue;
+            };
+            let filename = file
+                .filename
+                .clone()
+                .unwrap_or_else(|| format!("{}.bin", item.id));
+            // Sanitize: strip any path separators the server might send.
+            let safe_name: String = filename
+                .chars()
+                .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+                .collect();
+            let target = target_dir.join(&safe_name);
+            // Refresh access for every 50 downloads in case we cross the
+            // expiry boundary during a long session.
+            let access = if n.is_multiple_of(50) {
+                google_photos::user_initiated_current_access_token(client_id).await?
+            } else {
+                access.clone()
+            };
+            google_photos::user_initiated_download_media_item(&access, &file.base_url, &target)
+                .await?;
+            n += 1;
+        }
+        match page.next_page_token {
+            Some(tok) if !tok.is_empty() => page_token = Some(tok),
+            _ => break,
+        }
+    }
+    tracing::info!(downloaded = n, "google photos picker download complete");
+    Ok(())
+}
+
+/// Background helper for `gphotos_begin_oauth_flow`: polls the flow status
+/// until it hits a terminal state, then on `Completed` creates (or
+/// upserts) the `sources` row so the frontend can list it.
+async fn ensure_google_photos_source_row(pool: &sqlx::SqlitePool, flow_id: &str) {
+    use crate::sources::google_photos::{peek_flow_status, FlowStatus};
+    // Simple polling loop — cheap and avoids reaching into the flow
+    // module's internal channel machinery.
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(330) {
+            // Slightly past the listener's 300 s timeout.
+            return;
+        }
+        match peek_flow_status(flow_id) {
+            Some(FlowStatus::Pending) | None => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+            Some(FlowStatus::Completed { email, .. }) => {
+                let name = email.clone().unwrap_or_else(|| "Google Photos".to_string());
+                let config = serde_json::json!({
+                    "email": email,
+                })
+                .to_string();
+                let now = chrono::Utc::now().to_rfc3339();
+                // Deduplicate by email: if a source for this account
+                // already exists, leave it alone. Otherwise insert.
+                let existing: Option<i64> = sqlx::query_scalar(
+                    "SELECT id FROM sources WHERE kind = 'google_photos' \
+                     AND json_extract(config_json, '$.email') = ?1",
+                )
+                .bind(&email)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+                if existing.is_none() {
+                    let _ = sqlx::query(
+                        "INSERT INTO sources (name, kind, status, config_json, created_at) \
+                         VALUES (?1, 'google_photos', 'idle', ?2, ?3)",
+                    )
+                    .bind(&name)
+                    .bind(&config)
+                    .bind(&now)
+                    .execute(pool)
+                    .await;
+                }
+                return;
+            }
+            Some(FlowStatus::Failed { .. }) | Some(FlowStatus::TimedOut) => return,
+        }
+    }
 }
 
 // ── Debug-only test fixtures ──────────────────────────────────────────────
@@ -3823,72 +4126,27 @@ mod tests {
     }
 
     // ── Google Photos OAuth2 command tests ────────────────────────────────
+    //
+    // The new Tauri commands are thin wrappers around the loopback-driven
+    // flow in [`crate::sources::google_photos`]. The module itself carries
+    // the PKCE/CSRF/percent-encode/refresh unit tests; here we only cover
+    // the command-layer plumbing that's reachable without live Google
+    // endpoints.
 
     #[tokio::test]
-    async fn gphotos_start_oauth_returns_self_consistent_request() {
-        let req = gphotos_start_oauth(
-            "test-client".into(),
-            "http://127.0.0.1:8734/callback".into(),
-        )
-        .await
-        .expect("start oauth");
-        assert!(req
-            .auth_url
-            .starts_with(crate::sources::google_photos::AUTH_ENDPOINT));
-        assert!(req.auth_url.contains("client_id=test-client"));
-        assert!(req.auth_url.contains(&format!("state={}", req.state)));
-        // Verifier → challenge round-trip must match what we embed in the
-        // URL, otherwise Google rejects the exchange.
-        let expected = crate::sources::google_photos::pkce_challenge(&req.pkce_verifier);
-        assert!(req.auth_url.contains(&format!("code_challenge={expected}")));
-    }
-
-    #[tokio::test]
-    async fn gphotos_start_oauth_generates_unique_artifacts() {
-        let a = gphotos_start_oauth("cid".into(), "http://127.0.0.1:8734/cb".into())
+    async fn gphotos_poll_oauth_flow_returns_not_found_for_unknown_id() {
+        let err = gphotos_poll_oauth_flow("nonexistent-flow-id".into())
             .await
-            .expect("a");
-        let b = gphotos_start_oauth("cid".into(), "http://127.0.0.1:8734/cb".into())
+            .expect_err("unknown flow must be NotFound");
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn gphotos_cancel_oauth_flow_is_idempotent() {
+        // No flow ever started → cancel must still succeed.
+        gphotos_cancel_oauth_flow("nonexistent".into())
             .await
-            .expect("b");
-        assert_ne!(a.state, b.state);
-        assert_ne!(a.pkce_verifier, b.pkce_verifier);
-    }
-
-    #[tokio::test]
-    async fn gphotos_complete_oauth_rejects_state_mismatch() {
-        let err = gphotos_complete_oauth(
-            "cid".into(),
-            "http://127.0.0.1:8734/cb".into(),
-            "fake-code".into(),
-            "attacker-state".into(),
-            "legit-state".into(),
-            "verifier-ignored".into(),
-        )
-        .await
-        .expect_err("state mismatch must fail before network call");
-        assert!(matches!(err, AppError::PermissionDenied(_)));
-    }
-
-    #[tokio::test]
-    async fn gphotos_complete_oauth_error_mentions_csrf() {
-        let err = gphotos_complete_oauth(
-            "cid".into(),
-            "http://127.0.0.1:8734/cb".into(),
-            "fake-code".into(),
-            "a".into(),
-            "b".into(),
-            "verifier".into(),
-        )
-        .await
-        .expect_err("mismatch");
-        assert!(matches!(err, AppError::PermissionDenied(_)));
-        if let AppError::PermissionDenied(msg) = err {
-            assert!(
-                msg.to_lowercase().contains("csrf") || msg.contains("state mismatch"),
-                "message should mention csrf/state, got: {msg}",
-            );
-        }
+            .expect("cancel must be idempotent");
     }
 
     /// `gphotos_auth_status` shouldn't panic on a fresh machine with no
@@ -3900,19 +4158,6 @@ mod tests {
         let res = gphotos_auth_status().await;
         assert!(
             matches!(res, Ok(_) | Err(AppError::Internal(_))),
-            "unexpected variant: {res:?}",
-        );
-    }
-
-    /// Sign-out is idempotent — calling it when nothing is stored must not
-    /// bubble up a `NoEntry` error. (On CI without a secret-store backend
-    /// the keyring crate may return an Internal error; either outcome is
-    /// acceptable here.)
-    #[tokio::test]
-    async fn gphotos_sign_out_is_idempotent() {
-        let res = gphotos_sign_out().await;
-        assert!(
-            matches!(res, Ok(()) | Err(AppError::Internal(_))),
             "unexpected variant: {res:?}",
         );
     }

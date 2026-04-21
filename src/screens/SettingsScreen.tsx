@@ -19,6 +19,7 @@ import {
 } from '../state/queries';
 import { useUi } from '../state/ui';
 import { debug } from '../util/log';
+import { GooglePhotosPanel } from './GooglePhotosPanel';
 
 /**
  * Rust `KNOWN_MODELS.kind` values ↔ the `ai_reindex(kind)` accepted values.
@@ -591,6 +592,23 @@ export function SettingsScreen() {
                 }}
               />
             </div>
+          </div>
+
+          {/* ── 1b. Cloud sources ── */}
+          <div className="set-section" style={{ marginTop: 28 }}>
+            <h3
+              style={{
+                margin: '0 0 14px',
+                fontSize: 13,
+                color: 'var(--fg-dim)',
+                fontFamily: 'var(--mono-font)',
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+              }}
+            >
+              Cloud sources
+            </h3>
+            <GooglePhotosPanel />
           </div>
 
           {/* ── 2. AI Models ── */}

@@ -504,3 +504,110 @@ export async function liftShiftExecute(planId: string, confirmToken: string): Pr
 export async function recordPhotoView(photoId: number): Promise<void> {
   return tauriInvoke<void>('record_photo_view', { photoId });
 }
+
+// ── Google Photos OAuth2 + Picker ──────────────────────────────────────────
+
+export interface GphotosBeginOauthResponse {
+  auth_url: string;
+  flow_id: string;
+}
+
+export type GphotosFlowStatus =
+  | { state: 'pending' }
+  | { state: 'completed'; email: string | null; scope: string }
+  | { state: 'failed'; message: string }
+  | { state: 'timed_out' };
+
+export interface GphotosUserInfo {
+  sub: string;
+  email?: string | null;
+  name?: string | null;
+  picture?: string | null;
+}
+
+export interface GphotosPollingConfig {
+  pollInterval?: string | null;
+  timeoutIn?: string | null;
+}
+
+export interface GphotosPickerSession {
+  id: string;
+  pickerUri: string;
+  mediaItemsSet: boolean;
+  pollingConfig?: GphotosPollingConfig | null;
+  expireTime?: string | null;
+}
+
+export interface GphotosManualCleanupInstructions {
+  headline: string;
+  body: string;
+  google_photos_url: string;
+  takeout_url: string;
+}
+
+export async function gphotosBeginOauthFlow(clientId?: string): Promise<GphotosBeginOauthResponse> {
+  return tauriInvoke<GphotosBeginOauthResponse>('gphotos_begin_oauth_flow', {
+    clientId: clientId ?? null,
+  });
+}
+
+export async function gphotosPollOauthFlow(flowId: string): Promise<GphotosFlowStatus> {
+  return tauriInvoke<GphotosFlowStatus>('gphotos_poll_oauth_flow', { flowId });
+}
+
+export async function gphotosCancelOauthFlow(flowId: string): Promise<void> {
+  return tauriInvoke<void>('gphotos_cancel_oauth_flow', { flowId });
+}
+
+export async function gphotosAuthStatus(): Promise<boolean> {
+  return tauriInvoke<boolean>('gphotos_auth_status');
+}
+
+export async function gphotosSignOut(): Promise<void> {
+  return tauriInvoke<void>('gphotos_sign_out');
+}
+
+export async function gphotosAccountInfo(clientId?: string): Promise<GphotosUserInfo> {
+  return tauriInvoke<GphotosUserInfo>('gphotos_account_info', {
+    clientId: clientId ?? null,
+  });
+}
+
+export async function gphotosCreatePickerSession(clientId?: string): Promise<GphotosPickerSession> {
+  return tauriInvoke<GphotosPickerSession>('gphotos_create_picker_session', {
+    clientId: clientId ?? null,
+  });
+}
+
+export async function gphotosPollPickerSession(
+  sessionId: string,
+  clientId?: string,
+): Promise<GphotosPickerSession> {
+  return tauriInvoke<GphotosPickerSession>('gphotos_poll_picker_session', {
+    sessionId,
+    clientId: clientId ?? null,
+  });
+}
+
+export async function gphotosDeletePickerSession(sessionId: string, clientId?: string): Promise<void> {
+  return tauriInvoke<void>('gphotos_delete_picker_session', {
+    sessionId,
+    clientId: clientId ?? null,
+  });
+}
+
+export async function gphotosManualCleanupInstructions(): Promise<GphotosManualCleanupInstructions> {
+  return tauriInvoke<GphotosManualCleanupInstructions>('gphotos_manual_cleanup_instructions');
+}
+
+export async function importGooglePhotos(
+  sourceId: number,
+  sessionId: string,
+  clientId?: string,
+): Promise<StartImportResponse> {
+  return tauriInvoke<StartImportResponse>('import_google_photos', {
+    sourceId,
+    sessionId,
+    clientId: clientId ?? null,
+  });
+}
