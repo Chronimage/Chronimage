@@ -128,8 +128,27 @@ foreach ($p in $pairs) {
   $rawDst = Join-Path $Destination ($outStem + (Get-Item $p.RawPath).Extension.ToLowerInvariant())
   $jpgDst = Join-Path $Destination ($outStem + (Get-Item $p.JpgPath).Extension.ToLowerInvariant())
 
-  Copy-Item -LiteralPath $p.RawPath -Destination $rawDst -Force
-  Copy-Item -LiteralPath $p.JpgPath -Destination $jpgDst -Force
+  # Defender/Search-Indexer briefly locks freshly-written files. Retry with backoff,
+  # and skip if a non-empty copy of the same size already exists (idempotent resume).
+  function Copy-WithRetry($src, $dst) {
+    $srcSize = (Get-Item -LiteralPath $src).Length
+    if ((Test-Path -LiteralPath $dst) -and ((Get-Item -LiteralPath $dst).Length -eq $srcSize)) {
+      return
+    }
+    $attempts = 0
+    while ($true) {
+      try {
+        Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+        return
+      } catch {
+        $attempts++
+        if ($attempts -ge 6) { throw }
+        Start-Sleep -Milliseconds (250 * [Math]::Pow(2, $attempts))
+      }
+    }
+  }
+  Copy-WithRetry $p.RawPath $rawDst
+  Copy-WithRetry $p.JpgPath $jpgDst
 
   $rawSize = (Get-Item $rawDst).Length
   $jpgSize = (Get-Item $jpgDst).Length
