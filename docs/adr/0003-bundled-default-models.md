@@ -13,14 +13,18 @@ Total community-model footprint is ~2.3 GB, but 1.7 GB of that is Moondream2 (ca
 
 **Ship default models bundled in the installer. Move model selection from onboarding to a Settings panel.**
 
-### Bundled set (~580 MB, mandatory for Phase 1 catalog)
+### Bundled set (~950 MB, mandatory for Phase 1 catalog)
 
-| Model | Size | Purpose | License |
-|---|---|---|---|
-| SigLIP-2 B/16 (224 ONNX) | 375 MB | Embeddings / semantic search | Apache-2.0 |
-| SCRFD-10g (`det_10g.onnx` from `buffalo_l`) | 17 MB | Face detection | MIT |
-| ArcFace W600K R50 (`w600k_r50.onnx` from `buffalo_l`) | 166 MB | Face embedding | MIT |
-| NIMA (MobileNet) | 13 MB | Aesthetic score | permissive (community ONNX) |
+| Model | File | Size | Purpose | License |
+|---|---|---|---|---|
+| SigLIP-2 B/16 image encoder | `siglip2-b16-image.onnx` | 375 MB | Image embeddings / semantic search | Apache-2.0 |
+| SigLIP-2 B/16 text encoder | `siglip2-b16-text.onnx` | ~370 MB | NL query encoding for `search_photos` | Apache-2.0 |
+| SigLIP-2 tokenizer | `siglip2-b16-tokenizer.json` | ~2.5 MB | HF tokenizer.json; loaded via `tokenizers` crate | Apache-2.0 |
+| SCRFD-10g | `det_10g.onnx` (from `buffalo_l`) | 17 MB | Face detection | MIT |
+| ArcFace W600K R50 | `w600k_r50.onnx` (from `buffalo_l`) | 166 MB | Face embedding | MIT |
+| NIMA (MobileNet) | `nima.onnx` | 13 MB | Aesthetic score | permissive (community ONNX) |
+
+First-run total increases from ~580 MB to ~950 MB with the addition of the text encoder and tokenizer. Both are required for real NL search (`search_photos`); without them the feature returns empty results (stub path).
 
 Every license here permits redistribution in a commercial installer.
 

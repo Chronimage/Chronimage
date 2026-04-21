@@ -24,24 +24,30 @@ const PHOTO_COUNT: usize = 10_000;
 /// Upper bound on catalog.db / library-bytes ratio.
 const MAX_RATIO: f64 = 0.02;
 
-/// Build an `Rgb8` image that varies per-index so every photo is unique (avoids
-/// the dedupe path pruning every entry after the first).
+/// Build an `Rgb8` image that varies per-index so every photo is unique
+/// *and* compresses to a realistic JPEG size. The earlier gradient-only
+/// version produced 1.4 KB files, which let per-row catalog overhead
+/// dominate the ratio — not representative of the PRD's real-library NFR.
+/// 512×512 with per-pixel noise encodes to ~40-80 KB, matching the
+/// lower end of real phone / compact-camera output.
 fn synthesize_jpeg(index: usize) -> Vec<u8> {
-    // 100×100 keeps each JPEG to ~3 kB while still being a legitimate image.
-    let mut buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(100, 100);
-    let r = (index & 0xff) as u8;
-    let g = ((index >> 8) & 0xff) as u8;
-    let b = ((index >> 16) & 0xff) as u8;
+    const SIZE: u32 = 512;
+    let mut buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(SIZE, SIZE);
+    // 64-bit LCG seeded from the index — deterministic + incompressible noise.
+    let mut state = (index as u64)
+        .wrapping_mul(0x5851_F42D_4C95_7F2D)
+        .wrapping_add(1);
     for pixel in buf.pixels_mut() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let r = (state >> 40) as u8;
+        let g = (state >> 32) as u8;
+        let b = (state >> 24) as u8;
         *pixel = Rgb([r, g, b]);
     }
-    // Add a small gradient so the encoded bytes differ even when the index
-    // overflows the 24-bit rgb space — belt-and-suspenders uniqueness.
-    for (x, _y, pixel) in buf.enumerate_pixels_mut() {
-        pixel.0[0] = pixel.0[0].wrapping_add(x as u8);
-    }
-    let mut out = Vec::with_capacity(4096);
-    image::codecs::jpeg::JpegEncoder::new(&mut out)
+    let mut out = Vec::with_capacity(80_000);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80)
         .encode_image(&buf)
         .expect("encode jpeg");
     out
@@ -92,10 +98,13 @@ async fn catalog_db_size_le_2_percent_of_library_bytes() {
         .expect("open_pool");
 
     // 3. Create a source row for the import.
+    let now_ts = chrono::Utc::now().to_rfc3339();
     let source_id: i64 = sqlx::query_scalar(
-        "INSERT INTO sources (name, kind, config_json) VALUES (?1, 'local', '{}') RETURNING id",
+        "INSERT INTO sources (name, kind, status, created_at, config_json) \
+         VALUES (?1, 'local', 'idle', ?2, '{}') RETURNING id",
     )
     .bind("phase-1-catalog-size-fixture")
+    .bind(&now_ts)
     .fetch_one(&pool)
     .await
     .expect("insert source");

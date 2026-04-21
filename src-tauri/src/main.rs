@@ -6,7 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use chronimage::{
-    ai::faces::init_global_faces_session,
+    ai::{faces::init_global_faces_session, siglip::init_global_siglip_session},
     catalog::{
         db::{open_pool, PoolOptions},
         seed_default_smart_albums,
@@ -196,6 +196,17 @@ fn main() {
                 let scrfd = resolve("det_10g.onnx");
                 let arcface = resolve("w600k_r50.onnx");
                 init_global_faces_session(scrfd.as_deref(), arcface.as_deref());
+
+                // Memoise SigLIP-2 (image + text + tokenizer) for search_photos
+                // and pipeline stage-4. Resolution order matches ADR 0003.
+                let siglip_image = resolve("siglip2-b16-image.onnx");
+                let siglip_text = resolve("siglip2-b16-text.onnx");
+                let siglip_tok = resolve("siglip2-b16-tokenizer.json");
+                init_global_siglip_session(
+                    siglip_image.as_deref(),
+                    siglip_text.as_deref(),
+                    siglip_tok.as_deref(),
+                );
             });
 
             Ok(())

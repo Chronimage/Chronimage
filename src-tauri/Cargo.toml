@@ -17,6 +17,13 @@ path = "src/main.rs"
 name = "chronimage-cli"
 path = "src/bin/chronimage-cli.rs"
 
+# Dev-only labeling helper for the phase_1_face_clustering fixture: scans a
+# directory, runs real SCRFD + ArcFace, emits thumbnails + candidates.json for
+# a static HTML page (tests/fixtures/face-clusters/label.html) to present.
+[[bin]]
+name = "chronimage-face-labeler"
+path = "src/bin/chronimage-face-labeler.rs"
+
 [lib]
 name = "chronimage"
 path = "src/lib.rs"
@@ -88,11 +95,21 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 zip = "2"
 
 # AI / inference
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+# ort is the ONNX Runtime Rust binding.
+# `download-binaries` (build.rs fetches Microsoft's prebuilt onnxruntime for the
+# target platform and statically wires the import lib) replaces the previous
+# `load-dynamic` (runtime DLL lookup). On Windows `load-dynamic` was finding
+# the OS-bundled `C:\Windows\System32\onnxruntime.dll` — that's the Windows AI
+# Foundry "germanium" build (ABI incompatible with ort's expectations) and
+# `Session::commit_from_file` hung indefinitely in init. download-binaries
+# pins the standard Microsoft release so Session loads deterministically.
+ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 image = "0.25"
 num_cpus = "1"
 # HDBSCAN face clustering — MIT OR Apache-2.0
 hdbscan = "0.12.0"
+# SigLIP-2 tokenizer — HuggingFace tokenizer.json format (MIT OR Apache-2.0)
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

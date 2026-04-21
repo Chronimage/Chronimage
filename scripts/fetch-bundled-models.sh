@@ -27,6 +27,8 @@ mkdir -p "$BUNDLED_DIR"
 # Fields: filename|url|sha256|zip_entry (empty string = direct download)
 MODELS=(
   "siglip2-b16-image.onnx|https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/vision_model.onnx|c0573e3f4140c3a7c4e9cc5912bd6b26a033b46a6a8e8af26cbea262b163bcad|"
+  "siglip2-b16-text.onnx|https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model.onnx|tbd|"
+  "siglip2-b16-tokenizer.json|https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/tokenizer.json|tbd|"
   "nima.onnx|https://huggingface.co/cromsc/nima-mobilenet-aesthetic/resolve/main/nima_mobilenet_aesthetic.onnx|c58b0c39b5b8f752b1b0ebf10e07e48406780ce3bf9d4647f8c43898748fe69c|"
   "det_10g.onnx|https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip|5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91|buffalo_l/det_10g.onnx"
   "w600k_r50.onnx|https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip|4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43|buffalo_l/w600k_r50.onnx"
@@ -99,8 +101,13 @@ for model_def in "${MODELS[@]}"; do
   IFS='|' read -r filename url expected_sha zip_entry <<< "$model_def"
   dest="$BUNDLED_DIR/$filename"
 
-  # Skip if already present and hash matches.
+  # Skip if already present and hash matches (or hash is still "tbd").
   if [ -f "$dest" ]; then
+    if [ "$expected_sha" = "tbd" ]; then
+      size="$(wc -c < "$dest" | tr -d ' ')"
+      echo "[ok] $filename $(format_bytes "$size") (cached; sha256 tbd)"
+      continue
+    fi
     actual_sha="$(sha256_file "$dest")"
     if [ "$actual_sha" = "$expected_sha" ]; then
       size="$(wc -c < "$dest" | tr -d ' ')"
@@ -138,13 +145,15 @@ for model_def in "${MODELS[@]}"; do
     mv "$tmp" "$dest"
   fi
 
-  # Verify hash.
-  actual_sha="$(sha256_file "$dest")"
-  if [ "$actual_sha" != "$expected_sha" ]; then
-    echo "[fail] $filename: SHA256 mismatch (got $actual_sha, want $expected_sha)"
-    rm -f "$dest"
-    FAILURES=$((FAILURES + 1))
-    continue
+  # Verify hash (skip when still "tbd" — pending first-run lock).
+  if [ "$expected_sha" != "tbd" ]; then
+    actual_sha="$(sha256_file "$dest")"
+    if [ "$actual_sha" != "$expected_sha" ]; then
+      echo "[fail] $filename: SHA256 mismatch (got $actual_sha, want $expected_sha)"
+      rm -f "$dest"
+      FAILURES=$((FAILURES + 1))
+      continue
+    fi
   fi
 
   size="$(wc -c < "$dest" | tr -d ' ')"
