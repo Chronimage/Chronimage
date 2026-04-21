@@ -7,9 +7,16 @@
  *   face_cluster_merge  → useFaceClusterMerge()
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Icon } from '../primitives/Icon';
-import { type ClusterRow, useFaceClusterMerge, useFaceClusterName, useFaceClusters } from '../state/queries';
+import { Thumbnail } from '../primitives/Thumbnail';
+import {
+  type ClusterRow,
+  useFaceClusterMerge,
+  useFaceClusterName,
+  useFaceClusters,
+  usePhotosForCluster,
+} from '../state/queries';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,10 +34,11 @@ interface ClusterCardProps {
   cluster: ClusterRow;
   onNameBlur: (clusterId: number, name: string) => void;
   onMergeClick: (clusterId: number) => void;
+  onOpen: (clusterId: number) => void;
   merging: boolean;
 }
 
-function ClusterCard({ cluster, onNameBlur, onMergeClick, merging }: ClusterCardProps) {
+function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: ClusterCardProps) {
   const [draft, setDraft] = useState<string>(cluster.name ?? '');
 
   function handleBlur() {
@@ -55,9 +63,12 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, merging }: ClusterCard
         gap: 'var(--space-2)',
       }}
     >
-      {/* Cover thumbnail placeholder */}
-      <div
+      {/* Cover — click to open cluster drill-down */}
+      <button
+        type="button"
         className="faces"
+        onClick={() => onOpen(cluster.id)}
+        aria-label={`Open cluster ${cluster.name ?? cluster.id}`}
         style={{
           aspectRatio: '1',
           borderRadius: 'var(--radius-sm)',
@@ -69,10 +80,13 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, merging }: ClusterCard
           alignItems: 'center',
           justifyContent: 'center',
           color: 'rgba(255,255,255,0.4)',
+          border: 'none',
+          cursor: 'pointer',
+          padding: 0,
         }}
       >
         <Icon name="faces" size={28} />
-      </div>
+      </button>
 
       {/* Face count badge */}
       <div
@@ -134,10 +148,14 @@ export function PeopleScreen() {
   const [filter, setFilter] = useState<FilterTab>('all');
   // clusterId pending a merge-target pick; null when no merge in progress
   const [mergePending, setMergePending] = useState<number | null>(null);
+  const [openedClusterId, setOpenedClusterId] = useState<number | null>(null);
 
   const { data: clusters = [], isLoading, isError } = useFaceClusters(60);
   const nameCluster = useFaceClusterName();
   const mergeCluster = useFaceClusterMerge();
+
+  const openedCluster =
+    openedClusterId === null ? null : (clusters.find((c) => c.id === openedClusterId) ?? null);
 
   const filtered =
     filter === 'named'
@@ -327,12 +345,124 @@ export function PeopleScreen() {
                   cluster={cluster}
                   onNameBlur={handleNameBlur}
                   onMergeClick={handleMergeClick}
+                  onOpen={setOpenedClusterId}
                   merging={mergeCluster.isPending && mergePending !== null}
                 />
               ))}
             </div>
           )}
         </div>
+      </div>
+      {openedCluster && <ClusterDrillDown cluster={openedCluster} onClose={() => setOpenedClusterId(null)} />}
+    </div>
+  );
+}
+
+interface ClusterDrillDownProps {
+  cluster: ClusterRow;
+  onClose: () => void;
+}
+
+function ClusterDrillDown({ cluster, onClose }: ClusterDrillDownProps) {
+  const { data: photos = [], isLoading, isError } = usePhotosForCluster(cluster.id, 200);
+  const title = cluster.name?.trim() || `Cluster #${cluster.id}`;
+
+  // Escape closes the drill-down.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Photos of ${title}`}
+      style={{
+        position: 'absolute',
+        inset: 0,
+        background: 'var(--bg)',
+        display: 'flex',
+        flexDirection: 'column',
+        zIndex: 10,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: 'var(--space-4) var(--space-6)',
+          borderBottom: '1px solid var(--stroke)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-3)' }}>
+          <button
+            type="button"
+            className="btn2"
+            onClick={onClose}
+            style={{ padding: '4px 10px', fontSize: 12 }}
+          >
+            <Icon name="chevL" size={12} /> Back
+          </button>
+          <h2 style={{ margin: 0, fontSize: 22 }}>
+            {title}
+            <em>.</em>
+          </h2>
+          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-mute)', letterSpacing: '0.06em' }}>
+            {cluster.faceCount.toLocaleString()} FACES
+          </span>
+        </div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 'var(--space-5) var(--space-6)' }}>
+        {isLoading && (
+          <div className="mono" style={{ fontSize: 12, color: 'var(--fg-mute)' }}>
+            Loading photos…
+          </div>
+        )}
+        {isError && (
+          <div className="mono" style={{ fontSize: 12, color: 'var(--danger)' }}>
+            Failed to load photos for this cluster.
+          </div>
+        )}
+        {!isLoading && !isError && photos.length === 0 && (
+          <div
+            style={{
+              padding: '60px var(--space-5)',
+              textAlign: 'center',
+              border: '1px dashed var(--stroke)',
+              borderRadius: 'var(--radius-lg)',
+              color: 'var(--fg-mute)',
+            }}
+          >
+            <Icon name="faces" size={36} />
+            <div style={{ marginTop: 'var(--space-3)', fontSize: 14 }}>
+              No photos tagged with this cluster yet.
+            </div>
+          </div>
+        )}
+        {photos.length > 0 && (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+              gap: 'var(--space-1)',
+            }}
+          >
+            {photos.map((p) => (
+              <div key={p.id} className="cell" style={{ aspectRatio: '3/2', position: 'relative' }}>
+                <Thumbnail
+                  photoId={p.id}
+                  photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
+                  subtle
+                />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

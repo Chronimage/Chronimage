@@ -320,14 +320,3 @@ export const PEOPLE: FixturePerson[] = [
   { name: 'Priya', count: 244, face: 16 },
   { name: 'Milo', count: 711, face: 11 },
 ];
-
-export const SEARCH_SUGGESTIONS = [
-  'Ari laughing at the beach',
-  "Candid moments from Maya's wedding",
-  'All photos of Milo in snow',
-  'Sunset portraits on 35mm',
-  'Food shots with warm light',
-  'Tokyo night · neon',
-  'Group photos where everyone smiles',
-  'Photos Leo took himself',
-];

@@ -1,6 +1,5 @@
 import { Icon, type IconName } from '../../primitives/Icon';
-import { PEOPLE } from '../../state/fixtures';
-import { useAlbums, useSources } from '../../state/queries';
+import { useAlbums, useFaceClusters, useSources } from '../../state/queries';
 
 const KIND_ICON: Record<string, IconName> = {
   local: 'disk',
@@ -34,9 +33,17 @@ function statusDot(status: string): string {
 export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelProps) {
   const { data: albums = [] } = useAlbums();
   const { data: sources = [] } = useSources();
+  const { data: clusters = [] } = useFaceClusters(60);
 
   const totalPhotos = sources.reduce((sum, s) => sum + s.photo_count, 0);
   const nonCullAlbums = albums.filter((a) => a.tag !== 'cull').slice(0, 9);
+  // Show up to 6 people in the sidebar, preferring named clusters, then largest.
+  const sidebarClusters = [...clusters]
+    .sort((a, b) => {
+      if (a.isNamed !== b.isNamed) return a.isNamed ? -1 : 1;
+      return b.faceCount - a.faceCount;
+    })
+    .slice(0, 6);
 
   return (
     <div className="sidepanel">
@@ -105,37 +112,47 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
 
       <div className="section-label">
         <span>People</span>
-        <span className="ai-badge on">{PEOPLE.length}</span>
+        <span className="ai-badge on">{clusters.length}</span>
       </div>
       <div style={{ padding: '0 10px 10px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 4 }}>
-          {PEOPLE.map((p) => {
-            const hue = (p.face * 31) % 360;
-            return (
-              <div key={p.name} title={`${p.name} · ${p.count}`} style={{ textAlign: 'center' }}>
-                <div
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: '50%',
-                    background: `oklch(0.5 0.15 ${hue})`,
-                    border: '1px solid var(--stroke)',
-                  }}
-                />
-                <div
-                  style={{
-                    fontSize: 9,
-                    color: 'var(--fg-mute)',
-                    marginTop: 2,
-                    fontFamily: 'var(--mono-font)',
-                  }}
-                >
-                  {p.name}
+        {sidebarClusters.length === 0 ? (
+          <div style={{ fontSize: 11, color: 'var(--fg-mute)', padding: '4px 2px' }}>
+            No face clusters yet. Import photos to populate.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 4 }}>
+            {sidebarClusters.map((c) => {
+              const hue = (c.id * 47) % 360;
+              const label = c.name?.trim() || `#${c.id}`;
+              return (
+                <div key={c.id} title={`${label} · ${c.faceCount}`} style={{ textAlign: 'center' }}>
+                  <div
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: '50%',
+                      background: `oklch(0.5 0.15 ${hue})`,
+                      border: '1px solid var(--stroke)',
+                    }}
+                  />
+                  <div
+                    style={{
+                      fontSize: 9,
+                      color: 'var(--fg-mute)',
+                      marginTop: 2,
+                      fontFamily: 'var(--mono-font)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {label}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="section-label">

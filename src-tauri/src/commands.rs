@@ -1341,6 +1341,69 @@ pub async fn unseen_photos(
     Ok(rows)
 }
 
+/// Photos captured within 30 days of the first photo from a previously-unseen
+/// camera make+model. Surfaces "this is the era you first got your A7 IV" moments
+/// on the Catalog home. Ordered by camera-introduction recency then capture date.
+#[tauri::command]
+pub async fn first_time_on_new_camera(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(20).clamp(1, 200);
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "WITH first_seen AS ( \
+           SELECT camera_make, camera_model, MIN(captured_at) AS first_at \
+           FROM photos \
+           WHERE camera_make IS NOT NULL AND camera_make != '' AND captured_at IS NOT NULL \
+           GROUP BY camera_make, camera_model \
+         ) \
+         SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
+           p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
+           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+         FROM photos p \
+         JOIN first_seen fs \
+           ON fs.camera_make = p.camera_make \
+          AND COALESCE(fs.camera_model, '') = COALESCE(p.camera_model, '') \
+         WHERE p.captured_at IS NOT NULL \
+           AND julianday(p.captured_at) - julianday(fs.first_at) <= 30.0 \
+         ORDER BY fs.first_at DESC, p.captured_at ASC \
+         LIMIT ?1",
+    )
+    .bind(lim)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// High-aesthetic photos the user has never surfaced — NIMA ≥ 8.0 AND never viewed.
+/// Used for the "unflagged favorites" rediscovery row.
+#[tauri::command]
+pub async fn unflagged_favorites(
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+    min_score: Option<f64>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(20).clamp(1, 200);
+    let score = min_score.unwrap_or(8.0);
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
+         p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+         FROM photos p \
+         LEFT JOIN photo_views pv ON pv.photo_id = p.id \
+         WHERE p.aesthetic_score IS NOT NULL \
+           AND p.aesthetic_score >= ?1 \
+           AND (pv.photo_id IS NULL OR pv.view_count = 0 OR pv.last_viewed_at IS NULL) \
+         ORDER BY p.aesthetic_score DESC \
+         LIMIT ?2",
+    )
+    .bind(score)
+    .bind(lim)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
 // ── Face-cluster commands ─────────────────────────────────────────────────────
 
 /// List face clusters ordered by `face_count` desc, up to `limit` rows.
@@ -1665,6 +1728,287 @@ pub async fn search_photos(
     photos.sort_by_key(|p| order.get(&p.id).copied().unwrap_or(usize::MAX));
 
     Ok(photos)
+}
+
+/// Row shape for the AI-tags panel in the photo detail inspector.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TagRow {
+    pub id: i64,
+    pub label: String,
+    pub kind: String,
+    pub confidence: f64,
+}
+
+/// All tags attached to a photo, ordered by confidence (most-confident first).
+/// Covers AI-assigned (people/place/object/event/color/camera/auto_scene) and
+/// user-assigned (`kind = 'user'`) tags.
+#[tauri::command]
+pub async fn list_tags(photo_id: i64, state: State<'_, AppState>) -> AppResult<Vec<TagRow>> {
+    let rows = sqlx::query_as::<_, TagRow>(
+        "SELECT id, label, kind, confidence FROM tags \
+         WHERE photo_id = ?1 ORDER BY confidence DESC, id ASC",
+    )
+    .bind(photo_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Photos in which at least one face belongs to the given cluster.
+///
+/// Used by the PeopleScreen drill-down. Ordered by best face quality within
+/// this cluster (most-confident face first) so the user sees the strongest
+/// matches at the top.
+#[tauri::command]
+pub async fn list_photos_for_cluster(
+    cluster_id: i64,
+    limit: Option<i64>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PhotoRow>> {
+    let lim = limit.unwrap_or(200).clamp(1, 1000);
+    let rows = sqlx::query_as::<_, PhotoRow>(
+        "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
+         p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
+         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+         FROM photos p \
+         JOIN ( \
+            SELECT photo_id, MAX(quality) AS top_quality \
+            FROM faces WHERE cluster_id = ?1 \
+            GROUP BY photo_id \
+         ) f ON f.photo_id = p.id \
+         ORDER BY f.top_quality DESC, p.imported_at DESC \
+         LIMIT ?2",
+    )
+    .bind(cluster_id)
+    .bind(lim)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// GPS coordinates for a photo, if the import pipeline extracted them from EXIF.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PhotoLocation {
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
+}
+
+#[tauri::command]
+pub async fn photo_location(photo_id: i64, state: State<'_, AppState>) -> AppResult<PhotoLocation> {
+    let (lat, lng): (Option<f64>, Option<f64>) =
+        sqlx::query_as("SELECT gps_lat, gps_lng FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
+    Ok(PhotoLocation { lat, lng })
+}
+
+/// Aggregate quality metrics for a single photo used by the detail inspector.
+///
+/// Sources:
+/// - `sharpness_score` + `aesthetic_score` from the `photos` row.
+/// - Face-level metrics (best face quality, min eyes-open across faces, face
+///   count) aggregated from the `faces` table.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PhotoQuality {
+    pub aesthetic: Option<f64>,
+    pub sharpness: Option<f64>,
+    pub face_count: i64,
+    /// Max quality score across faces (0–1). None when no faces.
+    pub best_face_quality: Option<f64>,
+    /// Min eyes-open probability across faces (0–1). None when no face has the signal.
+    pub min_eyes_open: Option<f64>,
+}
+
+#[tauri::command]
+pub async fn photo_quality(photo_id: i64, state: State<'_, AppState>) -> AppResult<PhotoQuality> {
+    let (aesthetic, sharpness): (Option<f64>, Option<f64>) =
+        sqlx::query_as("SELECT aesthetic_score, sharpness_score FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
+
+    let (face_count, best_face_quality, min_eyes_open): (i64, Option<f64>, Option<f64>) =
+        sqlx::query_as(
+            "SELECT COUNT(*), MAX(quality), MIN(eyes_open) FROM faces WHERE photo_id = ?1",
+        )
+        .bind(photo_id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    Ok(PhotoQuality {
+        aesthetic,
+        sharpness,
+        face_count,
+        best_face_quality: if face_count > 0 {
+            best_face_quality
+        } else {
+            None
+        },
+        min_eyes_open: if face_count > 0 { min_eyes_open } else { None },
+    })
+}
+
+/// JPEG-encoded thumbnail bytes for a photo, resized to `size_px` longest edge.
+///
+/// Caches to `{app_data}/cache/thumbnails/{sha256}_{size}.jpg` so subsequent
+/// calls are free. RAW photos resolve to their paired JPG when available; if
+/// no JPG pair exists, returns `NotFound` (frontend falls back to
+/// placeholder). Missing source files also return `NotFound`.
+///
+/// Default `size_px` is 320 (covers Catalog grid tiles at all zoom levels on
+/// typical screens).
+#[tauri::command]
+pub async fn get_thumbnail(
+    photo_id: i64,
+    size_px: Option<u32>,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<u8>> {
+    generate_thumbnail_bytes(photo_id, size_px, &state.pool).await
+}
+
+async fn generate_thumbnail_bytes(
+    photo_id: i64,
+    size_px: Option<u32>,
+    pool: &sqlx::SqlitePool,
+) -> AppResult<Vec<u8>> {
+    let size = size_px.unwrap_or(320).clamp(64, 2048);
+
+    // Load photo row with pairing info.
+    let (sha256, is_raw, paired_photo_id): (String, bool, Option<i64>) =
+        sqlx::query_as("SELECT sha256, is_raw, paired_photo_id FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
+
+    // Fast-cache hit.
+    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
+    let cache_path = thumbs_dir.join(format!("{sha256}_{size}.jpg"));
+    if let Ok(bytes) = std::fs::read(&cache_path) {
+        return Ok(bytes);
+    }
+
+    // Resolve the source photo to read: a RAW photo prefers its paired JPG;
+    // non-RAW uses its own primary local copy.
+    let source_photo_id = match (is_raw, paired_photo_id) {
+        (true, Some(pid)) => pid,
+        _ => photo_id,
+    };
+
+    let source_path: Option<String> = sqlx::query_scalar(
+        "SELECT path FROM source_copies \
+         WHERE photo_id = ?1 AND path IS NOT NULL \
+         ORDER BY is_primary DESC, id ASC LIMIT 1",
+    )
+    .bind(source_photo_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let path = source_path.ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.exists() {
+        return Err(AppError::NotFound(format!("photo {photo_id}")));
+    }
+
+    let bytes = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
+        let img = image::open(&path_buf)
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let resized = img.thumbnail(size, size);
+        let mut buf = Vec::with_capacity(64 * 1024);
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        resized
+            .write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        Ok(buf)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("thumbnail task join: {e}")))??;
+
+    // Best-effort cache write — a failure here (e.g. disk full) must not block
+    // the response path.
+    if let Err(e) = std::fs::write(&cache_path, &bytes) {
+        tracing::warn!(error = %e, cache_path = %cache_path.display(), "thumbnail cache write failed");
+    }
+
+    Ok(bytes)
+}
+
+/// Natural-language search suggestion chips for the catalog search bar.
+///
+/// Blends curated seed prompts with dynamic hints derived from the user's
+/// catalog (top named face clusters, top camera make/model). Returns at most
+/// 8 unique strings. Never errors — on DB failure the curated seeds alone
+/// are returned.
+#[tauri::command]
+pub async fn search_suggestions(state: State<'_, AppState>) -> AppResult<Vec<String>> {
+    Ok(build_search_suggestions(&state.pool).await)
+}
+
+async fn build_search_suggestions(pool: &sqlx::SqlitePool) -> Vec<String> {
+    let curated: &[&str] = &[
+        "golden hour portraits",
+        "sunset over water",
+        "laughing at a dinner table",
+        "a dog running on sand",
+        "snow-capped mountains",
+        "street at night, neon signs",
+        "handwritten notes on paper",
+        "a crowded city square",
+    ];
+
+    let mut out: Vec<String> = Vec::with_capacity(8);
+
+    // Dynamic hint 1: top 2 named face clusters → "Photos of {name}"
+    let cluster_names: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM clusters \
+         WHERE is_named = 1 AND name IS NOT NULL AND name != '' \
+         ORDER BY COALESCE((SELECT COUNT(*) FROM faces WHERE cluster_id = clusters.id), 0) DESC \
+         LIMIT 2",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for n in cluster_names {
+        out.push(format!("Photos of {n}"));
+    }
+
+    // Dynamic hint 2: top camera make/model.
+    if let Ok(Some((make, model))) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT camera_make, camera_model FROM photos \
+         WHERE camera_make IS NOT NULL AND camera_make != '' \
+         GROUP BY camera_make, camera_model \
+         ORDER BY COUNT(*) DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        let label = match (make, model) {
+            (Some(m), Some(md)) if !md.is_empty() => format!("{m} {md}"),
+            (Some(m), _) => m,
+            _ => String::new(),
+        };
+        if !label.is_empty() {
+            out.push(format!("{label} shots"));
+        }
+    }
+
+    for s in curated {
+        if out.len() >= 8 {
+            break;
+        }
+        let candidate = (*s).to_string();
+        if !out
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&candidate))
+        {
+            out.push(candidate);
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -3170,5 +3514,208 @@ mod tests {
             !known_kinds.contains(&bogus),
             "bogus kind must not match any valid arm"
         );
+    }
+
+    // ── list_tags unit tests ──────────────────────────────────────────────────
+
+    async fn fetch_tags(pool: &sqlx::SqlitePool, photo_id: i64) -> Vec<TagRow> {
+        sqlx::query_as::<_, TagRow>(
+            "SELECT id, label, kind, confidence FROM tags \
+             WHERE photo_id = ?1 ORDER BY confidence DESC, id ASC",
+        )
+        .bind(photo_id)
+        .fetch_all(pool)
+        .await
+        .expect("fetch tags")
+    }
+
+    #[tokio::test]
+    async fn list_tags_returns_empty_when_no_tags() {
+        let pool = test_pool().await;
+        let rows = fetch_tags(&pool, 42).await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tags_orders_by_confidence_descending() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, size_bytes, is_raw, imported_at) \
+             VALUES ('t1', 'p.jpg', 10, 10, 1, 0, ?1)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert photo");
+
+        for (label, kind, conf) in [
+            ("beach", "auto_scene", 0.95),
+            ("sunset", "auto_scene", 0.88),
+            ("Ari", "people", 0.6),
+        ] {
+            sqlx::query(
+                "INSERT INTO tags (photo_id, label, kind, confidence, created_at) \
+                 VALUES (1, ?1, ?2, ?3, ?4)",
+            )
+            .bind(label)
+            .bind(kind)
+            .bind(conf)
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("insert tag");
+        }
+
+        let rows = fetch_tags(&pool, 1).await;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].label, "beach");
+        assert!(rows[0].confidence > rows[1].confidence);
+        assert!(rows[1].confidence > rows[2].confidence);
+    }
+
+    // ── get_thumbnail unit tests ──────────────────────────────────────────────
+
+    /// Build a 64×64 JPEG on disk, seed one photo row pointing at it,
+    /// and return (pool, tmp-dir guard, photo_id, jpeg_path).
+    async fn seed_photo_with_local_jpeg(
+        tmp: &tempfile::TempDir,
+    ) -> (sqlx::SqlitePool, i64, PathBuf) {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let jpg_path = tmp.path().join("photo.jpg");
+        let img = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(
+            64,
+            64,
+            image::Rgb([180u8, 60u8, 40u8]),
+        ));
+        img.save_with_format(&jpg_path, image::ImageFormat::Jpeg)
+            .expect("write jpeg");
+
+        let source_id: i64 = sqlx::query_scalar(
+            "INSERT INTO sources (name, kind, status, config_json, created_at) \
+             VALUES ('test', 'local', 'idle', '{}', ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert source");
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, size_bytes, is_raw, imported_at) \
+             VALUES ('deadbeef', 'photo.jpg', 64, 64, 1024, 0, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert photo");
+
+        sqlx::query(
+            "INSERT INTO source_copies \
+             (source_id, photo_id, path, verified_sha256, is_primary, last_seen_at) \
+             VALUES (?1, ?2, ?3, 'deadbeef', 1, ?4)",
+        )
+        .bind(source_id)
+        .bind(photo_id)
+        .bind(jpg_path.to_str().unwrap())
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert source_copy");
+
+        (pool, photo_id, jpg_path)
+    }
+
+    #[tokio::test]
+    async fn get_thumbnail_missing_photo_returns_not_found() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // Point cache at tempdir so we don't pollute the real data dir.
+        std::env::set_var("CHRONIMAGE_THUMBNAILS_DIR", tmp.path());
+        let pool = test_pool().await;
+        let err = generate_thumbnail_bytes(999, Some(128), &pool)
+            .await
+            .expect_err("should fail");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected NotFound for unknown photo, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_thumbnail_returns_jpeg_bytes_and_caches() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cache_dir = tmp.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::env::set_var("CHRONIMAGE_THUMBNAILS_DIR", &cache_dir);
+        let (pool, photo_id, _jpg_path) = seed_photo_with_local_jpeg(&tmp).await;
+
+        let bytes = generate_thumbnail_bytes(photo_id, Some(128), &pool)
+            .await
+            .expect("thumbnail");
+        // JPEG magic bytes.
+        assert_eq!(&bytes[..3], &[0xff, 0xd8, 0xff]);
+
+        // Cache hit round-trip.
+        let cached = std::fs::read(cache_dir.join("deadbeef_128.jpg")).expect("cache file written");
+        assert_eq!(cached, bytes, "cached bytes must match returned bytes");
+    }
+
+    // ── search_suggestions unit tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_suggestions_empty_db_returns_curated_seeds() {
+        let pool = test_pool().await;
+        let out = build_search_suggestions(&pool).await;
+        assert_eq!(
+            out.len(),
+            8,
+            "should emit 8 curated seeds when catalog is empty"
+        );
+        assert!(out.contains(&"golden hour portraits".to_string()));
+        assert!(out.iter().all(|s| !s.starts_with("Photos of ")));
+    }
+
+    #[tokio::test]
+    async fn search_suggestions_blends_named_cluster_and_camera() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Seed a named cluster.
+        sqlx::query(
+            "INSERT INTO clusters (name, is_named, cover_face_id, created_at, updated_at) \
+             VALUES ('Ari', 1, NULL, ?1, ?1)",
+        )
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert cluster");
+
+        // Seed 2 photos for Sony A7 IV so it wins the top-camera group-by.
+        for i in 0..2 {
+            sqlx::query(
+                "INSERT INTO photos (sha256, filename, width, height, size_bytes, is_raw, imported_at, camera_make, camera_model) \
+                 VALUES (?1, ?2, 6000, 4000, 1024, 0, ?3, 'Sony', 'ILCE-7M4')",
+            )
+            .bind(format!("sha-{i}"))
+            .bind(format!("IMG_{i:04}.jpg"))
+            .bind(&now)
+            .execute(&pool)
+            .await
+            .expect("insert photo");
+        }
+
+        let out = build_search_suggestions(&pool).await;
+        assert!(out.len() <= 8, "cap at 8 suggestions");
+        assert!(
+            out.iter().any(|s| s == "Photos of Ari"),
+            "named cluster hint missing, got {out:?}"
+        );
+        assert!(
+            out.iter().any(|s| s == "Sony ILCE-7M4 shots"),
+            "camera hint missing, got {out:?}"
+        );
+        // Curated seeds should still fill remaining slots up to 8.
+        assert!(out.contains(&"golden hour portraits".to_string()));
     }
 }

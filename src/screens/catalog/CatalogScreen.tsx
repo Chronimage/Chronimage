@@ -2,17 +2,23 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
-import { Placeholder } from '../../primitives/Placeholder';
-import { SEARCH_SUGGESTIONS } from '../../state/fixtures';
+import { Thumbnail } from '../../primitives/Thumbnail';
 import {
   useAlbums,
+  useFirstTimeOnNewCamera,
   useOnThisDay,
+  usePhotoLocation,
+  usePhotoQuality,
   usePhotos,
   useRecordPhotoView,
   useSearchPhotos,
+  useSearchSuggestions,
+  useTags,
+  useUnflaggedFavorites,
   useUnseenPhotos,
 } from '../../state/queries';
 import type { PhotoRow } from '../../tauri/invoke';
+import { DuplicatesPanel } from './DuplicatesPanel';
 
 export interface CatalogScreenProps {
   albumId: string;
@@ -46,9 +52,21 @@ interface VirtualGridProps {
   onToggle: (id: number) => void;
   onFocus: (globalIndex: number) => void;
   scrollRef: React.RefObject<HTMLDivElement | null>;
+  onEndReached?: () => void;
+  hasMore?: boolean;
+  isFetchingMore?: boolean;
 }
 
-function VirtualGrid({ photos, selected, onToggle, onFocus, scrollRef }: VirtualGridProps) {
+function VirtualGrid({
+  photos,
+  selected,
+  onToggle,
+  onFocus,
+  scrollRef,
+  onEndReached,
+  hasMore,
+  isFetchingMore,
+}: VirtualGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
   const cols = useColumnCount(gridRef);
 
@@ -66,6 +84,17 @@ function VirtualGrid({ photos, selected, onToggle, onFocus, scrollRef }: Virtual
     estimateSize: () => ROW_HEIGHT,
     overscan: 3,
   });
+
+  // Trigger next-page fetch when the last virtualized row is within 5 rows of the end.
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const lastVisibleIndex = virtualItems.length > 0 ? (virtualItems[virtualItems.length - 1]?.index ?? 0) : 0;
+  useEffect(() => {
+    if (!onEndReached || !hasMore || isFetchingMore) return;
+    if (rows.length === 0) return;
+    if (lastVisibleIndex >= rows.length - 5) {
+      onEndReached();
+    }
+  }, [lastVisibleIndex, rows.length, onEndReached, hasMore, isFetchingMore]);
 
   return (
     <div ref={gridRef} style={{ position: 'relative', height: rowVirtualizer.getTotalSize() }}>
@@ -100,7 +129,8 @@ function VirtualGrid({ photos, selected, onToggle, onFocus, scrollRef }: Virtual
                   aria-pressed={selected.has(p.id)}
                   aria-label={`Select ${p.filename}`}
                 >
-                  <Placeholder
+                  <Thumbnail
+                    photoId={p.id}
                     photo={{ hue, filename: p.filename, id: String(p.id) }}
                     selected={selected.has(p.id)}
                     subtle
@@ -112,6 +142,311 @@ function VirtualGrid({ photos, selected, onToggle, onFocus, scrollRef }: Virtual
         );
       })}
     </div>
+  );
+}
+
+// ── Detail inspector ──────────────────────────────────────────────────────────
+
+const TAG_KIND_LABEL: Record<string, string> = {
+  people: 'People',
+  place: 'Places',
+  object: 'Objects',
+  event: 'Events',
+  color: 'Colors',
+  camera: 'Camera',
+  auto_scene: 'Scene',
+  user: 'User',
+};
+
+const TAG_KIND_ORDER = ['people', 'place', 'object', 'event', 'auto_scene', 'color', 'camera', 'user'];
+
+interface DetailInspectorProps {
+  photo: PhotoRow;
+  metaParts: string;
+  exifParts: string;
+}
+
+interface QualityBarProps {
+  label: string;
+  value: number | null | undefined;
+  /** When the score is "higher is better" and below this threshold, tint red. */
+  warnBelow?: number;
+}
+
+function QualityBar({ label, value, warnBelow }: QualityBarProps) {
+  const pct = typeof value === 'number' ? Math.round(Math.min(1, Math.max(0, value)) * 100) : null;
+  const bad = typeof value === 'number' && typeof warnBelow === 'number' && value < warnBelow;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+      <span style={{ fontSize: 11.5, color: 'var(--fg-dim)', width: 120 }}>{label}</span>
+      <div
+        style={{
+          flex: 1,
+          height: 'var(--space-1)',
+          background: 'var(--bg-elev)',
+          borderRadius: 'var(--radius-sm)',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            width: `${pct ?? 0}%`,
+            height: '100%',
+            background: bad ? 'var(--warn, #c97)' : 'var(--accent)',
+          }}
+        />
+      </div>
+      <span
+        className="mono"
+        style={{ fontSize: 11, color: 'var(--fg-mute)', minWidth: 42, textAlign: 'right' }}
+      >
+        {pct === null ? '—' : `${pct}%`}
+      </span>
+    </div>
+  );
+}
+
+function DetailInspector({ photo, metaParts, exifParts }: DetailInspectorProps) {
+  const { data: tags = [], isLoading: tagsLoading } = useTags(photo.id);
+  const { data: quality } = usePhotoQuality(photo.id);
+  const { data: location } = usePhotoLocation(photo.id);
+
+  // Group tags by kind, preserving confidence ordering inside each group.
+  const tagsByKind = useMemo(() => {
+    const groups = new Map<string, typeof tags>();
+    for (const t of tags) {
+      const bucket = groups.get(t.kind) ?? [];
+      bucket.push(t);
+      groups.set(t.kind, bucket);
+    }
+    return groups;
+  }, [tags]);
+
+  const tagKinds = TAG_KIND_ORDER.filter((k) => tagsByKind.has(k));
+
+  return (
+    <div
+      style={{
+        padding: '0 var(--space-6) var(--space-4)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 'var(--space-5)',
+      }}
+    >
+      {/* AI TAGS */}
+      <section>
+        <div
+          className="mono"
+          style={{
+            fontSize: 10.5,
+            color: 'var(--fg-mute)',
+            marginBottom: 'var(--space-2)',
+            letterSpacing: '0.08em',
+          }}
+        >
+          AI TAGS
+        </div>
+        {tagsLoading && <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>Loading tags…</div>}
+        {!tagsLoading && tags.length === 0 && (
+          <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>
+            No tags yet. Auto-tagging runs as part of import (SigLIP + face clustering).
+          </div>
+        )}
+        {!tagsLoading && tags.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            {tagKinds.map((kind) => {
+              const kindTags = tagsByKind.get(kind) ?? [];
+              return (
+                <div key={kind}>
+                  <div
+                    className="mono"
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--fg-dim)',
+                      marginBottom: 'var(--space-1)',
+                      letterSpacing: '0.05em',
+                    }}
+                  >
+                    {TAG_KIND_LABEL[kind] ?? kind.toUpperCase()}
+                  </div>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                    {kindTags.map((t) => {
+                      const pct = Math.round(t.confidence * 100);
+                      return (
+                        <span
+                          key={t.id}
+                          title={`${t.kind} · ${pct}% confidence`}
+                          style={{ display: 'inline-flex' }}
+                        >
+                          <Chip tone={t.confidence >= 0.85 ? 'info' : undefined}>
+                            {t.label}
+                            <span style={{ opacity: 0.55, marginLeft: 'var(--space-2)', fontSize: 10 }}>
+                              {pct}%
+                            </span>
+                          </Chip>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* QUALITY */}
+      <section>
+        <div
+          className="mono"
+          style={{
+            fontSize: 10.5,
+            color: 'var(--fg-mute)',
+            marginBottom: 'var(--space-2)',
+            letterSpacing: '0.08em',
+          }}
+        >
+          QUALITY
+        </div>
+        {!quality && (
+          <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>Quality scores unavailable yet.</div>
+        )}
+        {quality && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <QualityBar label="Aesthetic" value={quality.aesthetic != null ? quality.aesthetic / 10 : null} />
+            <QualityBar label="Sharpness" value={quality.sharpness} warnBelow={0.3} />
+            {quality.face_count > 0 && (
+              <>
+                <QualityBar label="Face clarity" value={quality.best_face_quality} warnBelow={0.5} />
+                <QualityBar label="Eyes open" value={quality.min_eyes_open} warnBelow={0.4} />
+                <div
+                  className="mono"
+                  style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 'var(--space-1)' }}
+                >
+                  {quality.face_count} {quality.face_count === 1 ? 'face' : 'faces'} detected
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* EXIF */}
+      <section>
+        <div
+          className="mono"
+          style={{
+            fontSize: 10.5,
+            color: 'var(--fg-mute)',
+            marginBottom: 'var(--space-2)',
+            letterSpacing: '0.08em',
+          }}
+        >
+          EXIF
+        </div>
+        <div className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)', lineHeight: 1.6 }}>
+          <div>File · {metaParts || '—'}</div>
+          <div>Camera · {exifParts || '—'}</div>
+          <div>Captured · {photo.captured_at ? new Date(photo.captured_at).toLocaleString() : 'Unknown'}</div>
+        </div>
+      </section>
+
+      {/* LOCATION */}
+      <LocationSection lat={location?.lat ?? null} lng={location?.lng ?? null} />
+    </div>
+  );
+}
+
+interface LocationSectionProps {
+  lat: number | null;
+  lng: number | null;
+}
+
+function LocationSection({ lat, lng }: LocationSectionProps) {
+  const hasCoords = typeof lat === 'number' && typeof lng === 'number';
+  const osmUrl = hasCoords
+    ? `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=14/${lat}/${lng}`
+    : null;
+
+  // Deterministic 12×8 grid marker — avoids an external tile request while
+  // still giving the user a sense of "where on a globe" at a glance.
+  let markerX = 0;
+  let markerY = 0;
+  if (hasCoords && lat !== null && lng !== null) {
+    markerX = ((lng + 180) / 360) * 100;
+    markerY = ((90 - lat) / 180) * 100;
+  }
+
+  return (
+    <section>
+      <div
+        className="mono"
+        style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginBottom: 8, letterSpacing: '0.08em' }}
+      >
+        LOCATION
+      </div>
+      {!hasCoords && (
+        <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>No GPS data in this photo's EXIF.</div>
+      )}
+      {hasCoords && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+          <div
+            role="img"
+            aria-label={`Map marker at ${lat?.toFixed(4)}, ${lng?.toFixed(4)}`}
+            style={{
+              position: 'relative',
+              height: 120,
+              border: '1px solid var(--stroke)',
+              borderRadius: 'var(--radius-md)',
+              background:
+                'radial-gradient(circle at 50% 50%, color-mix(in oklch, var(--accent) 8%, var(--bg-elev)) 0%, var(--bg-elev) 70%)',
+              backgroundImage:
+                'linear-gradient(to right, color-mix(in oklch, var(--fg) 4%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in oklch, var(--fg) 4%, transparent) 1px, transparent 1px)',
+              backgroundSize: '8.33% 12.5%',
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                left: `${markerX}%`,
+                top: `${markerY}%`,
+                transform: 'translate(-50%, -100%)',
+                width: 10,
+                height: 10,
+                borderRadius: '50%',
+                background: 'var(--accent)',
+                boxShadow: '0 0 0 3px color-mix(in oklch, var(--accent) 30%, transparent)',
+              }}
+            />
+          </div>
+          <div
+            className="mono"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              fontSize: 11,
+              color: 'var(--fg-dim)',
+            }}
+          >
+            <span>
+              {lat?.toFixed(5)}, {lng?.toFixed(5)}
+            </span>
+            {osmUrl && (
+              <a
+                href={osmUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+                style={{ color: 'var(--accent)', textDecoration: 'none' }}
+              >
+                Open in OpenStreetMap →
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -186,7 +521,12 @@ function DetailView({
       <div className="detail-stage" style={{ overflowY: 'auto' }}>
         <div className="detail-hero">
           <div style={{ width: '100%', maxWidth: 1000, aspectRatio: '3/2', maxHeight: '100%' }}>
-            <Placeholder photo={{ hue, filename: photo.filename, id: String(photo.id) }} subtle={false} />
+            <Thumbnail
+              photoId={photo.id}
+              sizePx={1280}
+              photo={{ hue, filename: photo.filename, id: String(photo.id) }}
+              subtle={false}
+            />
           </div>
         </div>
         <div style={{ padding: '14px 24px 8px' }}>
@@ -199,10 +539,7 @@ function DetailView({
               {photo.captured_at ? new Date(photo.captured_at).toLocaleDateString() : 'Unknown date'}
             </span>
           </div>
-          <div className="mono" style={{ fontSize: 11, color: 'var(--fg-dim)', marginBottom: 8 }}>
-            {[metaParts, exifParts].filter(Boolean).join(' — ')}
-          </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
             {photo.is_raw && <Chip variant="solid">RAW</Chip>}
             {photo.aesthetic_score != null && (
               <Chip tone="info">aesthetic {photo.aesthetic_score.toFixed(1)}</Chip>
@@ -210,6 +547,7 @@ function DetailView({
             {photo.paired_photo_id != null && <Chip>paired</Chip>}
           </div>
         </div>
+        <DetailInspector photo={photo} metaParts={metaParts} exifParts={exifParts} />
         {/* Filmstrip */}
         <div
           style={{
@@ -244,7 +582,9 @@ function DetailView({
                 aria-label={ph.filename}
                 aria-current={isFocused ? 'true' : undefined}
               >
-                <Placeholder
+                <Thumbnail
+                  photoId={ph.id}
+                  sizePx={160}
                   photo={{ hue: phHue, filename: ph.filename, id: String(ph.id) }}
                   subtle={false}
                 />
@@ -295,7 +635,8 @@ function RediscoveryRow({ title, photos, selected, onToggle }: RediscoveryRowPro
               aria-pressed={selected.has(p.id)}
               aria-label={`Select ${p.filename}`}
             >
-              <Placeholder
+              <Thumbnail
+                photoId={p.id}
                 photo={{ hue, filename: p.filename, id: String(p.id) }}
                 selected={selected.has(p.id)}
                 subtle
@@ -312,15 +653,31 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const [showDuplicates, setShowDuplicates] = useState(false);
   const searching = query.trim().length > 0;
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const { data: albums = [] } = useAlbums();
   const numericAlbumId = albumId !== 'all' ? Number(albumId) : null;
-  const { data: photos = [] } = usePhotos({ limit: 500, albumId: numericAlbumId });
+  const {
+    data: photos = [],
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = usePhotos({ albumId: numericAlbumId });
+  const loadMorePhotos = useCallback(() => {
+    void fetchNextPage();
+  }, [fetchNextPage]);
+  let gridFooter: string;
+  if (isFetchingNextPage) gridFooter = 'Loading more…';
+  else if (hasNextPage) gridFooter = `${photos.length.toLocaleString()} loaded · scroll for more`;
+  else gridFooter = `${photos.length.toLocaleString()} · end of catalog`;
   const { data: onThisDayPhotos = [] } = useOnThisDay(20);
   const { data: unseenPhotosList = [] } = useUnseenPhotos(20);
+  const { data: newCameraPhotos = [] } = useFirstTimeOnNewCamera(20);
+  const { data: unflaggedFavPhotos = [] } = useUnflaggedFavorites(20, 8.0);
   const { data: searchResults, isFetching: searchFetching } = useSearchPhotos(query);
+  const { data: suggestions = [] } = useSearchSuggestions();
 
   const album = useMemo(() => {
     if (albumId === 'all') return null;
@@ -404,6 +761,14 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
         <button type="button" className="btn" aria-label="Stack view">
           <Icon name="layers" size={13} />
         </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => setShowDuplicates(true)}
+          title="Review duplicate and near-duplicate photos"
+        >
+          <Icon name="layers" size={13} /> Duplicates
+        </button>
         <div className="divider" />
         {selected.size > 0 && (
           <>
@@ -479,12 +844,27 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               selected={selected}
               onToggle={toggle}
             />
+            <RediscoveryRow
+              title="FIRST TIME ON A NEW CAMERA"
+              photos={newCameraPhotos}
+              selected={selected}
+              onToggle={toggle}
+            />
+            <RediscoveryRow
+              title="UNFLAGGED FAVORITES"
+              photos={unflaggedFavPhotos}
+              selected={selected}
+              onToggle={toggle}
+            />
             <VirtualGrid
               photos={photos}
               selected={selected}
               onToggle={toggle}
               onFocus={openDetail}
               scrollRef={scrollRef}
+              onEndReached={loadMorePhotos}
+              hasMore={hasNextPage}
+              isFetchingMore={isFetchingNextPage}
             />
             <div
               style={{
@@ -492,9 +872,13 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 color: 'var(--fg-mute)',
                 fontSize: 11,
                 fontFamily: 'var(--mono-font)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
               }}
             >
-              Click to select · double-click to open detail
+              <span>Click to select · double-click to open detail</span>
+              <span>{gridFooter}</span>
             </div>
           </>
         ) : (
@@ -520,7 +904,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               )}
             </div>
             <div style={{ padding: '6px 20px 0', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {SEARCH_SUGGESTIONS.slice(0, 5).map((s) => (
+              {suggestions.slice(0, 5).map((s) => (
                 <Chip key={s} onClick={() => setQuery(s)}>
                   {s}
                 </Chip>
@@ -537,7 +921,8 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                     onClick={() => toggle(i)}
                     aria-label={`Select ${p.filename}`}
                   >
-                    <Placeholder
+                    <Thumbnail
+                      photoId={p.id}
                       photo={{
                         id: String(p.id),
                         filename: p.filename,
@@ -565,6 +950,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
           </div>
         )}
       </div>
+      {showDuplicates && <DuplicatesPanel onClose={() => setShowDuplicates(false)} />}
     </div>
   );
 }

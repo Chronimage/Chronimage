@@ -18,6 +18,8 @@ import {
   faceClusterName,
   faceClustersList,
   findDuplicates,
+  firstTimeOnNewCamera,
+  getThumbnail,
   IMPORT_PROGRESS_EVENT,
   importGoogleTakeout,
   type LiftPlan,
@@ -29,14 +31,20 @@ import {
   listImports,
   listIphoneDevices,
   listPhotos,
+  listPhotosForCluster,
   listSources,
+  listTags,
   type ModelStatus,
   onThisDay,
   type PhotoRow,
+  photoLocation,
+  photoQuality,
   recordPhotoView,
   refreshSmartAlbums,
   searchPhotos,
+  searchSuggestions,
   startImport,
+  unflaggedFavorites,
   unseenPhotos,
 } from '../tauri/invoke';
 
@@ -52,10 +60,13 @@ export type {
   LiftReceipt,
   ModelSource,
   ModelStatus,
+  PhotoLocation,
+  PhotoQuality,
   PhotoRow,
   SourceCleanupItem,
   SourceRow,
   StartImportResponse,
+  TagRow,
   UsbDevice,
 } from '../tauri/invoke';
 export { IMPORT_PROGRESS_EVENT };
@@ -103,6 +114,20 @@ export function useUnseenPhotos(limit?: number, minScore?: number) {
   return useQuery({
     queryKey: ['unseen_photos', limit, minScore],
     queryFn: () => unseenPhotos(limit, minScore),
+  });
+}
+
+export function useFirstTimeOnNewCamera(limit?: number) {
+  return useQuery({
+    queryKey: ['first_time_on_new_camera', limit],
+    queryFn: () => firstTimeOnNewCamera(limit),
+  });
+}
+
+export function useUnflaggedFavorites(limit?: number, minScore?: number) {
+  return useQuery({
+    queryKey: ['unflagged_favorites', limit, minScore],
+    queryFn: () => unflaggedFavorites(limit, minScore),
   });
 }
 
@@ -216,6 +241,71 @@ export function useSearchPhotos(query: string) {
   });
 }
 
+export function useSearchSuggestions() {
+  return useQuery<string[], Error>({
+    queryKey: ['search_suggestions'],
+    queryFn: searchSuggestions,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Thumbnail for a single photo, returned as an object URL (revokes automatically
+ * when the consumer unmounts or the query is garbage-collected). Returns
+ * `undefined` on error so the caller can fall back to a placeholder.
+ */
+/** GPS coordinates for the detail-inspector Location section. */
+export function usePhotoLocation(photoId: number | null | undefined) {
+  return useQuery<import('../tauri/invoke').PhotoLocation | null, Error>({
+    queryKey: ['photo_location', photoId],
+    enabled: typeof photoId === 'number',
+    queryFn: () => (typeof photoId === 'number' ? photoLocation(photoId) : Promise.resolve(null)),
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** Aggregate quality metrics for the detail-inspector Quality section. */
+export function usePhotoQuality(photoId: number | null | undefined) {
+  return useQuery<import('../tauri/invoke').PhotoQuality | null, Error>({
+    queryKey: ['photo_quality', photoId],
+    enabled: typeof photoId === 'number',
+    queryFn: () => (typeof photoId === 'number' ? photoQuality(photoId) : Promise.resolve(null)),
+    staleTime: 60_000,
+  });
+}
+
+/** Tags attached to a photo — AI labels + user tags, sorted by confidence. */
+export function useTags(photoId: number | null | undefined) {
+  return useQuery<import('../tauri/invoke').TagRow[], Error>({
+    queryKey: ['tags', photoId],
+    enabled: typeof photoId === 'number',
+    queryFn: () => (typeof photoId === 'number' ? listTags(photoId) : Promise.resolve([])),
+    staleTime: 60_000,
+  });
+}
+
+export function useThumbnailUrl(photoId: number | null | undefined, sizePx = 320) {
+  return useQuery<string | undefined, Error>({
+    queryKey: ['thumbnail', photoId, sizePx],
+    enabled: typeof photoId === 'number',
+    queryFn: async () => {
+      if (typeof photoId !== 'number') return undefined;
+      try {
+        const bytes = await getThumbnail(photoId, sizePx);
+        // Copy into an owned ArrayBuffer so TS accepts it as a BlobPart
+        // (the Tauri bridge may return a Uint8Array over a SharedArrayBuffer).
+        const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        const blob = new Blob([buf as ArrayBuffer], { type: 'image/jpeg' });
+        return URL.createObjectURL(blob);
+      } catch {
+        return undefined;
+      }
+    },
+    staleTime: 60 * 60_000,
+    gcTime: 30 * 60_000,
+  });
+}
+
 // ── Cleanup ────────────────────────────────────────────────────────────────
 
 export function useCleanupDryRun() {
@@ -257,6 +347,17 @@ export function useLiftShiftExecute() {
 }
 
 // ── Face clusters ─────────────────────────────────────────────────────────────
+
+/** Photos in which at least one face belongs to the given cluster. */
+export function usePhotosForCluster(clusterId: number | null, limit = 200) {
+  return useQuery<PhotoRow[], Error>({
+    queryKey: ['photos_for_cluster', clusterId, limit],
+    enabled: typeof clusterId === 'number',
+    queryFn: () =>
+      typeof clusterId === 'number' ? listPhotosForCluster(clusterId, limit) : Promise.resolve([]),
+    staleTime: 60_000,
+  });
+}
 
 export function useFaceClusters(limit = 60) {
   return useQuery<ClusterRow[], Error>({

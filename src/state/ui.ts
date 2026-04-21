@@ -32,6 +32,10 @@ export interface Tweaks {
   sharpnessCutoff: number;
   requireReview: boolean;
   nightlyReindex: boolean;
+  /** Absolute path to thumbnail / derivative cache. `null` = backend default (under catalog root). */
+  cachePath: string | null;
+  /** Release channel the user opts into for auto-updates. */
+  preferredChannel: 'stable' | 'beta' | 'nightly' | 'insider';
 }
 
 export const DEFAULT_TWEAKS: Tweaks = {
@@ -47,6 +51,8 @@ export const DEFAULT_TWEAKS: Tweaks = {
   sharpnessCutoff: 32,
   requireReview: true,
   nightlyReindex: true,
+  cachePath: null,
+  preferredChannel: 'stable',
 };
 
 const TWEAKS_STORE_KEY = 'tweaks';

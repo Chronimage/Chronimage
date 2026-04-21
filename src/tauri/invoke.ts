@@ -169,6 +169,19 @@ export async function unseenPhotos(limit?: number, minScore?: number): Promise<P
   });
 }
 
+/** Photos captured within 30 days of the first photo from a previously-unseen camera. */
+export async function firstTimeOnNewCamera(limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('first_time_on_new_camera', { limit: limit ?? null });
+}
+
+/** NIMA-high photos never viewed by the user yet. */
+export async function unflaggedFavorites(limit?: number, minScore?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('unflagged_favorites', {
+    limit: limit ?? null,
+    minScore: minScore ?? null,
+  });
+}
+
 // ── Source connectors ───────────────────────────────────────────────────────
 
 /** Run the full import pipeline over a Google Photos Takeout export, then enrich with sidecar metadata. */
@@ -278,6 +291,79 @@ export async function findDuplicates(minSimilarity?: number): Promise<DuplicateG
  */
 export async function searchPhotos(query: string, limit?: number): Promise<PhotoRow[]> {
   return tauriInvoke<PhotoRow[]>('search_photos', { query, limit: limit ?? null });
+}
+
+/**
+ * Natural-language search suggestion chips for the catalog search bar.
+ *
+ * Blends 6–8 curated seeds with dynamic hints derived from the live catalog
+ * (top named face clusters, top camera make/model). Always ≤ 8 items.
+ */
+export async function searchSuggestions(): Promise<string[]> {
+  return tauriInvoke<string[]>('search_suggestions');
+}
+
+export interface TagRow {
+  id: number;
+  label: string;
+  kind: string;
+  confidence: number;
+}
+
+/**
+ * All tags attached to a photo, ordered by confidence (most-confident first).
+ * Covers AI-assigned (people/place/object/event/color/camera/auto_scene) and
+ * user-assigned (`kind === 'user'`) tags.
+ */
+export async function listTags(photoId: number): Promise<TagRow[]> {
+  return tauriInvoke<TagRow[]>('list_tags', { photoId });
+}
+
+export interface PhotoQuality {
+  aesthetic: number | null;
+  sharpness: number | null;
+  face_count: number;
+  best_face_quality: number | null;
+  min_eyes_open: number | null;
+}
+
+/** Aggregate quality metrics for the detail inspector Quality section. */
+export async function photoQuality(photoId: number): Promise<PhotoQuality> {
+  return tauriInvoke<PhotoQuality>('photo_quality', { photoId });
+}
+
+export interface PhotoLocation {
+  lat: number | null;
+  lng: number | null;
+}
+
+/** GPS coordinates for the detail inspector Location section. */
+export async function photoLocation(photoId: number): Promise<PhotoLocation> {
+  return tauriInvoke<PhotoLocation>('photo_location', { photoId });
+}
+
+/** Photos in which at least one face belongs to the given cluster — ordered by face quality. */
+export async function listPhotosForCluster(clusterId: number, limit?: number): Promise<PhotoRow[]> {
+  return tauriInvoke<PhotoRow[]>('list_photos_for_cluster', {
+    clusterId,
+    limit: limit ?? null,
+  });
+}
+
+/**
+ * JPEG-encoded thumbnail bytes for a photo, resized to `sizePx` longest edge.
+ *
+ * Backend caches the output at `{app_data}/cache/thumbnails/{sha256}_{size}.jpg`
+ * so subsequent calls are fast. Returns a Uint8Array suitable for wrapping in
+ * a Blob URL. Throws when the photo has no local copy or the source file is
+ * missing — the caller should fall back to a placeholder in that case.
+ */
+export async function getThumbnail(photoId: number, sizePx?: number): Promise<Uint8Array> {
+  const bytes = await tauriInvoke<number[]>('get_thumbnail', {
+    photoId,
+    sizePx: sizePx ?? null,
+  });
+  return new Uint8Array(bytes);
 }
 
 // ── Source-side cleanup ────────────────────────────────────────────────────
