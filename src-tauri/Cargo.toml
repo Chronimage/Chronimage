@@ -79,7 +79,7 @@ hex = "0.4"
 image_hasher = "2"
 
 # EXIF
-kamadak-exif = "0.5"
+kamadak-exif = "0.6"
 
 # Paths + misc
 dirs = "5"
