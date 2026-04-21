@@ -11,6 +11,7 @@
  * (see `docs/adr/0003-bundled-default-models.md`).
  */
 
+import { useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useRef, useState } from 'react';
@@ -983,6 +984,7 @@ function OnbPeople() {
 export function OnboardScreen() {
   const [stepIdx, setStepIdx] = useState<number>(0);
   const [catalogMode, setCatalogMode] = useState<CatalogMode>('consolidate');
+  const queryClient = useQueryClient();
 
   const { data: sources = [] } = useSources();
   const createSource = useCreateSource();
@@ -1064,27 +1066,25 @@ export function OnboardScreen() {
   }
 
   async function handleConnectGooglePhotos(): Promise<void> {
-    // Sign in via OAuth, then open the Photo Picker. The backend creates a
-    // `sources` row automatically on completed auth; we poll both the flow
-    // and the picker session inline so onboarding keeps momentum.
-    const {
-      gphotosBeginOauthFlow,
-      gphotosPollOauthFlow,
-      gphotosAuthStatus,
-      gphotosCreatePickerSession,
-      gphotosPollPickerSession,
-      gphotosDeletePickerSession,
-      importGooglePhotos,
-    } = await import('../tauri/invoke');
+    // Onboarding only owns the *connection*. The backend auto-creates a
+    // sources row once auth completes; we wait for it to land, then
+    // invalidate the useSources() query so the row appears in the list.
+    // Actually picking + importing photos happens from Settings (or later
+    // in Onboarding if we add a picker step) — not here. Opening the
+    // picker inline on Windows was surfacing a stray "mailto" dialog when
+    // the picker URL failed to resolve, and surprised the user anyway.
+    const { gphotosBeginOauthFlow, gphotosPollOauthFlow, gphotosAuthStatus, listSources } = await import(
+      '../tauri/invoke'
+    );
     const { open: openShell } = await import('@tauri-apps/plugin-shell');
 
     try {
-      // If already connected, jump straight to the picker.
+      // If already connected, the backend row exists; just make sure the
+      // UI sees it.
       let connected = await gphotosAuthStatus();
       if (!connected) {
         const { auth_url, flow_id } = await gphotosBeginOauthFlow();
         await openShell(auth_url);
-        // Poll until a terminal state or ~5 min.
         const startedAt = Date.now();
         while (Date.now() - startedAt < 305_000) {
           const status = await gphotosPollOauthFlow(flow_id);
@@ -1093,7 +1093,7 @@ export function OnboardScreen() {
             break;
           }
           if (status.state === 'failed' || status.state === 'timed_out') {
-            debug('gphotos onboard: auth', status);
+            debug('gphotos onboard: auth terminal', status);
             return;
           }
           await new Promise((r) => setTimeout(r, 1000));
@@ -1101,49 +1101,16 @@ export function OnboardScreen() {
         if (!connected) return;
       }
 
-      // Open the picker + poll for completion.
-      const picker = await gphotosCreatePickerSession();
-      await openShell(picker.pickerUri);
-      const pickStartedAt = Date.now();
-      let ready = false;
-      while (Date.now() - pickStartedAt < 600_000) {
-        const snap = await gphotosPollPickerSession(picker.id);
-        if (snap.mediaItemsSet) {
-          ready = true;
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 3000));
+      // The backend inserts the sources row in a spawned task; poll a
+      // short while until it appears, then invalidate the TanStack cache
+      // so the UI list updates.
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const refreshed = await listSources();
+        if (refreshed.some((s) => s.kind === 'google_photos')) break;
+        await new Promise((r) => setTimeout(r, 400));
       }
-      if (!ready) return;
-
-      // Find the auto-created google_photos source row and kick off import.
-      const { listSources } = await import('../tauri/invoke');
-      const refreshedSources = await listSources();
-      const row = refreshedSources.find((s) => s.kind === 'google_photos');
-      if (!row) {
-        debug('gphotos onboard: no source row found post-auth');
-        return;
-      }
-      const resp = await importGooglePhotos(row.id, picker.id);
-      setActiveImports((prev) => {
-        const next = new Map(prev);
-        next.set(resp.import_id, {
-          importId: resp.import_id,
-          sourceId: row.id,
-          sourceName: row.name,
-          total: 0,
-          done: 0,
-          currentFile: '',
-          etaSeconds: null,
-          finished: false,
-        });
-        return next;
-      });
-      try {
-        await gphotosDeletePickerSession(picker.id);
-      } catch (err) {
-        debug('gphotos onboard: delete picker session failed', err);
-      }
+      await queryClient.invalidateQueries({ queryKey: ['sources'] });
     } catch (err) {
       debug('gphotos onboard: connect flow failed', err);
     }
