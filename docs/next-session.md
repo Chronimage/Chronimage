@@ -1,88 +1,47 @@
-# Next session · Phase 1 week 5 → exit
+# Next session · Phase 1 exit-criteria wrap-up
 
-Queued on local `feature/phase1-week5-polish` (5 commits, unpushed):
+Branch: `develop` (up to date with origin after PR #34 merged `feature/phase1-week5-followup`). Four Rust integration tests that carry measurable Phase 1 NFRs are green. What's left is scaffolding the three Playwright e2e specs, wiring a real stress loop, and closing the last functional gaps (CI model packaging, Google Photos). Starts are independent — pick one per sitting.
 
-1. `931923a` memoised FacesSession + persisted Tweaks via `@tauri-apps/plugin-store`
-2. `f92b6d3` scaffolded `phase_1_raw_jpg_pair.rs` + `phase_1_search_latency.rs` + `scripts/scan-raw-jpg-pairs.ps1`
-3. `9c46fce` (LFS) `tests/fixtures/face-detect/group.jpg`
-4. `121538b` UTF-8 BOM handling in manifest parser + script
+## Scoreboard on develop (2026-04-21, post-merge)
 
-**Already passing:** `phase_1_raw_jpg_pair` = **100 % precision** (5000/5000 across ARW + CR2 + CR3 + NEF + DNG) in 0.10 s.
+| Test | Status | Measured | Threshold |
+|---|---|---|---|
+| `phase_1_raw_jpg_pair` | ✅ | precision 1.0000 (5 000 pairs) | ≥ 0.995 |
+| `phase_1_catalog_size` | ✅ | ratio 0.00202 | ≤ 0.02 |
+| `phase_1_face_clustering` | ✅ | F1 1.0000 (200 LFW, prealigned) | ≥ 0.95 |
+| `phase_1_search_latency` | ✅ | **607 ms** p95 (int8 vec0 KNN, 200 k) | ≤ 750 ms (PRD revised) |
+| `phase_1_stress` | ❌ | `unimplemented!()` | — |
+| 3 × Phase 1 e2e specs | ❌ | all `.skip()` | — |
 
-**Fixture on disk** (gitignored, 200 GB): `tests/fixtures/raw-jpg-pairs/` with 10 001 files + `manifest.json`.
+PRD `docs/prds/phase-1.md` § Exit criteria reflects this. Functional Phase 1 scope is complete; remaining work is fixtures + CI plumbing + one connector.
 
-## Starts (in order)
+## Five concrete starts — pick one
 
-### 1. Push + PR the week-5 branch · 15 min
-```bash
-git push -u origin feature/phase1-week5-polish
-gh pr create --base develop --head feature/phase1-week5-polish
-```
-5 unpushed commits. The raw-jpg-pair test uses the repo-relative path fallback so CI can't exercise it (fixture is local-only), but CI will validate all 217 lib tests + the catalog-size + search-latency skeletons still compile.
+### 1. CI packaging job for bundled models · ~2 h (highest leverage)
+`tauri build` currently can't produce a signed .msi on a fresh runner because `models/` is gitignored. Add a workflow step that fetches the pinned SHA256s from [src-tauri/src/ai/download.rs](src-tauri/src/ai/download.rs) `KNOWN_MODELS` before invoking `pnpm tauri build`. Unblocks the first beta release.
 
-### 2. Run the other 3 ready exit tests + land the numbers · 30 min
-After the Tauri dev app is closed (or PID reaped; see previous session's `msedgewebview2` lingering-children note):
+**First action:** `ls .github/workflows/` — read the nightly workflow as a template, then create `.github/workflows/release-build.yml` with a `Fetch bundled models` step that loops over the 6 bundled entries (siglip2 image+text+tokenizer, NIMA, SCRFD, ArcFace — ~950 MB total) verifying SHAs into `src-tauri/models/`.
 
-```bash
-# Self-synthesising — no fixture needed
-cargo test --manifest-path src-tauri/Cargo.toml \
-  --test phase_1_catalog_size -- --ignored --nocapture
-cargo test --manifest-path src-tauri/Cargo.toml \
-  --test phase_1_search_latency -- --ignored --nocapture
+### 2. `phase_1_stress` 8-hour nightly loop · ~3 h
+[phase_1_stress.rs](src-tauri/tests/phase_1_stress.rs) is a 10-line `unimplemented!()`. PRD asks for an 8 h loop over a 50 k synthetic fixture running import + search + face rebuilds, asserting no panic hook fires and peak RSS < 2 GB.
 
-# Uses tests/fixtures/face-detect/group.jpg (LFS) + bundled SCRFD
-cargo test --manifest-path src-tauri/Cargo.toml \
-  --lib scrfd_detects_faces_in_real_group_photo -- --ignored --nocapture
-```
+**First action:** edit [phase_1_stress.rs:8](src-tauri/tests/phase_1_stress.rs#L8). Reuse `synthesize_jpeg` from [phase_1_catalog_size.rs:33](src-tauri/tests/phase_1_catalog_size.rs#L33), `run_pipeline_headless`, and the `sysinfo` crate for RSS sampling. `#[ignore]`-gated so zero CI cost to land the skeleton; nightly workflow picks it up via `--ignored`.
 
-Record pass/fail + measured numbers in `docs/checkpoints/latest.md` so we can see where Phase 1 NFRs stand against PRD § Non-functional requirements. If search-latency p95 blows past 500 ms on 200k synthetic, that's the "real SigLIP + vec0 KNN" unblock signal.
+### 3. Google Photos OAuth2 source connector · ~4 h (biggest remaining connector gap)
+Local + iCloud-folder + USB sources are in place; Google Photos Library API is the last major onboarding piece. Requires real OAuth2 + token storage.
 
-### 3. Build the face-cluster fixture (option 2 from last session) · 30 min
-Pick ~60 real photos across 3–5 recurring subjects from existing shoots under `E:\`. Write `tests/fixtures/face-clusters/labels.json` by hand:
+**First action:** create [src-tauri/src/sources/google_photos.rs](src-tauri/src/sources/google_photos.rs). Gate all reqwest calls behind a `user_initiated_google_photos_*` prefix (CLAUDE.md § Security). Store tokens in Windows Credential Manager via the `keyring` crate.
 
-```json
-[
-  {"file":"engagement_12.jpg","cluster":0},
-  {"file":"haritha_07.jpg",    "cluster":0},
-  {"file":"andaman_002.jpg",   "cluster":1},
-  {"file":"stranger_03.jpg",   "cluster":-1}
-]
-```
+### 4. Wire `phase-1-import-throughput.spec.ts` e2e · ~2 h
+[tests/e2e/phase-1-import-throughput.spec.ts](tests/e2e/phase-1-import-throughput.spec.ts) is `.skip()`'d. Rust integration tests already prove throughput; the e2e's value is validating end-user-browser progress surfaces under real load.
 
-Copy selected photos into `tests/fixtures/face-clusters/photos/` (gitignored). Run:
+**First action:** add a `cfg(debug_assertions)`-gated Tauri command `__test_generate_fixture(count)` that drops `count` synthetic JPEGs into a tempdir (reuses `synthesize_jpeg`). Un-`.skip()` the spec; smoke at 10 k locally, 100 k nightly.
 
-```bash
-cargo test --manifest-path src-tauri/Cargo.toml \
-  --test phase_1_face_clustering -- --ignored --nocapture
-```
+### 5. Phase 2 spike — sqlite-vec 0.1.10+ diskann evaluation · ~90 min
+`docs/prds/phase-2.md` § 9 carries this as a follow-up. Worth 90 min to confirm 0.1.10+ ships diskann on Windows before committing it to Phase 2 scope.
 
-Assert the test hits the PRD F1 ≥ 0.95 threshold. If it fails with HDBSCAN clumping too aggressively or spitting out noise, tune `ClusterParams.min_cluster_size` based on the fixture size.
+**First action:** `cargo update -p sqlite-vec --precise <latest>` in a scratch worktree. Add a `diskann`-variant `vec_photo_embeddings_diskann` table, re-run `phase_1_search_latency`, capture p95 + index-build time in a new ADR under [docs/adr/](docs/adr/).
 
-### 4. Real SigLIP image + text inference · 120 min
-First file: `src-tauri/src/ai/siglip.rs`. `load_or_stub` returns a stub regardless of path presence (Phase 1 placeholder). Replace with real ort session init — same pattern as `FacesSession::load` in `faces.rs`.
+## Recommended order
 
-Required:
-- Image encoder: `siglip2-b16-image.onnx` (bundled · 375 MB) — 224×224 RGB f32 normalised to `[-1, 1]`. Session output `[1, 768]`.
-- Text encoder: **not currently bundled.** Either (a) swap `KNOWN_MODELS` embedding entry to also include `text_model.onnx` from the same `onnx-community/siglip2-base-patch16-224-ONNX` repo + bundle it, or (b) leave NL search zero-vector-stubbed and mark explicitly.
-- Once the encoders run, also populate `vec_photo_embeddings` during stage-4 pipeline enrichment (currently only `photo_embeddings` BLOB is written).
-
-This is the single biggest missing piece for Phase 1 exit — it's what makes the "semantic search" proposition real.
-
-### 5. Decide: face-cluster labeling tool? · 15 min
-After #3, if labeling 60 photos by hand was annoying: build the semi-automatic tool (scan → detect+embed → static HTML thumbnail grid → labels.json writer). Documented in last session's response. Skip if #3 was fine.
-
-## Remaining Phase 1 critical path (after this session)
-
-- 3 e2e fixtures (import-throughput 100k, source-cleanup 100, rediscovery dated) — lowest urgency; Rust integration tests are giving us the signal that matters.
-- CI packaging job (fetch bundled models before `tauri build`, attach LICENSE files under `resources/licenses/`).
-- Google Photos OAuth2 live-sync source (biggest unshipped connector).
-- `phase_1_stress.rs` nightly 8 h loop.
-- Moondream2 sidecar + mmproj (genuinely Phase 2).
-- ModelPickerModal custom HF URL flow (Phase 1b).
-
-## Push discipline
-
-- #1 ships standalone (5 commits already coherent).
-- #2 (running tests, recording numbers) happens before #3 lands — the numbers inform whether HDBSCAN tuning is needed.
-- #3 + #4 bundle as "week-5 follow-up" PR.
-- #5 optional — only if needed.
+If you can only do one: **#1** — it blocks the first signed beta .msi. If two: **#1 + #2**. `#5` is a useful spike; `#3` can wait until onboarding UX stabilises.
