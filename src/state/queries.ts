@@ -285,11 +285,11 @@ export function useTags(photoId: number | null | undefined) {
 }
 
 export function useThumbnailUrl(photoId: number | null | undefined, sizePx = 320) {
-  return useQuery<string | undefined, Error>({
+  return useQuery<string | null, Error>({
     queryKey: ['thumbnail', photoId, sizePx],
     enabled: typeof photoId === 'number',
     queryFn: async () => {
-      if (typeof photoId !== 'number') return undefined;
+      if (typeof photoId !== 'number') return null;
       try {
         const bytes = await getThumbnail(photoId, sizePx);
         // Copy into an owned ArrayBuffer so TS accepts it as a BlobPart
@@ -298,7 +298,7 @@ export function useThumbnailUrl(photoId: number | null | undefined, sizePx = 320
         const blob = new Blob([buf as ArrayBuffer], { type: 'image/jpeg' });
         return URL.createObjectURL(blob);
       } catch {
-        return undefined;
+        return null;
       }
     },
     staleTime: 60 * 60_000,

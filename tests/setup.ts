@@ -71,6 +71,8 @@ vi.mock('@tauri-apps/api/core', () => ({
         return [];
       case 'cleanup_dry_run':
         return [];
+      case 'cleanup_execute':
+        return { deleted_count: 0, freed_bytes: 0, errors: [] };
       case 'refresh_smart_albums':
         return undefined;
       case 'on_this_day':
