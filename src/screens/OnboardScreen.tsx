@@ -17,14 +17,18 @@ import { useEffect, useRef, useState } from 'react';
 import { Chip } from '../primitives/Chip';
 import { Icon } from '../primitives/Icon';
 import {
+  type CleanupExecuteResult,
   type CleanupPlan,
   IMPORT_PROGRESS_EVENT,
   type ImportProgressEvent,
   type LiftPlan,
   useCleanupDryRun,
+  useCleanupExecute,
   useCreateSource,
   useDeleteSource,
   useDetectIcloudPath,
+  useFaceClusterName,
+  useFaceClusters,
   useImportGoogleTakeout,
   useIphoneDevices,
   useLiftShiftDryRun,
@@ -106,6 +110,37 @@ interface CleanupSectionProps {
 }
 
 function CleanupSection({ plan }: CleanupSectionProps) {
+  const execute = useCleanupExecute();
+  const [confirming, setConfirming] = useState(false);
+  const [result, setResult] = useState<CleanupExecuteResult | null>(null);
+
+  const busy = execute.isPending;
+  const executed = result !== null;
+  const mutationErr = execute.error ? String(execute.error) : null;
+
+  function handlePrimary() {
+    if (executed) return;
+    if (!confirming) {
+      setConfirming(true);
+      return;
+    }
+    execute.mutate(
+      { planId: plan.plan_id, confirmToken: plan.confirm_token },
+      {
+        onSuccess: (data) => {
+          setResult(data);
+          setConfirming(false);
+        },
+      },
+    );
+  }
+
+  let primaryLabel: string;
+  if (busy) primaryLabel = 'Deleting…';
+  else if (executed) primaryLabel = 'Done';
+  else if (confirming) primaryLabel = `Yes — free ${fmtBytes(plan.total_reclaimable_bytes)}`;
+  else primaryLabel = `Free up ${fmtBytes(plan.total_reclaimable_bytes)}`;
+
   return (
     <div style={{ marginTop: 32 }}>
       <div
@@ -155,20 +190,97 @@ function CleanupSection({ plan }: CleanupSectionProps) {
             <span className="mono" style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>
               {fmtBytes(src.reclaimable_bytes)}
             </span>
-            <button
-              type="button"
-              className="btn2"
-              style={{ padding: '4px 10px', fontSize: 11 }}
-              disabled
-              title="Source cleanup executes in Phase 1b"
-            >
-              Clean up
-            </button>
           </div>
         ))}
       </div>
-      <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 8 }}>
-        Local copies verified by SHA256. Source files will not be deleted without a second confirmation.
+      {confirming && !executed && (
+        <div
+          style={{
+            marginTop: 'var(--space-3)',
+            padding: 'var(--space-3)',
+            border: '1px solid var(--warn)',
+            borderRadius: 'var(--radius-md)',
+            background: 'color-mix(in oklch, var(--warn) 8%, var(--bg-elev))',
+            fontSize: 12,
+            color: 'var(--fg)',
+          }}
+        >
+          <strong>This is the second confirmation.</strong> {plan.total_file_count.toLocaleString()} source
+          files across {plan.sources.length} {plan.sources.length === 1 ? 'source' : 'sources'} will be
+          deleted. Local copies remain; this only removes the originals from Google Photos, iCloud, iPhone
+          storage, etc. Continue?
+        </div>
+      )}
+      {executed && result && (
+        <div
+          style={{
+            marginTop: 'var(--space-3)',
+            padding: 'var(--space-3)',
+            border: '1px solid var(--accent)',
+            borderRadius: 'var(--radius-md)',
+            background: 'color-mix(in oklch, var(--accent) 8%, var(--bg-elev))',
+            fontSize: 12,
+            color: 'var(--fg)',
+          }}
+        >
+          Freed <strong>{fmtBytes(result.freed_bytes)}</strong> · deleted{' '}
+          {result.deleted_count.toLocaleString()} source {result.deleted_count === 1 ? 'file' : 'files'}
+          {result.errors.length > 0 && (
+            <span style={{ color: 'var(--warn)' }}>
+              {' '}
+              · {result.errors.length} {result.errors.length === 1 ? 'error' : 'errors'}
+            </span>
+          )}
+        </div>
+      )}
+      {mutationErr && !executed && (
+        <div
+          style={{
+            marginTop: 'var(--space-3)',
+            padding: 'var(--space-3)',
+            border: '1px solid var(--danger)',
+            borderRadius: 'var(--radius-md)',
+            background: 'color-mix(in oklch, var(--danger) 10%, var(--bg-elev))',
+            fontSize: 12,
+          }}
+        >
+          Cleanup failed: {mutationErr}
+        </div>
+      )}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginTop: 'var(--space-3)',
+          gap: 'var(--space-3)',
+        }}
+      >
+        <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)' }}>
+          Local copies verified by SHA256. Source files will not be deleted without a second confirmation.
+        </div>
+        <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          {confirming && !executed && (
+            <button
+              type="button"
+              className="btn2 ghost"
+              style={{ padding: '6px 12px', fontSize: 11 }}
+              onClick={() => setConfirming(false)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          )}
+          <button
+            type="button"
+            className={confirming && !executed ? 'solid btn2' : 'btn2'}
+            style={{ padding: '6px 12px', fontSize: 11 }}
+            onClick={handlePrimary}
+            disabled={busy || executed || plan.total_file_count === 0}
+          >
+            {primaryLabel}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -731,7 +843,7 @@ function OnbLiftPanel() {
       )}
 
       {plan && !plan.free_space_ok && (
-        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--warn, #b07a00)' }}>
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--warn)' }}>
           Target drive does not have 1.5× the plan size free. Pick a different drive.
         </div>
       )}
@@ -747,7 +859,7 @@ function OnbLiftPanel() {
           Copied {receipt.copied_count} files ({(receipt.bytes_copied / 1_073_741_824).toFixed(2)} GB).
           Manifest: <code>{receipt.manifest_path}</code>
           {receipt.errors.length > 0 && (
-            <span style={{ color: 'var(--warn, #b07a00)' }}> · {receipt.errors.length} warnings</span>
+            <span style={{ color: 'var(--warn)' }}> · {receipt.errors.length} warnings</span>
           )}
         </div>
       )}
@@ -757,89 +869,99 @@ function OnbLiftPanel() {
 
 // ── Step 5: People ────────────────────────────────────────────────────────────
 
-interface FaceCluster {
-  id: number;
-  ct: number;
-  /** Hue angles for placeholder face visuals */
-  hues: number[];
-}
-
-// TODO(cc): Replace stub data with a real usePeopleClusters() hook once the
-// face clustering pipeline (ArcFace + HDBSCAN) lands in Phase 1c.
-const STUB_CLUSTERS: FaceCluster[] = [
-  { id: 0, ct: 3240, hues: [210, 140, 300] },
-  { id: 1, ct: 1922, hues: [60, 180, 270] },
-  { id: 2, ct: 982, hues: [30, 90, 200] },
-  { id: 3, ct: 611, hues: [120, 240, 10] },
-  { id: 4, ct: 711, hues: [80, 160, 320] },
-  { id: 5, ct: 587, hues: [200, 40, 100] },
-  { id: 6, ct: 244, hues: [260, 330, 150] },
-  { id: 7, ct: 189, hues: [350, 70, 190] },
-];
-
 function OnbPeople() {
-  const [names, setNames] = useState<Record<number, string>>({});
+  const { data: clusters = [], isLoading } = useFaceClusters(12);
+  const nameMutation = useFaceClusterName();
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
 
-  function handleNameChange(id: number, value: string) {
-    setNames((prev) => ({ ...prev, [id]: value }));
+  function handleDraft(id: number, value: string) {
+    setDrafts((prev) => ({ ...prev, [id]: value }));
   }
+
+  function handleCommit(id: number, currentName: string | null) {
+    const draft = drafts[id];
+    if (typeof draft !== 'string') return;
+    const trimmed = draft.trim();
+    if (trimmed === (currentName ?? '')) return;
+    nameMutation.mutate({ clusterId: id, name: trimmed });
+  }
+
+  const topClusters = [...clusters].sort((a, b) => b.faceCount - a.faceCount).slice(0, 12);
+  const totalFaces = clusters.reduce((sum, c) => sum + c.faceCount, 0);
 
   return (
     <div>
       <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginBottom: 8 }}>
-        STEP 5 · NAME PEOPLE
+        STEP 4 · NAME PEOPLE
       </div>
       <h1 className="onb-title">
         Name them once.
         <br />
         <em>Forever categorised</em> — even for photos you import tomorrow.
       </h1>
-      <p style={{ color: 'var(--fg-dim)', fontSize: 13, maxWidth: 560, marginBottom: 20 }}>
-        Halide clustered {STUB_CLUSTERS.length * 100}+ distinct faces. Name the ones you care about — the rest
-        stay unnamed and private. New photos auto-assign as they arrive.
+      <p style={{ color: 'var(--fg-dim)', fontSize: 13, maxWidth: 560, marginBottom: 'var(--space-5)' }}>
+        {isLoading
+          ? 'Clustering faces…'
+          : clusters.length === 0
+            ? 'No face clusters yet — finish your first import and clustering will populate this step. You can always come back from Settings → People.'
+            : `Chronimage grouped ${totalFaces.toLocaleString()} faces into ${clusters.length} ${
+                clusters.length === 1 ? 'cluster' : 'clusters'
+              }. Name the ones you care about — the rest stay unnamed and private. New photos auto-assign as they arrive.`}
       </p>
-      <div className="person-grid">
-        {STUB_CLUSTERS.map((p) => (
-          <div key={p.id} className="person-card">
-            <div className="faces">
-              {p.hues.map((hue, i) => (
+      {topClusters.length > 0 && (
+        <div className="person-grid">
+          {topClusters.map((c) => {
+            const hueBase = (c.id * 47) % 360;
+            const hues = [hueBase, (hueBase + 80) % 360, (hueBase + 160) % 360];
+            return (
+              <div key={c.id} className="person-card">
+                <div className="faces">
+                  {hues.map((hue, i) => (
+                    <div
+                      // biome-ignore lint/suspicious/noArrayIndexKey: stable order within each cluster
+                      key={i}
+                      className="face"
+                      style={{
+                        background: `oklch(0.55 0.15 ${hue})`,
+                        backgroundImage:
+                          'repeating-linear-gradient(-45deg, transparent 0 4px, rgba(255,255,255,0.08) 4px 5px)',
+                      }}
+                    />
+                  ))}
+                </div>
+                <div className="meta">
+                  <input
+                    placeholder={`Unnamed · cluster ${c.id}`}
+                    value={drafts[c.id] ?? c.name ?? ''}
+                    onChange={(e) => handleDraft(c.id, e.target.value)}
+                    onBlur={() => handleCommit(c.id, c.name)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    aria-label={`Name for cluster ${c.id}`}
+                  />
+                </div>
                 <div
-                  // biome-ignore lint/suspicious/noArrayIndexKey: stable order within each cluster
-                  key={i}
-                  className="face"
+                  className="mono"
                   style={{
-                    background: `oklch(0.55 0.15 ${hue})`,
-                    backgroundImage:
-                      'repeating-linear-gradient(-45deg, transparent 0 4px, rgba(255,255,255,0.08) 4px 5px)',
+                    fontSize: 10.5,
+                    color: 'var(--fg-mute)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
                   }}
-                />
-              ))}
-            </div>
-            <div className="meta">
-              <input
-                placeholder={`Unnamed · cluster ${p.id + 1}`}
-                value={names[p.id] ?? ''}
-                onChange={(e) => handleNameChange(p.id, e.target.value)}
-                aria-label={`Name for cluster ${p.id + 1}`}
-              />
-            </div>
-            <div
-              className="mono"
-              style={{
-                fontSize: 10.5,
-                color: 'var(--fg-mute)',
-                display: 'flex',
-                justifyContent: 'space-between',
-              }}
-            >
-              <span>{p.ct.toLocaleString()} photos</span>
-              <button type="button" style={{ color: 'var(--fg-mute)' }}>
-                Merge…
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+                >
+                  <span>
+                    {c.faceCount.toLocaleString()} {c.faceCount === 1 ? 'face' : 'faces'}
+                  </span>
+                  {c.isNamed && <span style={{ color: 'var(--accent)' }}>named</span>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -13,6 +13,13 @@ global.ResizeObserver = class ResizeObserver {
   disconnect() {}
 };
 
+// jsdom's URL doesn't implement createObjectURL / revokeObjectURL which the
+// `<Thumbnail>` component uses to render blob-backed image previews.
+if (typeof URL.createObjectURL !== 'function') {
+  (URL as unknown as { createObjectURL: (b: Blob) => string }).createObjectURL = () => 'blob:mock';
+  (URL as unknown as { revokeObjectURL: (u: string) => void }).revokeObjectURL = () => {};
+}
+
 // Mock Tauri window API — getCurrentWindow().minimize/toggleMaximize/close
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: vi.fn(() => ({
@@ -64,6 +71,8 @@ vi.mock('@tauri-apps/api/core', () => ({
         return [];
       case 'cleanup_dry_run':
         return [];
+      case 'cleanup_execute':
+        return { deleted_count: 0, freed_bytes: 0, errors: [] };
       case 'refresh_smart_albums':
         return undefined;
       case 'on_this_day':
@@ -100,6 +109,34 @@ vi.mock('@tauri-apps/api/core', () => ({
         return 1;
       case 'record_photo_view':
         return undefined;
+      case 'search_suggestions':
+        return ['golden hour portraits', 'sunset over water', 'laughing at a dinner table'];
+      case 'search_photos':
+        return [];
+      case 'list_tags':
+        return [];
+      case 'list_photos_for_cluster':
+        return [];
+      case 'find_duplicates':
+        return [];
+      case 'first_time_on_new_camera':
+        return [];
+      case 'unflagged_favorites':
+        return [];
+      case 'photo_location':
+        return { lat: null, lng: null };
+      case 'photo_quality':
+        return {
+          aesthetic: null,
+          sharpness: null,
+          face_count: 0,
+          best_face_quality: null,
+          min_eyes_open: null,
+        };
+      case 'get_thumbnail':
+        // jsdom Blob construction tolerates plain arrays; return empty bytes
+        // so the hook resolves to undefined path (falls back to Placeholder).
+        throw new Error('thumbnail unavailable in tests');
       case 'ai_reindex':
         return 0;
       case 'ai_models_status':

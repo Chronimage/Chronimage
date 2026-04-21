@@ -8,6 +8,7 @@
  *   4. Storage & indexing — in-memory toggles
  */
 
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useState } from 'react';
 import {
   type ModelSource,
@@ -17,6 +18,7 @@ import {
   useDownloadModels,
 } from '../state/queries';
 import { useUi } from '../state/ui';
+import { debug } from '../util/log';
 
 /**
  * Rust `KNOWN_MODELS.kind` values ↔ the `ai_reindex(kind)` accepted values.
@@ -498,7 +500,20 @@ export function SettingsScreen() {
   const sharpnessCutoff = useUi((s) => s.tweaks.sharpnessCutoff);
   const requireReview = useUi((s) => s.tweaks.requireReview);
   const nightlyReindex = useUi((s) => s.tweaks.nightlyReindex);
+  const cachePath = useUi((s) => s.tweaks.cachePath);
+  const preferredChannel = useUi((s) => s.tweaks.preferredChannel);
   const setTweaks = useUi((s) => s.setTweaks);
+
+  async function pickCachePath() {
+    try {
+      const selected = await openDialog({ directory: true, multiple: false });
+      if (typeof selected === 'string' && selected.length > 0) {
+        setTweaks({ cachePath: selected });
+      }
+    } catch (err) {
+      debug('settings: cache picker failed', err);
+    }
+  }
 
   const [localAppName, setLocalAppName] = useState<string>(appName);
 
@@ -640,7 +655,6 @@ export function SettingsScreen() {
               <div className="lbl" style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>
                 Duplicate similarity
               </div>
-              {/* TODO(cc): persist via tauri-plugin-store */}
               <Slider
                 label="Duplicate similarity threshold"
                 value={dupeSimilarity}
@@ -664,7 +678,6 @@ export function SettingsScreen() {
               <div className="lbl" style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>
                 Sharpness cutoff
               </div>
-              {/* TODO(cc): persist via tauri-plugin-store */}
               <Slider
                 label="Sharpness cutoff score"
                 value={sharpnessCutoff}
@@ -688,7 +701,6 @@ export function SettingsScreen() {
                 <div style={{ fontSize: 13, color: 'var(--fg)' }}>Require final review</div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                {/* TODO(cc): persist via tauri-plugin-store */}
                 <Toggle
                   on={requireReview}
                   onChange={(v) => setTweaks({ requireReview: v })}
@@ -729,21 +741,58 @@ export function SettingsScreen() {
               <div className="lbl" style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>
                 Cache location
               </div>
-              {/* TODO(cc): wire to tauri path picker + tauri-plugin-store */}
-              <div style={{ fontFamily: 'var(--mono-font)', fontSize: 12, color: 'var(--fg-dim)' }}>
-                D:/Chronimage/cache · 84.2 GB
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                <div
+                  style={{
+                    fontFamily: 'var(--mono-font)',
+                    fontSize: 12,
+                    color: 'var(--fg-dim)',
+                    maxWidth: 340,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                  title={cachePath ?? 'Default (catalog root)'}
+                >
+                  {cachePath ?? 'Default (catalog root)'}
+                </div>
+                <button
+                  type="button"
+                  className="btn2"
+                  style={{ padding: '4px 10px', fontSize: 11 }}
+                  onClick={() => {
+                    void pickCachePath();
+                  }}
+                >
+                  Change…
+                </button>
+                {cachePath && (
+                  <button
+                    type="button"
+                    className="btn2 ghost"
+                    style={{ padding: '4px 10px', fontSize: 11 }}
+                    onClick={() => setTweaks({ cachePath: null })}
+                  >
+                    Reset
+                  </button>
+                )}
               </div>
             </div>
 
             <div
               className="set-row"
-              style={{ display: 'flex', alignItems: 'center', gap: 24, padding: '12px 0' }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 24,
+                padding: '12px 0',
+                borderBottom: '1px solid var(--stroke)',
+              }}
             >
               <div className="lbl" style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>
                 Nightly re-index
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                {/* TODO(cc): persist via tauri-plugin-store */}
                 <Toggle
                   on={nightlyReindex}
                   onChange={(v) => setTweaks({ nightlyReindex: v })}
@@ -753,6 +802,43 @@ export function SettingsScreen() {
                   02:00 · Wake from sleep
                 </span>
               </div>
+            </div>
+            <div
+              className="set-row"
+              style={{ display: 'flex', alignItems: 'center', gap: 24, padding: '12px 0' }}
+            >
+              <div className="lbl" style={{ flex: 1, fontSize: 13, color: 'var(--fg)' }}>
+                Update channel
+                <div
+                  className="mono"
+                  style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 'var(--space-1)' }}
+                >
+                  Which release train this installation follows
+                </div>
+              </div>
+              <select
+                value={preferredChannel}
+                onChange={(e) =>
+                  setTweaks({
+                    preferredChannel: e.target.value as 'stable' | 'beta' | 'nightly' | 'insider',
+                  })
+                }
+                aria-label="Update channel"
+                style={{
+                  padding: '5px 10px',
+                  fontSize: 12,
+                  fontFamily: 'var(--mono-font)',
+                  background: 'var(--bg-elev)',
+                  border: '1px solid var(--stroke)',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--fg)',
+                }}
+              >
+                <option value="stable">Stable — monthly</option>
+                <option value="beta">Beta — fortnightly</option>
+                <option value="nightly">Nightly — daily</option>
+                <option value="insider">Insider — continuous</option>
+              </select>
             </div>
           </div>
         </div>

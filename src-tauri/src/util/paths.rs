@@ -19,6 +19,19 @@ pub fn catalog_db_path() -> AppResult<PathBuf> {
     Ok(app_data_dir()?.join("catalog.db"))
 }
 
+/// Path to the cached-thumbnail directory. Creates the directory on demand.
+/// Thumbnails are named `{sha256}_{size}.jpg`.
+pub fn thumbnails_dir() -> AppResult<PathBuf> {
+    if let Ok(override_path) = std::env::var("CHRONIMAGE_THUMBNAILS_DIR") {
+        let p = PathBuf::from(override_path);
+        std::fs::create_dir_all(&p).map_err(|e| AppError::Internal(e.to_string()))?;
+        return Ok(p);
+    }
+    let dir = app_data_dir()?.join("cache").join("thumbnails");
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(dir)
+}
+
 /// Path to the model cache directory.
 ///
 /// Respects the `CHRONIMAGE_MODELS_DIR` env override when set. This lets
