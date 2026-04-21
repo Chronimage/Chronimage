@@ -24,66 +24,40 @@ fn install_tracing() {
 
     let fmt_layer = fmt::layer().with_target(true).compact();
 
-    // Ship logs to Loki when available (dev only). Silently skip if Loki is
-    // not running. The previous pattern spawned the tracing-loki background
-    // task on `tauri::async_runtime::spawn` *before* the Tauri builder had
-    // started its runtime — Tauri's async runtime is lazy, so the task
-    // sometimes never progressed and log lines piled up unsent. We now run
-    // the task on a dedicated std::thread owning its own tokio
-    // current-thread runtime, which is active from the moment install runs
-    // and doesn't depend on Tauri's boot order.
+    // Ship to Loki in dev via our own minimal layer (see util::loki). The
+    // `tracing-loki` crate's background task silently stopped delivering
+    // pushes (Loki's distributor metrics showed zero backend lines despite
+    // init reporting success), so we replaced it with a ~200-line custom
+    // layer that uses reqwest 0.12 directly + `eprintln!`s on push failure.
     #[cfg(debug_assertions)]
     {
         let loki_url =
             std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3101".to_string());
-        let builder_result = tracing_loki::builder()
-            // Parity with the frontend's `layer=frontend` stream so a single
-            // `{app="chronimage"}` query shows every log source interleaved.
-            .label("app", "chronimage")
-            .and_then(|b| b.label("env", "dev"))
-            .and_then(|b| b.label("layer", "backend"))
-            .and_then(|b| b.extra_field("pid", std::process::id().to_string()))
-            .and_then(|b| {
-                b.build_url(
-                    tracing_loki::url::Url::parse(&format!("{loki_url}/loki/api/v1/push"))
-                        .expect("loki url"),
-                )
-            });
-        match builder_result {
-            Ok((loki_layer, task)) => {
-                std::thread::Builder::new()
-                    .name("loki-shipper".into())
-                    .spawn(move || {
-                        match tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                        {
-                            Ok(rt) => rt.block_on(task),
-                            Err(e) => {
-                                eprintln!("loki shipper runtime init failed: {e}");
-                            }
-                        }
-                    })
-                    .expect("spawn loki-shipper thread");
-                let _ = tracing_subscriber::registry()
-                    .with(filter)
-                    .with(fmt_layer)
-                    .with(loki_layer)
-                    .try_init();
-                tracing::info!(loki_url, "loki log shipping enabled");
-                return;
-            }
-            Err(e) => {
-                eprintln!("loki layer init failed, stdout only: {e}");
-            }
-        }
+        let push_url = format!("{loki_url}/loki/api/v1/push");
+        let labels: chronimage::util::loki::Labels = vec![
+            ("app".into(), "chronimage".into()),
+            ("env".into(), "dev".into()),
+            // Parity with the frontend's `layer=frontend` — a single
+            // `{app="chronimage"}` query surfaces both streams interleaved.
+            ("layer".into(), "backend".into()),
+            ("pid".into(), std::process::id().to_string()),
+        ];
+        let loki_layer = chronimage::util::loki::LokiLayer::spawn(push_url, labels);
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .with(loki_layer)
+            .try_init();
+        tracing::info!(loki_url, "loki log shipping enabled");
     }
 
-    // Fallback (or release builds): stdout only.
-    let _ = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .try_init();
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .try_init();
+    }
 }
 
 #[cfg(target_os = "windows")]
