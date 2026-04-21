@@ -123,6 +123,10 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
+# .env loader — dev convenience so CHRONIMAGE_* env vars (e.g. the Google
+# Photos OAuth client_secret) can live in the gitignored .env.local.
+dotenvy = "0.15"
+
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"
 windows = { version = "0.58", features = [

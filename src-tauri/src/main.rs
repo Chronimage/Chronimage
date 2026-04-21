@@ -71,6 +71,13 @@ fn apply_window_effects(window: &tauri::WebviewWindow) {
 fn apply_window_effects(_window: &tauri::WebviewWindow) {}
 
 fn main() {
+    // Load .env.local (and .env) early so downstream code reading via
+    // std::env::var (e.g. CHRONIMAGE_GPHOTOS_CLIENT_SECRET) sees values
+    // the dev put in the gitignored files. Silent failure if absent —
+    // production installs don't ship these files.
+    let _ = dotenvy::from_filename(".env.local");
+    let _ = dotenvy::dotenv();
+
     install_tracing();
 
     tauri::Builder::default()
