@@ -732,16 +732,7 @@ pub async fn user_initiated_create_picker_session(access_token: &str) -> AppResu
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("picker create session: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "picker create HTTP {status}: {body}"
-        )));
-    }
-    resp.json::<PickerSession>()
-        .await
-        .map_err(|e| AppError::Internal(format!("picker create parse: {e}")))
+    parse_picker_response(resp, "picker create").await
 }
 
 /// Poll a picker session. Returns the current `PickerSession` snapshot —
@@ -757,16 +748,7 @@ pub async fn user_initiated_poll_picker_session(
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("picker poll: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "picker poll HTTP {status}: {body}"
-        )));
-    }
-    resp.json::<PickerSession>()
-        .await
-        .map_err(|e| AppError::Internal(format!("picker poll parse: {e}")))
+    parse_picker_response(resp, "picker poll").await
 }
 
 /// List the media items the user picked in a completed session. `page_token`
@@ -792,16 +774,33 @@ pub async fn user_initiated_list_picked_media_items(
         .send()
         .await
         .map_err(|e| AppError::Internal(format!("picker list: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(format!(
-            "picker list HTTP {status}: {body}"
-        )));
-    }
-    resp.json::<MediaItemsPage>()
+    parse_picker_response(resp, "picker list").await
+}
+
+/// Shared Picker-API response parser. Reads the body as text first (so
+/// parse failures surface Google's actual payload instead of reqwest's
+/// opaque "error decoding response body") and deserialises via
+/// `serde_json::from_str` so we bypass any Content-Type strictness in
+/// `resp.json`. Non-2xx responses include the body verbatim.
+async fn parse_picker_response<T: for<'de> serde::Deserialize<'de>>(
+    resp: reqwest::Response,
+    label: &str,
+) -> AppResult<T> {
+    let status = resp.status();
+    let body = resp
+        .text()
         .await
-        .map_err(|e| AppError::Internal(format!("picker list parse: {e}")))
+        .map_err(|e| AppError::Internal(format!("{label} body read: {e}")))?;
+    if !status.is_success() {
+        return Err(AppError::Internal(format!("{label} HTTP {status}: {body}")));
+    }
+    serde_json::from_str::<T>(&body).map_err(|e| {
+        // Truncate body in the error message so a massive 200 KB response
+        // doesn't blow past the UI banner. 400 chars is enough to eyeball
+        // Google's error payloads.
+        let snippet: String = body.chars().take(400).collect();
+        AppError::Internal(format!("{label} parse: {e} (body: {snippet})"))
+    })
 }
 
 /// Delete a picker session. Idempotent — the Picker API returns 200 even on
