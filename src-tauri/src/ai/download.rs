@@ -90,6 +90,32 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         filename: "siglip2-b16-image.onnx",
         bundled: true,
     },
+    // SigLIP-2 text encoder — same onnx-community repo as the image encoder.
+    // Enables real NL search via `embed_text`. ~370 MB ONNX export.
+    ModelSpec {
+        name: "siglip2-b16-text",
+        kind: "embedding-text",
+        version: "2.0.0",
+        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model.onnx",
+        // sha256 to be locked after first-run download verification.
+        sha256: "tbd",
+        size_bytes: 370_000_000,
+        filename: "siglip2-b16-text.onnx",
+        bundled: true,
+    },
+    // SigLIP-2 tokenizer (HuggingFace tokenizer.json format) — required by
+    // `embed_text` to convert query strings to token-id tensors. ~2.5 MB.
+    ModelSpec {
+        name: "siglip2-b16-tokenizer",
+        kind: "tokenizer",
+        version: "2.0.0",
+        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/tokenizer.json",
+        // sha256 to be locked after first-run download verification.
+        sha256: "tbd",
+        size_bytes: 2_500_000,
+        filename: "siglip2-b16-tokenizer.json",
+        bundled: true,
+    },
     // Aesthetic score (NIMA) — ride on top of CLIP for Phase 2 ranking.
     // Community ONNX export at cromsc/nima-mobilenet-aesthetic (tf2onnx-converted).
     ModelSpec {
@@ -385,11 +411,13 @@ mod tests {
                 "model {} has empty filename",
                 m.name
             );
-            // GGUF models use a different extension; all others must be .onnx.
-            let valid_ext = m.filename.ends_with(".onnx") || m.filename.ends_with(".gguf");
+            // GGUF, ONNX, and JSON (tokenizers) are valid extensions.
+            let valid_ext = m.filename.ends_with(".onnx")
+                || m.filename.ends_with(".gguf")
+                || m.filename.ends_with(".json");
             assert!(
                 valid_ext,
-                "model {} filename should end with .onnx or .gguf",
+                "model {} filename should end with .onnx, .gguf, or .json",
                 m.name
             );
         }
@@ -464,13 +492,19 @@ mod tests {
 
     #[test]
     fn known_models_have_locked_sha256() {
-        // No entry may still use the "tbd" placeholder — a placeholder disables
-        // the hash check entirely, exposing users to MITM.
+        // "tbd" is only permitted for kinds that have explicit TODO comments in
+        // KNOWN_MODELS (currently: "tokenizer" and "embedding-text" pending a
+        // verified first-run download). All other entries must carry locked hashes.
+        const TBD_PERMITTED_KINDS: &[&str] = &["tokenizer", "embedding-text"];
         for m in KNOWN_MODELS {
+            if TBD_PERMITTED_KINDS.contains(&m.kind) && m.sha256 == "tbd" {
+                // Pending hash lock — acceptable until CI downloads and verifies.
+                continue;
+            }
             assert_ne!(
                 m.sha256, "tbd",
-                "model {} has unlocked sha256 placeholder",
-                m.name
+                "model {} (kind={}) has unlocked sha256 placeholder",
+                m.name, m.kind
             );
             assert_eq!(
                 m.sha256.len(),

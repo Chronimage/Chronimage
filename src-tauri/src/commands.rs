@@ -3,7 +3,7 @@
 //! just wire arguments and serialize results.
 
 use crate::{
-    ai::{dot_product, l2_normalise, SigLipSession},
+    ai::{dot_product, l2_normalise},
     catalog,
     dedupe::confirm::DuplicateGroup,
     import,
@@ -1503,26 +1503,33 @@ pub async fn search_photos(
 ) -> AppResult<Vec<PhotoRow>> {
     let max_results = limit.unwrap_or(50).clamp(1, 1000);
 
-    // 1. Encode the query text into a 768-dim vector via the SigLIP stub.
-    //    Model path: `{data_local_dir}/app.chronimage.desktop/models/siglip_text.onnx`
-    //    We pass None for now — the stub will be used if the file is absent.
-    let models_dir = crate::util::paths::models_dir().ok();
-    let model_path = models_dir.as_deref().map(|d| d.join("siglip_text.onnx"));
-    let session = SigLipSession::load_or_stub(model_path.as_deref());
+    // 1. Encode the query text into a 768-dim vector via the global SigLIP session.
+    //    `global_siglip_session` is memoised at app boot by `init_global_siglip_session`.
+    //    When None (model absent or load failed) there is nothing to rank — return empty.
+    let siglip = match crate::ai::siglip::global_siglip_session() {
+        Some(s) => s,
+        None => {
+            tracing::debug!(
+                query = %query,
+                "search_photos: SigLIP not loaded — model absent or init not called"
+            );
+            return Ok(Vec::new());
+        }
+    };
 
-    let mut query_vec = session.embed_text(&query)?;
+    let mut query_vec = siglip.embed_text(&query)?;
 
-    // 2. L2-normalise. If the model is absent this stays a zero-vector and
-    //    all dot products will be 0.0 — effectively returning no results.
+    // 2. The text encoder already L2-normalises before returning, but normalise
+    //    defensively in case a caller passes through a non-unit vector.
     l2_normalise(&mut query_vec);
 
-    // If the query vector is all-zero (stub) there's nothing meaningful to
-    // rank; return empty rather than an arbitrary ordering.
+    // If the query vector is all-zero (stub path somehow reached) there's
+    // nothing meaningful to rank; return empty rather than arbitrary ordering.
     let is_zero = query_vec.iter().all(|x| *x == 0.0);
     if is_zero {
         tracing::debug!(
             query = %query,
-            "search_photos: SigLIP stub returned zero vector — no results"
+            "search_photos: SigLIP returned zero vector — model may be a stub"
         );
         return Ok(Vec::new());
     }

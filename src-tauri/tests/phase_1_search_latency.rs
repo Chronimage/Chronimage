@@ -74,9 +74,10 @@ async fn seed_catalog(pool: &SqlitePool) {
 
     // Create one source row.
     let source_id: i64 = sqlx::query_scalar(
-        "INSERT INTO sources (name, kind, config_json) VALUES ('latency-fixture', 'local', '{}') \
-         RETURNING id",
+        "INSERT INTO sources (name, kind, status, created_at, config_json) \
+         VALUES ('latency-fixture', 'local', 'idle', ?1, '{}') RETURNING id",
     )
+    .bind(&now)
     .fetch_one(pool)
     .await
     .expect("insert source");

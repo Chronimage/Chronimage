@@ -367,12 +367,21 @@ async fn execute_pipeline(
     }
 
     // ── Stage 4: AI enrichment (NIMA + SigLIP, model-optional) ─────────────
+    //
+    // SigLIP: prefer the process-wide global session (init'd at boot from
+    // bundled models) over the legacy `get_or_load` path. Falls back to
+    // `get_or_load` when the global has not been seeded (e.g. CLI / headless).
     if !new_photos.is_empty() {
         if let Ok(models_dir) = crate::util::paths::models_dir() {
             let nima_session =
                 crate::ai::aesthetic::get_or_load(&models_dir.join("nima.onnx")).ok();
-            let siglip_session =
-                crate::ai::siglip::get_or_load(&models_dir.join("siglip2-b16-image.onnx")).ok();
+
+            // Prefer the memoised global session; fall back to get_or_load for
+            // headless / test environments that never called init_global_siglip_session.
+            let siglip_session: Option<&'static crate::ai::siglip::SigLipSession> =
+                crate::ai::siglip::global_siglip_session().or_else(|| {
+                    crate::ai::siglip::get_or_load(&models_dir.join("siglip2-b16-image.onnx")).ok()
+                });
 
             if nima_session.is_some() || siglip_session.is_some() {
                 // Obtain the model row id for embeddings (created lazily).
@@ -408,7 +417,7 @@ async fn execute_pipeline(
                         }
                     }
 
-                    // SigLIP embedding → photo_embeddings (BLOB fallback)
+                    // SigLIP embedding → photo_embeddings (BLOB) + vec_photo_embeddings (KNN).
                     if let (Some(siglip), Some(model_id)) = (siglip_session, siglip_model_id) {
                         let p = path.clone();
                         match tokio::task::spawn_blocking(move || siglip.embed_image(&p)).await {
@@ -416,6 +425,8 @@ async fn execute_pipeline(
                                 let bytes: Vec<u8> =
                                     vec.iter().flat_map(|f| f.to_le_bytes()).collect();
                                 let now_ts = Utc::now().to_rfc3339();
+
+                                // Primary BLOB store (search_photos BLOB fallback path).
                                 if let Err(e) = sqlx::query(
                                     "INSERT OR REPLACE INTO photo_embeddings \
                                      (photo_id, model_id, embedding, updated_at) \
@@ -429,6 +440,26 @@ async fn execute_pipeline(
                                 .await
                                 {
                                     tracing::warn!(error = %e, photo_id, "embedding insert failed");
+                                }
+
+                                // sqlite-vec KNN store — populated so a future search_photos
+                                // upgrade to vec0 KNN finds data without re-index.
+                                // The virtual table may not exist (sqlite-vec absent on some
+                                // machines); swallow the error non-fatally.
+                                if let Err(e) = sqlx::query(
+                                    "INSERT OR REPLACE INTO vec_photo_embeddings \
+                                     (rowid, embedding) VALUES (?1, ?2)",
+                                )
+                                .bind(photo_id)
+                                .bind(&bytes)
+                                .execute(&pool)
+                                .await
+                                {
+                                    tracing::debug!(
+                                        error = %e,
+                                        photo_id,
+                                        "vec_photo_embeddings insert skipped (sqlite-vec absent?)"
+                                    );
                                 }
                             }
                             Ok(Err(e)) => {

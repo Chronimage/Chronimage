@@ -396,6 +396,79 @@ impl FacesSession {
         l2_normalise(&mut embedding);
         Ok(embedding)
     }
+
+    /// Embed a pre-cropped face image directly (no SCRFD detection, no 5-point
+    /// landmark alignment). Resize to 112×112 + normalise to [-1, 1] + run
+    /// ArcFace. Intended for test fixtures like LFW where photos are already
+    /// tightly-cropped canonical-pose faces and SCRFD would reject them
+    /// because they're out of its training distribution.
+    ///
+    /// NOT intended for production — real photos need SCRFD landmarks for
+    /// alignment to hit ArcFace's quoted accuracy.
+    pub fn embed_prealigned_face(&self, image_path: &Path) -> AppResult<Vec<f32>> {
+        if self.is_stub {
+            let _ = image_path;
+            return Ok(vec![0.0_f32; FACE_EMBED_DIM]);
+        }
+
+        let img = image::open(image_path)
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        // Resize straight to 112×112 (ArcFace input). Triangle filter is a
+        // reasonable default for downscale/upscale alike.
+        let chip = img
+            .resize_exact(
+                ARCFACE_SIZE,
+                ARCFACE_SIZE,
+                image::imageops::FilterType::Triangle,
+            )
+            .to_rgb8();
+
+        // Channels-first f32 [1, 3, 112, 112], normalise (x - 127.5) / 127.5.
+        let n = (ARCFACE_SIZE * ARCFACE_SIZE) as usize;
+        let mut chw: Vec<f32> = vec![0.0; 3 * n];
+        for (i, pixel) in chip.pixels().enumerate() {
+            let y = i / ARCFACE_SIZE as usize;
+            let x = i % ARCFACE_SIZE as usize;
+            let idx = y * ARCFACE_SIZE as usize + x;
+            chw[idx] = (pixel.0[0] as f32 - 127.5) / 127.5;
+            chw[n + idx] = (pixel.0[1] as f32 - 127.5) / 127.5;
+            chw[2 * n + idx] = (pixel.0[2] as f32 - 127.5) / 127.5;
+        }
+
+        let shape = vec![1i64, 3, ARCFACE_SIZE as i64, ARCFACE_SIZE as i64];
+        let input_tensor = ort::value::Tensor::<f32>::from_array((shape, chw))
+            .map_err(|e| AppError::Internal(format!("ort tensor (arcface prealigned): {e}")))?;
+
+        let mut guard = self
+            .arcface
+            .lock()
+            .map_err(|_| AppError::Internal("arcface session mutex poisoned".into()))?;
+        let session = guard.as_mut().ok_or_else(|| {
+            AppError::Internal("arcface session is None despite is_stub=false".into())
+        })?;
+
+        let outputs = session
+            .run(ort::inputs!["input.1" => input_tensor])
+            .map_err(|e| AppError::Internal(format!("ort run (arcface prealigned): {e}")))?;
+
+        let tensor = outputs
+            .get("683")
+            .ok_or_else(|| AppError::Internal("output '683' not found in arcface model".into()))?;
+        let (_shape, data) = tensor
+            .try_extract_tensor::<f32>()
+            .map_err(|e| AppError::Internal(format!("extract arcface tensor: {e}")))?;
+        let mut embedding: Vec<f32> = data.to_vec();
+
+        if embedding.len() != FACE_EMBED_DIM {
+            return Err(AppError::Internal(format!(
+                "arcface output dim mismatch: expected {FACE_EMBED_DIM}, got {}",
+                embedding.len()
+            )));
+        }
+
+        l2_normalise(&mut embedding);
+        Ok(embedding)
+    }
 }
 
 // ── image preprocessing helpers ───────────────────────────────────────────

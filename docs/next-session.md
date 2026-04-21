@@ -1,63 +1,88 @@
-# Next session · Phase 1 week 5 — ship + harden
+# Next session · Phase 1 week 5 → exit
 
-Queued on local `feature/phase1-week4-plumbing` (**9 commits, unpushed**):
+Queued on local `feature/phase1-week5-polish` (5 commits, unpushed):
 
-1. `63cd55a` sha locks + catalog-size exit test + record_photo_view
-2. `9528c8a` real scrfd + arcface + pipeline stage-5 + face-clustering exit test
-3. `a6c84ca` bundled defaults + hdbscan + settings picker modal
-4. `24d4ab0` sync manage(AppState) race fix
-5. `75a52bd` sqlite-vec auto-extension (vec0 + vec_face_embeddings)
-6. `d41b67e` tokio reactor context for spawn_reevaluator
-7. `398bef4` slim AppState (drop unused faces/caption fields → fast boot)
-8. `1e0e90c` CI: prebuilt cargo-audit + cargo-mutants (saves ~2 min/run)
-9. `25a5b7b` dependabot bundle: vite 8, jsdom 29, lefthook 2, @types/node 25, tanstack 5.99
+1. `931923a` memoised FacesSession + persisted Tweaks via `@tauri-apps/plugin-store`
+2. `f92b6d3` scaffolded `phase_1_raw_jpg_pair.rs` + `phase_1_search_latency.rs` + `scripts/scan-raw-jpg-pairs.ps1`
+3. `9c46fce` (LFS) `tests/fixtures/face-detect/group.jpg`
+4. `121538b` UTF-8 BOM handling in manifest parser + script
 
-`pnpm tauri dev` boots in ≈1 s and `Add local folder` works again.
+**Already passing:** `phase_1_raw_jpg_pair` = **100 % precision** (5000/5000 across ARW + CR2 + CR3 + NEF + DNG) in 0.10 s.
+
+**Fixture on disk** (gitignored, 200 GB): `tests/fixtures/raw-jpg-pairs/` with 10 001 files + `manifest.json`.
 
 ## Starts (in order)
 
-### 1. Push the bundle + open PR · 15 min
+### 1. Push + PR the week-5 branch · 15 min
 ```bash
-git push -u origin feature/phase1-week4-plumbing
-gh pr create --base develop --head feature/phase1-week4-plumbing
+git push -u origin feature/phase1-week5-polish
+gh pr create --base develop --head feature/phase1-week5-polish
 ```
-CI will exercise every gate (the 9 commits compile, clippy and test clean locally). When merged, dependabot #17–#21 auto-close. **Nothing downstream is safe to start until this lands** — we'd be stacking on uncommitted-to-develop work.
+5 unpushed commits. The raw-jpg-pair test uses the repo-relative path fallback so CI can't exercise it (fixture is local-only), but CI will validate all 217 lib tests + the catalog-size + search-latency skeletons still compile.
 
-### 2. Fix cache-save cancel class of failure · 10 min
-First file: `.github/workflows/ci.yml`. Add to both `Swatinem/rust-cache@v2` uses (lines 84 and 112):
+### 2. Run the other 3 ready exit tests + land the numbers · 30 min
+After the Tauri dev app is closed (or PID reaped; see previous session's `msedgewebview2` lingering-children note):
 
-```yaml
-  save-if: ${{ github.ref == 'refs/heads/develop' }}
+```bash
+# Self-synthesising — no fixture needed
+cargo test --manifest-path src-tauri/Cargo.toml \
+  --test phase_1_catalog_size -- --ignored --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml \
+  --test phase_1_search_latency -- --ignored --nocapture
+
+# Uses tests/fixtures/face-detect/group.jpg (LFS) + bundled SCRFD
+cargo test --manifest-path src-tauri/Cargo.toml \
+  --lib scrfd_detects_faces_in_real_group_photo -- --ignored --nocapture
 ```
 
-PRs will read the cache but not attempt to save it, so `concurrency: cancel-in-progress` never kills a mid-tar upload. Develop pushes don't rapid-fire, so their saves complete cleanly. Tonight's failure (`Post Run Swatinem/rust-cache@v2 · The operation was canceled`) disappears.
+Record pass/fail + measured numbers in `docs/checkpoints/latest.md` so we can see where Phase 1 NFRs stand against PRD § Non-functional requirements. If search-latency p95 blows past 500 ms on 200k synthetic, that's the "real SigLIP + vec0 KNN" unblock signal.
 
-### 3. Memoize FacesSession across pipeline runs · 45 min
-First file: `src-tauri/src/ai/faces.rs` — add `pub fn global_faces_session() -> AppResult<&'static FacesSession>` guarded by `OnceLock<FacesSession>`. Then update `src-tauri/src/import/pipeline.rs` stage-5 to call `global_faces_session()` once instead of re-invoking `FacesSession::load(scrfd, arcface)` per import (currently ~2 s of ort init on every import batch). Bundled paths + user data dir checked once; failed load falls through to stub.
+### 3. Build the face-cluster fixture (option 2 from last session) · 30 min
+Pick ~60 real photos across 3–5 recurring subjects from existing shoots under `E:\`. Write `tests/fixtures/face-clusters/labels.json` by hand:
 
-Why: stage-5 is now on every import's critical path. Re-loading 190 MB of ONNX for each import is the #1 avoidable latency in the pipeline.
+```json
+[
+  {"file":"engagement_12.jpg","cluster":0},
+  {"file":"haritha_07.jpg",    "cluster":0},
+  {"file":"andaman_002.jpg",   "cluster":1},
+  {"file":"stranger_03.jpg",   "cluster":-1}
+]
+```
 
-### 4. Land one green face-detect exit-criterion test · 30 min
-First file: `tests/fixtures/face-detect/group.jpg` — commit a tiny public-domain group photo (≤ 100 KB; Unsplash's CC0 collection or `picsum.photos` seed).
+Copy selected photos into `tests/fixtures/face-clusters/photos/` (gitignored). Run:
 
-Then drop `#[ignore]` from `scrfd_detects_faces_in_real_group_photo` in `src-tauri/src/ai/faces.rs` (still gated by model-presence check — skips cleanly when bundled dir is absent). Assert `N ≥ 3` faces.
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml \
+  --test phase_1_face_clustering -- --ignored --nocapture
+```
 
-Why: we have real SCRFD + ArcFace + bundled models; the test was stubbed because the fixture didn't exist. Moves the first "real inference" exit test from `#[ignore]` → green → one more of the 8 PRD exit criteria closed.
+Assert the test hits the PRD F1 ≥ 0.95 threshold. If it fails with HDBSCAN clumping too aggressively or spitting out noise, tune `ClusterParams.min_cluster_size` based on the fixture size.
 
-### 5. Persist Settings tweaks via tauri-plugin-store · 60 min
-First file: `src/state/ui.ts` — move `tweaks` (appName, culling thresholds, nightly re-index) from Zustand-in-memory into `tauri-plugin-store` reads/writes. Then extend to persist the per-feature model choice from `ModelPickerModal` so swaps survive restart.
+### 4. Real SigLIP image + text inference · 120 min
+First file: `src-tauri/src/ai/siglip.rs`. `load_or_stub` returns a stub regardless of path presence (Phase 1 placeholder). Replace with real ort session init — same pattern as `FacesSession::load` in `faces.rs`.
 
-Why: the `useState`/Zustand setup is in-memory only — user restarts lose everything. Plugin is already in `tauri.conf.json`; only the frontend wiring is missing.
+Required:
+- Image encoder: `siglip2-b16-image.onnx` (bundled · 375 MB) — 224×224 RGB f32 normalised to `[-1, 1]`. Session output `[1, 768]`.
+- Text encoder: **not currently bundled.** Either (a) swap `KNOWN_MODELS` embedding entry to also include `text_model.onnx` from the same `onnx-community/siglip2-base-patch16-224-ONNX` repo + bundle it, or (b) leave NL search zero-vector-stubbed and mark explicitly.
+- Once the encoders run, also populate `vec_photo_embeddings` during stage-4 pipeline enrichment (currently only `photo_embeddings` BLOB is written).
 
-## Deferred (known-blocked or low-ROI)
+This is the single biggest missing piece for Phase 1 exit — it's what makes the "semantic search" proposition real.
 
-- Moondream2 mmproj companion download + llama.cpp sidecar binary + vision-language HTTP protocol (Phase 2 prereq).
-- Remaining 5 PRD exit tests (need fixtures: 10k throughput, 200k search latency, 5k RAW+JPG pair F1, 100-photo cleanup, rediscovery dated fixture).
-- CI packaging job: fetch bundled models from pinned S3/HF release + attach LICENSE files.
-- User research: is a ~700 MB MSI acceptable? If not, ship a "slim" variant that first-run-downloads the bundled set.
-- `advisory-db` caching for cargo-audit (~30 s gain; skip unless cargo-audit becomes a felt bottleneck post-prebuilt).
+### 5. Decide: face-cluster labeling tool? · 15 min
+After #3, if labeling 60 photos by hand was annoying: build the semi-automatic tool (scan → detect+embed → static HTML thumbnail grid → labels.json writer). Documented in last session's response. Skip if #3 was fine.
+
+## Remaining Phase 1 critical path (after this session)
+
+- 3 e2e fixtures (import-throughput 100k, source-cleanup 100, rediscovery dated) — lowest urgency; Rust integration tests are giving us the signal that matters.
+- CI packaging job (fetch bundled models before `tauri build`, attach LICENSE files under `resources/licenses/`).
+- Google Photos OAuth2 live-sync source (biggest unshipped connector).
+- `phase_1_stress.rs` nightly 8 h loop.
+- Moondream2 sidecar + mmproj (genuinely Phase 2).
+- ModelPickerModal custom HF URL flow (Phase 1b).
 
 ## Push discipline
 
-- #1 ships standalone (already 9 commits; don't amend, just push).
-- #2 is a 1-line YAML change — bundle with #3 + #4 + #5 as one "week-5 polish" PR so the reviewer sees the cache fix alongside the stage-5 memoization + exit-test landing.
+- #1 ships standalone (5 commits already coherent).
+- #2 (running tests, recording numbers) happens before #3 lands — the numbers inform whether HDBSCAN tuning is needed.
+- #3 + #4 bundle as "week-5 follow-up" PR.
+- #5 optional — only if needed.

@@ -100,47 +100,120 @@ use std::path::Path;
 #[tokio::test]
 #[ignore = "needs real ONNX models + labelled face-cluster fixture"]
 async fn face_clustering_f1_ge_0_95() {
+    use std::io::Write;
+    // Immediate, line-buffered progress reporting regardless of redirect.
+    let log = |msg: &str| {
+        let mut out = std::io::stderr();
+        let _ = writeln!(out, "[face-cluster-test] {msg}");
+        let _ = out.flush();
+    };
+    log("starting");
     let Some((scrfd, arcface)) = models_present() else {
-        eprintln!("skipping: SCRFD or ArcFace model missing from models_dir");
+        log("skipping: SCRFD or ArcFace model missing from models_dir");
         return;
     };
+    log(&format!("models resolved: {scrfd:?}"));
 
     let dir = fixture_dir();
     let labels_path = dir.join("labels.json");
     if !labels_path.exists() {
-        eprintln!("skipping: {labels_path:?} not found");
+        log(&format!("skipping: {labels_path:?} not found"));
         return;
     }
     let labels: Vec<Label> =
         serde_json::from_slice(&std::fs::read(&labels_path).expect("read labels.json"))
             .expect("parse labels.json");
+    log(&format!("loaded {} labels", labels.len()));
 
+    log("loading SCRFD + ArcFace sessions (this takes ~2 s)...");
+    let load_t = std::time::Instant::now();
     let session = FacesSession::load(&scrfd, &arcface).expect("load face session");
     let session = std::sync::Arc::new(session);
+    log(&format!(
+        "  session loaded in {:.1}s",
+        load_t.elapsed().as_secs_f64()
+    ));
 
     // ── Detect + embed every labelled photo, remembering ground-truth cluster.
     let mut inputs: Vec<FaceInput> = Vec::new();
     let mut face_to_truth: HashMap<i64, i64> = HashMap::new();
     let mut next_face_id: i64 = 1;
+    let mut photos_with_faces = 0usize;
+    let mut photos_no_face = 0usize;
+    let loop_t = std::time::Instant::now();
 
+    // Pre-cropped-fixture mode: skip SCRFD detection + use ArcFace directly
+    // on the whole image. LFW (lfwcrop) photos are 64×64 pre-cropped faces
+    // outside SCRFD's training distribution; the detector returns 0 matches
+    // on every one. Set `$CHRONIMAGE_FACE_FIXTURE_PREALIGNED=1` (or let the
+    // fallback below auto-kick-in after 10 consecutive empty detections).
+    let prealigned_env = std::env::var_os("CHRONIMAGE_FACE_FIXTURE_PREALIGNED").is_some();
+    let mut prealigned_active = prealigned_env;
+    let mut consecutive_empty = 0usize;
+
+    eprintln!(
+        "running {} on {} photos...",
+        if prealigned_active {
+            "ArcFace (prealigned)"
+        } else {
+            "SCRFD + ArcFace"
+        },
+        labels.len()
+    );
     for (photo_id, label) in labels.iter().enumerate() {
         let photo_id = photo_id as i64;
         let path = dir.join(&label.file);
-        let session_c = std::sync::Arc::clone(&session);
-        let path_c = path.clone();
-        let faces = tokio::task::spawn_blocking(move || session_c.detect_faces(&path_c))
-            .await
-            .expect("detect join")
-            .expect("detect result");
-        for face in faces {
+        let per_t = std::time::Instant::now();
+
+        let embeddings: Vec<Vec<f32>> = if prealigned_active {
+            // Pre-cropped fixture: embed the whole image as one face.
             let session_c = std::sync::Arc::clone(&session);
             let path_c = path.clone();
-            let face_c = face.clone();
-            let embedding =
-                tokio::task::spawn_blocking(move || session_c.embed_face(&path_c, &face_c))
-                    .await
-                    .expect("embed join")
-                    .expect("embed result");
+            let emb = tokio::task::spawn_blocking(move || session_c.embed_prealigned_face(&path_c))
+                .await
+                .expect("embed join")
+                .expect("embed result");
+            vec![emb]
+        } else {
+            let session_c = std::sync::Arc::clone(&session);
+            let path_c = path.clone();
+            let faces = tokio::task::spawn_blocking(move || session_c.detect_faces(&path_c))
+                .await
+                .expect("detect join")
+                .expect("detect result");
+            if faces.is_empty() {
+                consecutive_empty += 1;
+                if consecutive_empty >= 10 && !prealigned_env {
+                    eprintln!(
+                        "  [hint] {consecutive_empty} consecutive photos with 0 SCRFD hits — \
+                         switching to prealigned-face mode (LFW-style fixture assumed)"
+                    );
+                    prealigned_active = true;
+                }
+            } else {
+                consecutive_empty = 0;
+            }
+            let mut out = Vec::with_capacity(faces.len());
+            for face in faces {
+                let session_c = std::sync::Arc::clone(&session);
+                let path_c = path.clone();
+                let face_c = face.clone();
+                let emb =
+                    tokio::task::spawn_blocking(move || session_c.embed_face(&path_c, &face_c))
+                        .await
+                        .expect("embed join")
+                        .expect("embed result");
+                out.push(emb);
+            }
+            out
+        };
+
+        if embeddings.is_empty() {
+            photos_no_face += 1;
+        } else {
+            photos_with_faces += 1;
+        }
+        for embedding in embeddings {
             inputs.push(FaceInput {
                 face_id: next_face_id,
                 photo_id,
@@ -149,7 +222,26 @@ async fn face_clustering_f1_ge_0_95() {
             face_to_truth.insert(next_face_id, label.cluster);
             next_face_id += 1;
         }
+        if photo_id % 10 == 0 || per_t.elapsed().as_secs_f64() > 2.0 {
+            eprintln!(
+                "  [{:>3}/{}] {} · {:.2}s · cumulative faces={} · cumulative no-face={} · elapsed={:.1}s",
+                photo_id + 1,
+                labels.len(),
+                label.file,
+                per_t.elapsed().as_secs_f64(),
+                photos_with_faces,
+                photos_no_face,
+                loop_t.elapsed().as_secs_f64()
+            );
+        }
     }
+    eprintln!(
+        "inference loop done in {:.1}s · {} photos with ≥1 face · {} photos with no face · {} total faces",
+        loop_t.elapsed().as_secs_f64(),
+        photos_with_faces,
+        photos_no_face,
+        inputs.len()
+    );
 
     assert!(!inputs.is_empty(), "no faces detected in fixture");
 

@@ -56,7 +56,7 @@ This phase validates the user's hypothesis: can Chronimage make a hobbyist's 200
 - [ ] WAL mode, `PRAGMA foreign_keys=ON`, `PRAGMA synchronous=NORMAL`
 
 ### 5. AI layer
-- [ ] `src-tauri/src/ai/siglip.rs` — embeddings (image + text encoders)
+- [x] `src-tauri/src/ai/siglip.rs` — real ONNX inference for both image encoder (`siglip2-b16-image.onnx`) and text encoder (`siglip2-b16-text.onnx`); tokenizer loaded via `tokenizers` crate from `siglip2-b16-tokenizer.json`; `GLOBAL_SIGLIP` OnceLock memoisation; `search_photos` wired to `global_siglip_session()`; `vec_photo_embeddings` populated during pipeline stage-4 (PR fix/model-urls)
 - [ ] `src-tauri/src/ai/faces.rs` — SCRFD-10g detect + ArcFace W600K R50 embed
 - [ ] `src-tauri/src/ai/cluster.rs` — HDBSCAN over ArcFace embeddings; stable cluster IDs across re-runs
 - [ ] `src-tauri/src/ai/caption.rs` — Moondream2 via llama.cpp sidecar (optional, post-install download)
@@ -64,8 +64,10 @@ This phase validates the user's hypothesis: can Chronimage make a hobbyist's 200
 - [ ] `src-tauri/src/ai/budget.rs` — detect VRAM, pick model variants, enforce concurrency limits
 
 #### Model distribution — bundled defaults + on-demand swaps (see ADR 0003)
-- [ ] **Bundled in installer** (~580 MB total) — zero-download first run:
-  - SigLIP-2 B/16 (375 MB) — embeddings
+- [ ] **Bundled in installer** (~950 MB total) — zero-download first run:
+  - SigLIP-2 B/16 image encoder (375 MB) — image embeddings
+  - SigLIP-2 B/16 text encoder (~370 MB) — NL query encoding (required for `search_photos`)
+  - SigLIP-2 tokenizer (~2.5 MB) — HF tokenizer.json; loaded via `tokenizers` crate
   - SCRFD-10g + ArcFace W600K R50 (~190 MB extracted) — face detect + embed
   - NIMA (13 MB) — aesthetic score
 - [ ] **Downloaded on-demand from Settings → AI Models** (opt-in, not required for Phase 1 exit):

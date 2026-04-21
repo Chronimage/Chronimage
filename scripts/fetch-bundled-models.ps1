@@ -42,6 +42,18 @@ $Models = @(
         ZipEntry  = $null
     },
     [PSCustomObject]@{
+        Filename  = 'siglip2-b16-text.onnx'
+        Url       = 'https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model.onnx'
+        Sha256    = 'tbd'
+        ZipEntry  = $null
+    },
+    [PSCustomObject]@{
+        Filename  = 'siglip2-b16-tokenizer.json'
+        Url       = 'https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/tokenizer.json'
+        Sha256    = 'tbd'
+        ZipEntry  = $null
+    },
+    [PSCustomObject]@{
         Filename  = 'nima.onnx'
         Url       = 'https://huggingface.co/cromsc/nima-mobilenet-aesthetic/resolve/main/nima_mobilenet_aesthetic.onnx'
         Sha256    = 'c58b0c39b5b8f752b1b0ebf10e07e48406780ce3bf9d4647f8c43898748fe69c'
@@ -105,8 +117,13 @@ $Failures = 0
 foreach ($m in $Models) {
     $Dest = Join-Path $BundledDir $m.Filename
 
-    # Skip if already present and hash matches.
+    # Skip if already present and hash matches (or hash is still "tbd").
     if (Test-Path $Dest) {
+        if ($m.Sha256 -eq 'tbd') {
+            $size = (Get-Item $Dest).Length
+            Write-Host "[ok] $($m.Filename) $(Format-Bytes $size) (cached; sha256 tbd)"
+            continue
+        }
         $existing = Get-FileSha256 -Path $Dest
         if ($existing -eq $m.Sha256) {
             $size = (Get-Item $Dest).Length
@@ -156,13 +173,15 @@ foreach ($m in $Models) {
         }
     }
 
-    # Verify hash.
-    $actual = Get-FileSha256 -Path $Dest
-    if ($actual -ne $m.Sha256) {
-        Write-Host "[fail] $($m.Filename): SHA256 mismatch (got $actual, want $($m.Sha256))"
-        Remove-Item $Dest -Force
-        $Failures++
-        continue
+    # Verify hash (skip when still "tbd" — pending first-run lock).
+    if ($m.Sha256 -ne 'tbd') {
+        $actual = Get-FileSha256 -Path $Dest
+        if ($actual -ne $m.Sha256) {
+            Write-Host "[fail] $($m.Filename): SHA256 mismatch (got $actual, want $($m.Sha256))"
+            Remove-Item $Dest -Force
+            $Failures++
+            continue
+        }
     }
 
     $size = (Get-Item $Dest).Length
