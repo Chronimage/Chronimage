@@ -139,7 +139,7 @@ windows = { version = "0.58", features = [
 tauri = { version = "2.2", features = ["test"] }
 tempfile = "3"
 proptest = "1"
-mockall = "0.13"
+mockall = "0.14"
 serial_test = "3"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
