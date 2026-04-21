@@ -92,6 +92,26 @@ const fn const_concat_scopes() -> &'static str {
 pub const DEFAULT_CLIENT_ID: &str =
     "192197717334-m6hbu02dhhi3igdm9hi771op1tptdbft.apps.googleusercontent.com";
 
+/// Env-var name for the OAuth client secret. Google's native-app docs say
+/// `client_secret` is optional for desktop + loopback flows, but in
+/// practice the token endpoint may still reject exchanges without one
+/// depending on the client's verification state — "invalid_request
+/// (client_secret is missing)". We include the secret in the form body
+/// when this var is set. Per Google's own guidance, desktop-app client
+/// secrets are not confidential (they ship in every copy of the installed
+/// binary), but we still keep it out of the git-tracked source tree so
+/// individual devs can run against their own Cloud Console project.
+pub const CLIENT_SECRET_ENV: &str = "CHRONIMAGE_GPHOTOS_CLIENT_SECRET";
+
+/// Resolve the client secret from the environment, if set. Called at
+/// token-exchange time rather than cached, so `tauri dev` restarts pick
+/// up `.env.local` changes without a rebuild.
+pub fn client_secret_from_env() -> Option<String> {
+    std::env::var(CLIENT_SECRET_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Keyring service name. The username slot holds the Google account email
 /// once the token exchange succeeds.
 pub const KEYRING_SERVICE: &str = "chronimage.source.google_photos";
@@ -274,13 +294,17 @@ pub async fn user_initiated_exchange_code(
     pkce_verifier: &str,
 ) -> AppResult<TokenSet> {
     let client = build_reqwest_client()?;
-    let form = [
+    let secret = client_secret_from_env();
+    let mut form: Vec<(&str, &str)> = vec![
         ("client_id", client_id),
         ("code", code),
         ("code_verifier", pkce_verifier),
         ("grant_type", "authorization_code"),
         ("redirect_uri", redirect_uri),
     ];
+    if let Some(s) = secret.as_deref() {
+        form.push(("client_secret", s));
+    }
 
     let resp = client
         .post(TOKEN_ENDPOINT)
@@ -315,11 +339,15 @@ pub async fn user_initiated_refresh_access_token(
     refresh_token: &str,
 ) -> AppResult<TokenSet> {
     let client = build_reqwest_client()?;
-    let form = [
+    let secret = client_secret_from_env();
+    let mut form: Vec<(&str, &str)> = vec![
         ("client_id", client_id),
         ("refresh_token", refresh_token),
         ("grant_type", "refresh_token"),
     ];
+    if let Some(s) = secret.as_deref() {
+        form.push(("client_secret", s));
+    }
 
     let resp = client
         .post(TOKEN_ENDPOINT)
@@ -365,13 +393,23 @@ pub async fn user_initiated_current_access_token(client_id: &str) -> AppResult<S
 
 fn parse_token_error(body: &str, status: reqwest::StatusCode) -> String {
     let parsed: Option<TokenErrorResponse> = serde_json::from_str(body).ok();
-    match parsed {
+    let raw = match parsed {
         Some(e) => match e.error_description {
             Some(d) => format!("{} ({d})", e.error),
             None => e.error,
         },
         None => format!("HTTP {status}: {body}"),
+    };
+    // Help the user past the single most common misconfig: client_secret
+    // missing because they don't have CHRONIMAGE_GPHOTOS_CLIENT_SECRET set.
+    if raw.contains("client_secret is missing") {
+        return format!(
+            "{raw} — set {CLIENT_SECRET_ENV} to your Cloud Console OAuth \
+             client secret and restart the app (or use a Desktop-app client \
+             type that doesn't require a secret)."
+        );
     }
+    raw
 }
 
 // ── Keyring round-trip ───────────────────────────────────────────────────────
