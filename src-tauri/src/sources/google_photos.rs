@@ -787,20 +787,40 @@ async fn parse_picker_response<T: for<'de> serde::Deserialize<'de>>(
     label: &str,
 ) -> AppResult<T> {
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| AppError::Internal(format!("{label} body read: {e}")))?;
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(label, error = %e, "picker response body read failed");
+            return Err(AppError::Internal(format!("{label} body read: {e}")));
+        }
+    };
     if !status.is_success() {
+        tracing::error!(
+            label,
+            status = %status,
+            body = %body,
+            "picker request returned non-success status",
+        );
         return Err(AppError::Internal(format!("{label} HTTP {status}: {body}")));
     }
-    serde_json::from_str::<T>(&body).map_err(|e| {
-        // Truncate body in the error message so a massive 200 KB response
-        // doesn't blow past the UI banner. 400 chars is enough to eyeball
-        // Google's error payloads.
-        let snippet: String = body.chars().take(400).collect();
-        AppError::Internal(format!("{label} parse: {e} (body: {snippet})"))
-    })
+    match serde_json::from_str::<T>(&body) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            // Full body in tracing (no truncation) so we can fix struct
+            // mismatches on one pass; truncated in the surfaced AppError so
+            // the UI banner stays readable.
+            tracing::error!(
+                label,
+                error = %e,
+                body = %body,
+                "picker response parse failed",
+            );
+            let snippet: String = body.chars().take(400).collect();
+            Err(AppError::Internal(format!(
+                "{label} parse: {e} (body: {snippet})"
+            )))
+        }
+    }
 }
 
 /// Delete a picker session. Idempotent — the Picker API returns 200 even on
