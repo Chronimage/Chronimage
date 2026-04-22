@@ -128,7 +128,7 @@ dotenvy = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"
-windows = { version = "0.58", features = [
+windows = { version = "0.61", features = [
   "Win32_Devices_PortableDevices",
   "Win32_Foundation",
   "Win32_Graphics_Dxgi",
