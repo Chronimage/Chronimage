@@ -42,8 +42,13 @@ $Models = @(
         ZipEntry  = $null
     },
     [PSCustomObject]@{
+        # int8-quantized build (283 MB vs. 1.13 GB for fp32). Keeps f32
+        # input/output tensor boundaries so the Rust ort loader in
+        # `siglip.rs` needs no precision-casting changes. Swap back to
+        # `text_model.onnx` (or `text_model_fp16.onnx`) from the Settings
+        # picker if a power user wants higher retrieval quality.
         Filename  = 'siglip2-b16-text.onnx'
-        Url       = 'https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model.onnx'
+        Url       = 'https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model_quantized.onnx'
         Sha256    = 'tbd'
         ZipEntry  = $null
     },

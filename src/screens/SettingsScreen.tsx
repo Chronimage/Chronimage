@@ -35,13 +35,41 @@ const KIND_TO_REINDEX: Record<string, string> = {
   'caption-gguf': 'captions',
 };
 
-/** Human-readable feature label per `kind`. */
+/**
+ * Beginner-friendly feature labels per `kind`. These show in the AI-models
+ * list, the swap modal title, and anywhere else the kind appears — so keep
+ * them short, unambiguous, and in plain English rather than ML jargon.
+ */
 const KIND_LABEL: Record<string, string> = {
-  embedding: 'Embeddings',
-  aesthetic: 'Aesthetic score',
-  'face-detect': 'Face detection',
-  'face-embed': 'Face embedding',
-  'caption-gguf': 'Captions',
+  embedding: 'Understands your photos',
+  'embedding-text': 'Understands your search words',
+  aesthetic: 'Scores photo quality',
+  'face-detect': 'Finds faces in photos',
+  'face-embed': 'Tells people apart',
+  'caption-gguf': 'Writes photo descriptions',
+  tokenizer: 'Search text tokenizer',
+};
+
+/**
+ * One-line description under the kind label, rendered on each model row
+ * so a user who's never heard of "embeddings" understands what the model
+ * actually does for them.
+ */
+const KIND_DESCRIPTION: Record<string, string> = {
+  embedding:
+    'Turns each photo into a fingerprint the app can match against words you type — the thing that makes "golden hour portrait" find the right shot.',
+  'embedding-text':
+    'Turns the words you type in the search bar into the same fingerprint format as your photos, so they can be matched.',
+  aesthetic:
+    'Predicts how technically good each photo looks (sharpness, composition, exposure) so "best of" and rediscovery rows surface the strong ones.',
+  'face-detect':
+    "Finds where faces are in each photo so the app can group them. Doesn't identify anyone on its own — just locates the faces.",
+  'face-embed':
+    'Converts each detected face into a fingerprint so the app can group all photos of the same person together.',
+  'caption-gguf':
+    'Writes a short natural-language description of each photo. Optional — search works without it.',
+  tokenizer:
+    'Breaks your search text into word pieces the embedding model expects. Not user-swappable; ships with the embedding pair.',
 };
 
 interface Preset {
@@ -51,12 +79,34 @@ interface Preset {
   sizeBytes: number;
   license: string;
   note?: string;
+  /**
+   * Short plain-English blurb rendered under the name in the picker so a
+   * non-ML user can choose "smaller" vs. "more accurate" without needing
+   * to know what int8 or fp16 means.
+   */
+  tagline?: string;
+  /**
+   * When present, flags this preset as changing the embedding vector
+   * dimension vs. the bundled default. Dim changes require a full
+   * rebuild of the `vec_photo_embeddings` virtual table and every photo
+   * re-embedded, so we show an extra warning before committing. Phase 1
+   * offers only same-dim variants to keep this unused; it's here for
+   * Phase 2 when we add SigLIP-L / SO400M.
+   */
+  breakingDimChange?: boolean;
 }
 
 /**
- * Curated presets per feature. The first entry is the default bundled model;
- * additional entries are vetted community alternatives users can swap to.
- * Custom URLs live in a separate input below the preset list.
+ * Curated presets per feature. The first entry is the default bundled model
+ * (or first-run download, for captions); additional entries are vetted
+ * community alternatives users can swap to without breaking anything else
+ * in the pipeline. Custom URLs live in a separate input below the preset
+ * list.
+ *
+ * Same-architecture-only invariant: every preset here produces the same
+ * embedding dimension as the default, so swapping doesn't require dropping
+ * the sqlite-vec virtual tables. Presets that would change the dimension
+ * get flagged with `breakingDimChange: true` + an extra modal warning.
  */
 const PRESETS_BY_KIND: Record<string, Preset[]> = {
   embedding: [
@@ -67,6 +117,50 @@ const PRESETS_BY_KIND: Record<string, Preset[]> = {
       sizeBytes: 371_807_752,
       license: 'Apache-2.0',
       note: 'Default · bundled',
+      tagline: 'Balanced — ships in the installer, fits most libraries.',
+    },
+    {
+      name: 'siglip2-b16-image-fp16',
+      repo: 'onnx-community/siglip2-base-patch16-224-ONNX',
+      filename: 'onnx/vision_model_fp16.onnx',
+      sizeBytes: 186_000_000,
+      license: 'Apache-2.0',
+      tagline: 'Half the disk, near-identical quality — best for tight SSDs.',
+    },
+    {
+      name: 'siglip2-b16-image-quantized',
+      repo: 'onnx-community/siglip2-base-patch16-224-ONNX',
+      filename: 'onnx/vision_model_quantized.onnx',
+      sizeBytes: 95_000_000,
+      license: 'Apache-2.0',
+      tagline: 'Smallest — ~2% accuracy hit; good for spinning disks + low RAM.',
+    },
+  ],
+  'embedding-text': [
+    {
+      name: 'siglip2-b16-text-quantized',
+      repo: 'onnx-community/siglip2-base-patch16-224-ONNX',
+      filename: 'onnx/text_model_quantized.onnx',
+      sizeBytes: 283_000_000,
+      license: 'Apache-2.0',
+      note: 'Default · bundled',
+      tagline: 'Balanced — small, near-native retrieval quality.',
+    },
+    {
+      name: 'siglip2-b16-text-fp16',
+      repo: 'onnx-community/siglip2-base-patch16-224-ONNX',
+      filename: 'onnx/text_model_fp16.onnx',
+      sizeBytes: 565_000_000,
+      license: 'Apache-2.0',
+      tagline: 'More precise — swap here if search results feel off.',
+    },
+    {
+      name: 'siglip2-b16-text-fp32',
+      repo: 'onnx-community/siglip2-base-patch16-224-ONNX',
+      filename: 'onnx/text_model.onnx',
+      sizeBytes: 1_130_000_000,
+      license: 'Apache-2.0',
+      tagline: 'Highest quality, 4× the disk. Only for big catalogs + NVMe.',
     },
   ],
   aesthetic: [
@@ -77,6 +171,7 @@ const PRESETS_BY_KIND: Record<string, Preset[]> = {
       sizeBytes: 12_867_270,
       license: 'permissive',
       note: 'Default · bundled',
+      tagline: 'Tiny, fast — good enough for rediscovery ranking.',
     },
   ],
   'face-detect': [
@@ -87,6 +182,7 @@ const PRESETS_BY_KIND: Record<string, Preset[]> = {
       sizeBytes: 16_923_827,
       license: 'MIT',
       note: 'Default · bundled',
+      tagline: 'Standard — works for most lighting + poses.',
     },
   ],
   'face-embed': [
@@ -97,6 +193,7 @@ const PRESETS_BY_KIND: Record<string, Preset[]> = {
       sizeBytes: 174_383_860,
       license: 'MIT',
       note: 'Default · bundled',
+      tagline: 'Industry-standard — groups same person across angles.',
     },
   ],
   'caption-gguf': [
@@ -107,6 +204,15 @@ const PRESETS_BY_KIND: Record<string, Preset[]> = {
       sizeBytes: 2_839_534_976,
       license: 'Apache-2.0',
       note: 'Default · on-demand download',
+      tagline: '~2.7 GB — decent CPU speed, good captions.',
+    },
+    {
+      name: 'moondream2-f16',
+      repo: 'moondream/moondream2-gguf',
+      filename: 'moondream2-text-model-fp16.gguf',
+      sizeBytes: 3_700_000_000,
+      license: 'Apache-2.0',
+      tagline: 'Higher fidelity, needs a GPU or a patient CPU.',
     },
   ],
 };
@@ -240,9 +346,12 @@ function ModelRow({
       }}
     >
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 13, color: 'var(--fg)', fontFamily: 'var(--mono-font)' }}>{model.name}</div>
-        <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 2 }}>
-          {featureLabel} · {model.filename} · {fmtBytes(model.sizeBytes)}
+        <div style={{ fontSize: 13, color: 'var(--fg)' }}>{featureLabel}</div>
+        <div style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 2, maxWidth: 460 }}>
+          {KIND_DESCRIPTION[model.kind] ?? model.kind}
+        </div>
+        <div className="mono" style={{ fontSize: 10, color: 'var(--fg-dim)', marginTop: 4, opacity: 0.8 }}>
+          {model.name} · {model.filename} · {fmtBytes(model.sizeBytes)}
         </div>
         {installing && (
           <div
@@ -422,10 +531,46 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
           overflow: 'auto',
         }}
       >
-        <h2 style={{ marginTop: 0, fontSize: 16 }}>Swap {KIND_LABEL[feature.kind] ?? feature.kind} model</h2>
-        <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', marginBottom: 16 }}>
+        <h2 style={{ marginTop: 0, fontSize: 16 }}>
+          Swap the model for "{KIND_LABEL[feature.kind] ?? feature.kind}"
+        </h2>
+        <div style={{ fontSize: 11.5, color: 'var(--fg-mute)', marginBottom: 8, maxWidth: 500 }}>
+          {KIND_DESCRIPTION[feature.kind] ?? ''}
+        </div>
+        <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-dim)', marginBottom: 16 }}>
           Current: {feature.name} ({sourceBadge(feature.source).label.toLowerCase()})
         </div>
+
+        {/* Re-index warning — show whenever the selection differs from the
+           current model, since any swap re-fingerprints every photo for
+           this feature. Users with large libraries need to see the cost
+           before they commit. */}
+        {selected && selected !== feature.name && (
+          <div
+            style={{
+              marginBottom: 12,
+              padding: '10px 12px',
+              border: '1px solid color-mix(in oklch, #f0b429 40%, var(--stroke))',
+              background: 'color-mix(in oklch, #f0b429 8%, var(--bg-elev))',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 11.5,
+              color: 'var(--fg)',
+            }}
+          >
+            <strong>Heads-up:</strong> swapping will clear your current{' '}
+            {(KIND_LABEL[feature.kind] ?? 'model').toLowerCase()} data and rebuild it from scratch the next
+            time the catalog runs. On a 10 000-photo library that's about 5–10 minutes of background work; 100
+            000 photos, closer to an hour. You can keep using Chronimage while it runs — search results for
+            this feature just won't update until it finishes.
+            {presets.find((p) => p.name === selected)?.breakingDimChange && (
+              <div style={{ marginTop: 6, color: 'var(--danger)' }}>
+                <strong>Architecture change:</strong> this model uses a different embedding size, so every
+                existing photo's fingerprint is discarded too. Make sure you have time for a full reimport
+                before confirming.
+              </div>
+            )}
+          </div>
+        )}
 
         {presets.map((p) => {
           const isActive = p.name === (selected ?? feature.name);
@@ -434,9 +579,9 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
               key={p.name}
               style={{
                 display: 'flex',
-                alignItems: 'center',
+                alignItems: 'flex-start',
                 gap: 10,
-                padding: '8px 10px',
+                padding: '10px 12px',
                 border: `1px solid ${isActive ? 'var(--accent)' : 'var(--stroke)'}`,
                 borderRadius: 'var(--radius-sm)',
                 marginBottom: 8,
@@ -444,12 +589,34 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
                 background: isActive ? 'color-mix(in oklch, var(--accent) 8%, var(--bg))' : 'transparent',
               }}
             >
-              <input type="radio" name="preset" checked={isActive} onChange={() => setSelected(p.name)} />
+              <input
+                type="radio"
+                name="preset"
+                checked={isActive}
+                onChange={() => setSelected(p.name)}
+                style={{ marginTop: 3 }}
+              />
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontFamily: 'var(--mono-font)' }}>{p.name}</div>
-                <div style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 2 }}>
-                  {p.repo} · {fmtBytes(p.sizeBytes)} · {p.license}
-                  {p.note ? ` · ${p.note}` : ''}
+                <div style={{ fontSize: 13 }}>
+                  {p.tagline ?? p.name}
+                  {p.note ? (
+                    <span
+                      className="mono"
+                      style={{
+                        fontSize: 10,
+                        marginLeft: 8,
+                        padding: '1px 6px',
+                        borderRadius: 4,
+                        background: 'color-mix(in oklch, var(--accent) 18%, var(--bg-elev))',
+                        color: 'var(--accent)',
+                      }}
+                    >
+                      {p.note}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 3 }}>
+                  {p.name} · {fmtBytes(p.sizeBytes)} · {p.license} · {p.repo}
                 </div>
               </div>
             </label>

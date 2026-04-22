@@ -22,7 +22,10 @@ describe('SettingsScreen', () => {
 
   it('shows the two mocked AI model rows', async () => {
     render(<SettingsScreen />, { wrapper });
-    expect(await screen.findByText('siglip2-b16-image')).toBeInTheDocument();
-    expect(await screen.findByText('scrfd-10g')).toBeInTheDocument();
+    // Model rows render the name as part of a concatenated
+    // `name · filename · size` mono line, so use a substring regex rather
+    // than exact text match (which would require the whole node to equal).
+    expect(await screen.findByText(/siglip2-b16-image/)).toBeInTheDocument();
+    expect(await screen.findByText(/scrfd-10g/)).toBeInTheDocument();
   });
 });
