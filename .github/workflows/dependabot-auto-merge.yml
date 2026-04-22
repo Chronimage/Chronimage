@@ -1,0 +1,47 @@
+name: dependabot-auto-merge
+
+# Squash-merges dependabot PRs automatically once CI is green, but only
+# for patch-level bumps and the lockfile-only updates we've told
+# dependabot to group. Anything broader (minor or major) still gets a
+# human review.
+#
+# Why: ~70% of dependabot churn is patch fixes that never affect our
+# public API or behaviour. Auto-merging them removes the "is CI green?
+# click merge" chore without relaxing review for bumps that could break
+# things.
+#
+# Triggers only from dependabot — bot identity is verified via the
+# PR's author login + the dependabot metadata action's trust chain.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for patch updates
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "${{ github.event.pull_request.number }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Leave a note on minor/major updates
+        if: steps.meta.outputs.update-type != 'version-update:semver-patch'
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --body \
+            "Not auto-merging: update-type is \`${{ steps.meta.outputs.update-type }}\` (only \`semver-patch\` is auto-merged). Please review manually."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
