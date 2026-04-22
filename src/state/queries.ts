@@ -392,6 +392,7 @@ export function useAiModelsStatus() {
   return useQuery<ModelStatus[], Error>({
     queryKey: ['ai-models-status'],
     queryFn: aiModelsStatus,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
