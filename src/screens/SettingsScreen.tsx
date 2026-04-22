@@ -26,9 +26,15 @@ import { GooglePhotosPanel } from './GooglePhotosPanel';
 /**
  * Rust `KNOWN_MODELS.kind` values ↔ the `ai_reindex(kind)` accepted values.
  * Kept in lockstep with `src-tauri/src/commands.rs::ai_reindex`.
+ *
+ * `null` means "no reindex needed after swap" — applies to kinds that
+ * only affect query-time processing (text encoder) and don't invalidate
+ * anything already stored on disk. The tokenizer is deliberately absent:
+ * it's paired with the text encoder and isn't independently swappable.
  */
-const KIND_TO_REINDEX: Record<string, string> = {
+const KIND_TO_REINDEX: Record<string, string | null> = {
   embedding: 'embeddings',
+  'embedding-text': null,
   aesthetic: 'aesthetic',
   'face-detect': 'face-detect',
   'face-embed': 'face-embed',
@@ -328,7 +334,15 @@ function ModelRow({
   const badge = sourceBadge(model.source);
   const featureLabel = KIND_LABEL[model.kind] ?? model.kind;
   const presets = PRESETS_BY_KIND[model.kind];
-  const swappable = model.kind in KIND_TO_REINDEX && (presets?.length ?? 0) > 0;
+  // Swap eligibility is solely about having alternatives — having a
+  // reindex target is a backend concern handled by the picker modal.
+  // Kinds without alternatives (e.g. tokenizer) get a disabled button
+  // with an explanation in the tooltip.
+  const swappable = (presets?.length ?? 0) > 0;
+  const unswappableReason =
+    model.kind === 'tokenizer'
+      ? 'The tokenizer ships paired with the text encoder — swap the encoder instead.'
+      : 'No alternatives available yet for this model.';
   // A bundled model can still be "missing" on disk if the installer copy
   // failed or the dev ran `pnpm tauri dev` without running
   // `scripts/fetch-bundled-models.ps1`. Expose a one-click manual install
@@ -430,7 +444,7 @@ function ModelRow({
             type="button"
             onClick={onSwap}
             disabled={!swappable}
-            title={swappable ? 'Swap to a different model' : 'No alternatives available yet'}
+            title={swappable ? 'Swap to a different model' : unswappableReason}
             style={{
               fontSize: 11,
               padding: '3px 10px',
@@ -476,10 +490,14 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
     if (!feature) return;
     setErrorMsg(null);
     try {
-      const reindexKind = KIND_TO_REINDEX[feature.kind];
-      if (!reindexKind) {
+      // `in` check (not truthy) so `null` (= "no reindex needed") still
+      // counts as a supported kind. `undefined` means the kind is
+      // genuinely unsupported (tokenizer etc.) and the Swap button
+      // should've been disabled before we got here.
+      if (!(feature.kind in KIND_TO_REINDEX)) {
         throw new Error(`unsupported kind ${feature.kind}`);
       }
+      const reindexKind = KIND_TO_REINDEX[feature.kind];
       if (activePreset && activePreset.name !== feature.name) {
         // Selected a different preset — ensure it's downloaded first.
         await download.mutateAsync([activePreset.name]);
@@ -488,7 +506,13 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
         // For now, surface a friendly "not yet available" to avoid silent no-op.
         throw new Error('Custom HF URLs land in Phase 1b — pick a preset for now.');
       }
-      await reindex.mutateAsync(reindexKind);
+      // `null` reindex = query-time-only swap (text encoder). Skip the
+      // backend reindex since no stored data is invalidated by the swap.
+      // `undefined` can't happen because we early-returned above if the
+      // kind wasn't in the map — narrow it here for the compiler.
+      if (reindexKind !== null && reindexKind !== undefined) {
+        await reindex.mutateAsync(reindexKind);
+      }
       onSwapped();
       onClose();
     } catch (e) {
@@ -557,11 +581,21 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
               color: 'var(--fg)',
             }}
           >
-            <strong>Heads-up:</strong> swapping will clear your current{' '}
-            {(KIND_LABEL[feature.kind] ?? 'model').toLowerCase()} data and rebuild it from scratch the next
-            time the catalog runs. On a 10 000-photo library that's about 5–10 minutes of background work; 100
-            000 photos, closer to an hour. You can keep using Chronimage while it runs — search results for
-            this feature just won't update until it finishes.
+            {KIND_TO_REINDEX[feature.kind] === null ? (
+              <>
+                <strong>Heads-up:</strong> this swap only changes how your <em>future</em> search queries are
+                interpreted. Nothing on disk is cleared or re-fingerprinted — your catalog stays exactly
+                as-is, and the new model takes effect on the very next search.
+              </>
+            ) : (
+              <>
+                <strong>Heads-up:</strong> swapping will clear your current{' '}
+                {(KIND_LABEL[feature.kind] ?? 'model').toLowerCase()} data and rebuild it from scratch the
+                next time the catalog runs. On a 10 000-photo library that's about 5–10 minutes of background
+                work; 100 000 photos, closer to an hour. You can keep using Chronimage while it runs — search
+                results for this feature just won't update until it finishes.
+              </>
+            )}
             {presets.find((p) => p.name === selected)?.breakingDimChange && (
               <div style={{ marginTop: 6, color: 'var(--danger)' }}>
                 <strong>Architecture change:</strong> this model uses a different embedding size, so every
