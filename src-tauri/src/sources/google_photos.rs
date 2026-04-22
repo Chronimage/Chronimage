@@ -35,7 +35,7 @@
 use crate::{AppError, AppResult};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use getrandom::getrandom;
+use getrandom::fill as getrandom_fill;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -145,7 +145,8 @@ pub struct AuthRequest {
 /// Conforms to RFC 7636 §4.1.
 pub fn generate_pkce_verifier() -> AppResult<String> {
     let mut bytes = [0u8; PKCE_VERIFIER_BYTES];
-    getrandom(&mut bytes).map_err(|e| AppError::Internal(format!("OS RNG unavailable: {e}")))?;
+    getrandom_fill(&mut bytes)
+        .map_err(|e| AppError::Internal(format!("OS RNG unavailable: {e}")))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
@@ -159,7 +160,8 @@ pub fn pkce_challenge(verifier: &str) -> String {
 /// browser.
 pub fn generate_state_token() -> AppResult<String> {
     let mut bytes = [0u8; STATE_TOKEN_BYTES];
-    getrandom(&mut bytes).map_err(|e| AppError::Internal(format!("OS RNG unavailable: {e}")))?;
+    getrandom_fill(&mut bytes)
+        .map_err(|e| AppError::Internal(format!("OS RNG unavailable: {e}")))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 

@@ -1813,183 +1813,80 @@ pub struct ModelStatus {
 pub async fn ai_models_status(app: tauri::AppHandle) -> AppResult<Vec<ModelStatus>> {
     let bundled_dir = crate::util::paths::bundled_models_dir(&app);
     let user_dir = crate::util::paths::models_dir()?;
-    resolve_all_model_statuses(bundled_dir, user_dir).await
+    resolve_all_model_statuses(bundled_dir, user_dir)
 }
 
 /// Internal helper — accepts explicit paths so tests can inject tempdirs
 /// without needing a live Tauri `AppHandle`.
-pub(crate) async fn resolve_all_model_statuses(
+pub(crate) fn resolve_all_model_statuses(
     bundled_dir: Option<std::path::PathBuf>,
     user_dir: std::path::PathBuf,
 ) -> AppResult<Vec<ModelStatus>> {
     use crate::ai::download::KNOWN_MODELS;
-    use futures::future::try_join_all;
-
-    let cache = load_hash_cache(&user_dir);
-
-    let tasks = KNOWN_MODELS.iter().map(|spec| {
-        let bundled_dir = bundled_dir.clone();
-        let user_dir = user_dir.clone();
-        let cache = cache.clone();
-        async move { resolve_model_status(spec, bundled_dir.as_deref(), &user_dir, &cache).await }
-    });
-    let (statuses, cache_updates): (Vec<ModelStatus>, Vec<Option<(String, HashCacheEntry)>>) = {
-        let pairs = try_join_all(tasks).await?;
-        pairs.into_iter().unzip()
-    };
-
-    // Persist any new cache entries (cache misses that were freshly hashed).
-    let updates: Vec<_> = cache_updates.into_iter().flatten().collect();
-    if !updates.is_empty() {
-        let mut updated = cache;
-        for (key, entry) in updates {
-            updated.insert(key, entry);
-        }
-        save_hash_cache(&user_dir, &updated);
-    }
-
-    Ok(statuses)
+    // All checks are cheap filesystem stats — no async I/O needed.
+    KNOWN_MODELS
+        .iter()
+        .map(|spec| resolve_model_status(spec, bundled_dir.as_deref(), &user_dir))
+        .collect()
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
-struct HashCacheEntry {
-    size: u64,
-    mtime_secs: u64,
-    ok: bool,
-}
-
-type HashCache = std::collections::HashMap<String, HashCacheEntry>;
-
-fn load_hash_cache(user_dir: &std::path::Path) -> HashCache {
-    let path = user_dir.join(".hash-cache.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_hash_cache(user_dir: &std::path::Path, cache: &HashCache) {
-    let path = user_dir.join(".hash-cache.json");
-    if let Ok(json) = serde_json::to_string(cache) {
-        let _ = std::fs::write(&path, json);
-    }
-}
-
-async fn resolve_model_status(
+fn resolve_model_status(
     spec: &crate::ai::download::ModelSpec,
     bundled_dir: Option<&std::path::Path>,
     user_dir: &std::path::Path,
-    cache: &HashCache,
-) -> AppResult<(ModelStatus, Option<(String, HashCacheEntry)>)> {
-    // 1. Bundled path — installer already verified so no hash work.
+) -> AppResult<ModelStatus> {
+    // 1. Bundled resource dir — installer/packaging already verified integrity.
     if spec.bundled {
         if let Some(bd) = bundled_dir {
             if bd.join(spec.filename).exists() {
-                return Ok((
-                    ModelStatus {
-                        name: spec.name.to_string(),
-                        kind: spec.kind.to_string(),
-                        filename: spec.filename.to_string(),
-                        installed: true,
-                        size_bytes: spec.size_bytes,
-                        source: ModelSource::Bundled,
-                    },
-                    None,
-                ));
-            }
-        }
-    }
-
-    // 2. User-data dir — use stat cache to skip re-reading the full file when
-    //    size + mtime are unchanged. Only falls back to full SHA256 on cache miss.
-    let path = user_dir.join(spec.filename);
-    if path.exists() {
-        let (verified, cache_update) = if spec.sha256 == "tbd" {
-            (true, None)
-        } else {
-            let meta = std::fs::metadata(&path).ok().map(|m| {
-                use std::time::UNIX_EPOCH;
-                let mtime = m
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                (m.len(), mtime)
-            });
-
-            if let Some((size, mtime)) = meta {
-                if let Some(cached) = cache.get(spec.filename) {
-                    if cached.size == size && cached.mtime_secs == mtime {
-                        // Cache hit — no disk I/O beyond the stat above.
-                        (cached.ok, None)
-                    } else {
-                        let path_clone = path.clone();
-                        let expected = spec.sha256.to_string();
-                        let ok = tokio::task::spawn_blocking(move || {
-                            verify_model_hash_streaming(&path_clone, &expected)
-                        })
-                        .await
-                        .map_err(|e| AppError::Internal(format!("hash task join: {e}")))?;
-                        let entry = HashCacheEntry {
-                            size,
-                            mtime_secs: mtime,
-                            ok,
-                        };
-                        (ok, Some((spec.filename.to_string(), entry)))
-                    }
-                } else {
-                    let path_clone = path.clone();
-                    let expected = spec.sha256.to_string();
-                    let ok = tokio::task::spawn_blocking(move || {
-                        verify_model_hash_streaming(&path_clone, &expected)
-                    })
-                    .await
-                    .map_err(|e| AppError::Internal(format!("hash task join: {e}")))?;
-                    let entry = HashCacheEntry {
-                        size,
-                        mtime_secs: mtime,
-                        ok,
-                    };
-                    (ok, Some((spec.filename.to_string(), entry)))
-                }
-            } else {
-                (false, None)
-            }
-        };
-
-        if verified {
-            return Ok((
-                ModelStatus {
+                return Ok(ModelStatus {
                     name: spec.name.to_string(),
                     kind: spec.kind.to_string(),
                     filename: spec.filename.to_string(),
                     installed: true,
                     size_bytes: spec.size_bytes,
-                    source: ModelSource::Downloaded,
-                },
-                cache_update,
-            ));
+                    source: ModelSource::Bundled,
+                });
+            }
         }
     }
 
-    // 3. Missing — either not on disk or hash mismatch.
-    Ok((
-        ModelStatus {
-            name: spec.name.to_string(),
-            kind: spec.kind.to_string(),
-            filename: spec.filename.to_string(),
-            installed: false,
-            size_bytes: spec.size_bytes,
-            source: ModelSource::Missing,
-        },
-        None,
-    ))
+    // 2. User-data dir (manually downloaded or extracted by the app).
+    //    Size check is sufficient for the display path — ORT verifies integrity
+    //    at load time, so full SHA256 here just slows the Settings panel open.
+    let path = user_dir.join(spec.filename);
+    if path.exists() {
+        let size_ok = spec.size_bytes == 0
+            || std::fs::metadata(&path)
+                .map(|m| m.len() == spec.size_bytes)
+                .unwrap_or(false);
+        if size_ok {
+            return Ok(ModelStatus {
+                name: spec.name.to_string(),
+                kind: spec.kind.to_string(),
+                filename: spec.filename.to_string(),
+                installed: true,
+                size_bytes: spec.size_bytes,
+                source: ModelSource::Downloaded,
+            });
+        }
+    }
+
+    // 3. Missing.
+    Ok(ModelStatus {
+        name: spec.name.to_string(),
+        kind: spec.kind.to_string(),
+        filename: spec.filename.to_string(),
+        installed: false,
+        size_bytes: spec.size_bytes,
+        source: ModelSource::Missing,
+    })
 }
 
 /// Stream-hash `path` and compare against `expected` (lowercase hex). Uses
 /// an 8 MB read buffer so a 2.7 GB model doesn't balloon memory. Returns
 /// `false` on any I/O error (treated as not-installed).
+#[cfg(test)]
 fn verify_model_hash_streaming(path: &std::path::Path, expected: &str) -> bool {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -3651,15 +3548,14 @@ mod tests {
 
     // ── ai_models_status tests ────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn ai_models_status_returns_all_known_models() {
+    #[test]
+    fn ai_models_status_returns_all_known_models() {
         let tmp_user = tempfile::TempDir::new().expect("tempdir");
         let tmp_bundled = tempfile::TempDir::new().expect("bundled tempdir");
         let statuses = resolve_all_model_statuses(
             Some(tmp_bundled.path().to_path_buf()),
             tmp_user.path().to_path_buf(),
         )
-        .await
         .expect("resolve_all_model_statuses failed");
         use crate::ai::download::KNOWN_MODELS;
         assert_eq!(
@@ -3669,15 +3565,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ai_models_status_not_installed_when_dir_empty() {
+    #[test]
+    fn ai_models_status_not_installed_when_dir_empty() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let tmp_bundled = tempfile::TempDir::new().expect("bundled tempdir");
         let statuses = resolve_all_model_statuses(
             Some(tmp_bundled.path().to_path_buf()),
             tmp.path().to_path_buf(),
         )
-        .await
         .expect("resolve_all_model_statuses failed");
         assert!(!statuses.is_empty(), "should report all KNOWN_MODELS rows");
         for s in &statuses {
@@ -3695,8 +3590,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn ai_models_status_reports_bundled_source_when_present() {
+    #[test]
+    fn ai_models_status_reports_bundled_source_when_present() {
         let tmp_user = tempfile::TempDir::new().expect("user tempdir");
         let tmp_bundled = tempfile::TempDir::new().expect("bundled tempdir");
         std::fs::write(
@@ -3709,7 +3604,6 @@ mod tests {
             Some(tmp_bundled.path().to_path_buf()),
             tmp_user.path().to_path_buf(),
         )
-        .await
         .expect("resolve_all_model_statuses failed");
         let siglip = statuses
             .iter()

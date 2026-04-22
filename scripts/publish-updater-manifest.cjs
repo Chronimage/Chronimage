@@ -40,11 +40,20 @@ function findFirst(pattern) {
   return m ? path.join(bundleDir, m) : null;
 }
 
-const msi = findFirst(/\.msi$/);
+// findFirst(/\.msi$/) must exclude .sig files — sort so .msi comes before .msi.sig.
+const msi = findFirst(/(?<!\.sig)\.msi$/);
 const sigFile = findFirst(/\.msi\.sig$/);
-if (!msi || !sigFile) {
-  console.error(`Could not find MSI or .sig in ${bundleDir}`);
+if (!msi) {
+  console.error(`Could not find MSI in ${bundleDir}`);
   process.exit(1);
+}
+if (!sigFile) {
+  console.warn(
+    `No .msi.sig found in ${bundleDir} — build was not signed.\n` +
+    `Set TAURI_SIGNING_PRIVATE_KEY (secret: TAURI_UPDATER_PRIVATE_KEY) in the\n` +
+    `GitHub environment to enable signing and auto-update manifest publishing.`,
+  );
+  process.exit(0);
 }
 
 const signature = fs.readFileSync(sigFile, 'utf8').trim();
