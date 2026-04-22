@@ -65,6 +65,20 @@ jobs:
         shell: pwsh
         run: pwsh scripts/fetch-bundled-models.ps1
 
+      - name: Stamp MSI-compatible version into nightly config
+        # Nightly tags carry a YYYYMMDD stamp (e.g. 20260422) which blows
+        # past MSI's 65535 limit on the 4th segment. Use GitHub's
+        # per-workflow run_number instead — monotonic, zero-indexed,
+        # well under 65535 for anything short of a decade of nightly runs.
+        shell: pwsh
+        run: |
+          $msiVersion = "0.1.0.${{ github.run_number }}"
+          Write-Host "Derived MSI version: $msiVersion (run #${{ github.run_number }})"
+          $confPath = 'src-tauri/tauri.nightly.conf.json'
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          $conf | Add-Member -NotePropertyName version -NotePropertyValue $msiVersion -Force
+          $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding utf8
+
       - name: Build signed nightly MSI
         env:
           # Non-EV test cert for nightly; OK that SmartScreen warns

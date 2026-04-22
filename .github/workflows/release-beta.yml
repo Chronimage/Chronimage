@@ -59,6 +59,27 @@ jobs:
         shell: pwsh
         run: pwsh scripts/fetch-bundled-models.ps1
 
+      - name: Stamp MSI-compatible version into beta config
+        # MSI ProductVersion must be X.Y.Z[.N] with numeric-only segments,
+        # each ≤ 65535. Our base tauri.conf.json ships 0.1.0 (no suffix);
+        # for each beta tag v0.1.0-beta.N we derive the MSI form
+        # 0.1.0.N and patch it into tauri.beta.conf.json so wix accepts
+        # the build. Preserves the tag's semver identity in the
+        # auto-updater manifest (which ships separately) while keeping
+        # the installer's ProductVersion legal.
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$') {
+            throw "Unexpected tag format '$tag' — expected v<major>.<minor>.<patch>-beta.<n>"
+          }
+          $msiVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$($Matches[4])"
+          Write-Host "Derived MSI version: $msiVersion"
+          $confPath = 'src-tauri/tauri.beta.conf.json'
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          $conf | Add-Member -NotePropertyName version -NotePropertyValue $msiVersion -Force
+          $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding utf8
+
       - name: Build signed beta MSI
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY }}

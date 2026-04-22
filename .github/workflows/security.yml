@@ -12,19 +12,11 @@ permissions:
   security-events: write
 
 jobs:
-  cargo-audit:
-    name: cargo audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      # Prebuilt binary via install-action — previously `cargo install
-      # cargo-audit` took ~2m 8s compiling from source on every run.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
-      - run: cargo audit --ignore RUSTSEC-2023-0071 --file src-tauri/Cargo.lock
-
+  # cargo-deny already runs `check advisories` against the same RustSec
+  # database that cargo-audit uses, so running both jobs was ~20 seconds
+  # of duplicate work per PR. Keeping the single `cargo deny` job;
+  # advisory coverage is identical, and deny also handles licences,
+  # sources, and bans in one pass.
   cargo-deny:
     name: cargo deny
     runs-on: ubuntu-latest

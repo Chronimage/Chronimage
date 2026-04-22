@@ -51,6 +51,22 @@ jobs:
         shell: pwsh
         run: pwsh scripts/fetch-bundled-models.ps1
 
+      - name: Stamp MSI-compatible version into insider config
+        # Insider tags follow v<major>.<minor>.<patch>-insider.<N>; derive
+        # MSI-compatible ProductVersion 0.1.0.N. Same pattern as beta.
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)-insider\.(\d+)$') {
+            throw "Unexpected tag format '$tag' — expected v<major>.<minor>.<patch>-insider.<n>"
+          }
+          $msiVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$($Matches[4])"
+          Write-Host "Derived MSI version: $msiVersion"
+          $confPath = 'src-tauri/tauri.insider.conf.json'
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          $conf | Add-Member -NotePropertyName version -NotePropertyValue $msiVersion -Force
+          $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding utf8
+
       - name: Build signed insider MSI
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_UPDATER_PRIVATE_KEY_INSIDER }}
