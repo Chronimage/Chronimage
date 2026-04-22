@@ -127,7 +127,7 @@ clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 
 [target.'cfg(windows)'.dependencies]
-window-vibrancy = "0.5"
+window-vibrancy = "0.6"
 windows = { version = "0.58", features = [
   "Win32_Devices_PortableDevices",
   "Win32_Foundation",
