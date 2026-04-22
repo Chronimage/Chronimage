@@ -75,7 +75,7 @@ libsqlite3-sys = "0.30.1"
 # Hashing + perceptual hash
 sha2 = "0.11"
 hex = "0.4"
-image_hasher = "2"
+image_hasher = "3"
 
 # EXIF
 kamadak-exif = "0.6"
