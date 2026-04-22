@@ -532,7 +532,9 @@ export interface GphotosPollingConfig {
 
 export interface GphotosPickerSession {
   id: string;
-  pickerUri: string;
+  /** Present on session *create*; Google omits it from poll responses
+   *  once `mediaItemsSet` flips to true. Treat as optional everywhere. */
+  pickerUri?: string | null;
   mediaItemsSet: boolean;
   pollingConfig?: GphotosPollingConfig | null;
   expireTime?: string | null;

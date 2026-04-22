@@ -228,6 +228,13 @@ export function GooglePhotosPanel() {
     setPick({ kind: 'idle' });
     try {
       const session = await gphotosCreatePickerSession();
+      if (!session.pickerUri) {
+        setPick({
+          kind: 'error',
+          message: 'Photo Picker returned no URL — check the Photo Picker API is enabled.',
+        });
+        return;
+      }
       await openShell(session.pickerUri);
       setPick({ kind: 'session', session });
     } catch (err) {

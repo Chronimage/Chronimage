@@ -660,8 +660,12 @@ pub async fn begin_oauth_flow(client_id: &str) -> AppResult<(String, FlowId)> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PickerSession {
     pub id: String,
-    #[serde(rename = "pickerUri")]
-    pub picker_uri: String,
+    /// Optional because Google only includes `pickerUri` in the session
+    /// *create* response — once `mediaItemsSet` flips to true, subsequent
+    /// poll responses drop the field. We only open the URI at the start
+    /// of the flow, so a `None` on poll is fine.
+    #[serde(rename = "pickerUri", default)]
+    pub picker_uri: Option<String>,
     #[serde(rename = "mediaItemsSet", default)]
     pub media_items_set: bool,
     #[serde(rename = "pollingConfig", default)]
