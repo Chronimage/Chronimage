@@ -13,7 +13,7 @@
       "active": true,
       "endpoints": ["https://releases.chronimage.app/nightly.json"],
       "dialog": false,
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYzMTI4N0M3N0EwOUY4NzIKUldSeStBbDZ4NGNTWTdTNUdrTE5vQVhncmlrQnNRdThkd1dwbk4veVFMbjFSMm1GOVFqWmlQQlMK"
     }
   }
 }
