@@ -93,7 +93,7 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 # Google Photos OAuth2: base64url-encoded PKCE challenges + CSRF state tokens.
 base64 = "0.22"
 # Cryptographic RNG for PKCE verifier + state token (OS entropy source).
-getrandom = "0.2"
+getrandom = "0.4"
 # Cross-platform secret store. On Windows this routes to Credential Manager; on
 # macOS to Keychain; on Linux to Secret Service. OAuth refresh tokens for cloud
 # source connectors are persisted here — never in the catalog DB.
