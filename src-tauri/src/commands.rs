@@ -1810,6 +1810,7 @@ pub struct ModelStatus {
 #[tauri::command]
 pub async fn ai_models_status() -> AppResult<Vec<ModelStatus>> {
     use crate::ai::download::KNOWN_MODELS;
+    use futures::future::try_join_all;
 
     // Bundled dir — env override used in tests; None in normal test runs.
     let bundled_dir: Option<std::path::PathBuf> = std::env::var("CHRONIMAGE_BUNDLED_MODELS_DIR")
@@ -1817,73 +1818,96 @@ pub async fn ai_models_status() -> AppResult<Vec<ModelStatus>> {
         .map(std::path::PathBuf::from);
     let user_dir = crate::util::paths::models_dir()?;
 
-    let mut statuses = Vec::with_capacity(KNOWN_MODELS.len());
-    for spec in KNOWN_MODELS {
-        // 1. Bundled check (skip hash — installer already verified).
-        if spec.bundled {
-            if let Some(ref bd) = bundled_dir {
-                let p = bd.join(spec.filename);
-                if p.exists() {
-                    statuses.push(ModelStatus {
-                        name: spec.name.to_string(),
-                        kind: spec.kind.to_string(),
-                        filename: spec.filename.to_string(),
-                        installed: true,
-                        size_bytes: spec.size_bytes,
-                        source: ModelSource::Bundled,
-                    });
-                    continue;
-                }
-            }
-        }
+    // Fan out per-model lookups in parallel. The previous serial loop
+    // re-hashed every downloaded model on each Settings-panel open —
+    // sequentially hashing a 2.7 GB Moondream2 alone added ~5 s to every
+    // render. Parallel spawn_blocking + streaming hash keeps the panel
+    // responsive even when every KNOWN_MODELS entry is present on disk.
+    let tasks = KNOWN_MODELS.iter().map(|spec| {
+        let bundled_dir = bundled_dir.clone();
+        let user_dir = user_dir.clone();
+        async move { resolve_model_status(spec, &bundled_dir, &user_dir).await }
+    });
+    let statuses = try_join_all(tasks).await?;
+    Ok(statuses)
+}
 
-        // 2. User-data dir check (hash-verify when sha256 is locked).
-        let path = user_dir.join(spec.filename);
-        if path.exists() {
-            let verified = if spec.sha256 == "tbd" {
-                true
-            } else {
-                let path_clone = path.clone();
-                let expected = spec.sha256.to_string();
-                tokio::task::spawn_blocking(move || verify_model_hash(&path_clone, &expected))
-                    .await
-                    .map_err(|e| AppError::Internal(format!("hash task join: {e}")))?
-            };
-            if verified {
-                statuses.push(ModelStatus {
+async fn resolve_model_status(
+    spec: &crate::ai::download::ModelSpec,
+    bundled_dir: &Option<std::path::PathBuf>,
+    user_dir: &std::path::Path,
+) -> AppResult<ModelStatus> {
+    // 1. Bundled path — installer already verified so no hash work.
+    if spec.bundled {
+        if let Some(bd) = bundled_dir.as_ref() {
+            if bd.join(spec.filename).exists() {
+                return Ok(ModelStatus {
                     name: spec.name.to_string(),
                     kind: spec.kind.to_string(),
                     filename: spec.filename.to_string(),
                     installed: true,
                     size_bytes: spec.size_bytes,
-                    source: ModelSource::Downloaded,
+                    source: ModelSource::Bundled,
                 });
-                continue;
             }
         }
-
-        // 3. Missing.
-        statuses.push(ModelStatus {
-            name: spec.name.to_string(),
-            kind: spec.kind.to_string(),
-            filename: spec.filename.to_string(),
-            installed: false,
-            size_bytes: spec.size_bytes,
-            source: ModelSource::Missing,
-        });
     }
 
-    Ok(statuses)
+    // 2. User-data dir — hash-verify when sha256 is locked. Skipped for
+    // `"tbd"` placeholders (we don't know what to check against yet).
+    let path = user_dir.join(spec.filename);
+    if path.exists() {
+        let verified = if spec.sha256 == "tbd" {
+            true
+        } else {
+            let path_clone = path.clone();
+            let expected = spec.sha256.to_string();
+            tokio::task::spawn_blocking(move || verify_model_hash_streaming(&path_clone, &expected))
+                .await
+                .map_err(|e| AppError::Internal(format!("hash task join: {e}")))?
+        };
+        if verified {
+            return Ok(ModelStatus {
+                name: spec.name.to_string(),
+                kind: spec.kind.to_string(),
+                filename: spec.filename.to_string(),
+                installed: true,
+                size_bytes: spec.size_bytes,
+                source: ModelSource::Downloaded,
+            });
+        }
+    }
+
+    // 3. Missing — either not on disk or hash mismatch.
+    Ok(ModelStatus {
+        name: spec.name.to_string(),
+        kind: spec.kind.to_string(),
+        filename: spec.filename.to_string(),
+        installed: false,
+        size_bytes: spec.size_bytes,
+        source: ModelSource::Missing,
+    })
 }
 
-/// Synchronously hash the file at `path` and compare against `expected` hex.
-/// Returns `false` on any I/O error (treated as not-installed).
-fn verify_model_hash(path: &std::path::Path, expected: &str) -> bool {
+/// Stream-hash `path` and compare against `expected` (lowercase hex). Uses
+/// an 8 MB read buffer so a 2.7 GB model doesn't balloon memory. Returns
+/// `false` on any I/O error (treated as not-installed).
+fn verify_model_hash_streaming(path: &std::path::Path, expected: &str) -> bool {
     use sha2::{Digest, Sha256};
-    match std::fs::read(path) {
-        Ok(bytes) => hex::encode(Sha256::digest(&bytes)) == expected,
-        Err(_) => false,
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 8 * 1024 * 1024];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
+        }
     }
+    hex::encode(hasher.finalize()) == expected
 }
 
 /// Truncate and recompute the data produced by `kind`.
@@ -3623,7 +3647,7 @@ mod tests {
             .expect("tempfile");
         std::fs::write(tmp.path(), b"test data").expect("write");
         assert!(
-            !verify_model_hash(
+            !verify_model_hash_streaming(
                 tmp.path(),
                 "0000000000000000000000000000000000000000000000000000000000000000"
             ),
@@ -3642,7 +3666,7 @@ mod tests {
         std::fs::write(tmp.path(), data).expect("write");
         let expected = hex::encode(Sha256::digest(data));
         assert!(
-            verify_model_hash(tmp.path(), &expected),
+            verify_model_hash_streaming(tmp.path(), &expected),
             "correct hash must return true"
         );
     }
@@ -3650,7 +3674,7 @@ mod tests {
     #[test]
     fn verify_model_hash_missing_file_returns_false() {
         assert!(
-            !verify_model_hash(std::path::Path::new("/nonexistent/model.onnx"), "abc123"),
+            !verify_model_hash_streaming(std::path::Path::new("/nonexistent/model.onnx"), "abc123"),
             "missing file must return false"
         );
     }
