@@ -73,7 +73,7 @@ sqlite-vec = "0.1.9"
 libsqlite3-sys = "0.30.1"
 
 # Hashing + perceptual hash
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 image_hasher = "2"
 
