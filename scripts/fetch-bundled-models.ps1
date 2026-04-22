@@ -139,10 +139,21 @@ foreach ($m in $Models) {
         try {
             Add-Type -AssemblyName System.IO.Compression.FileSystem
             $zip = [System.IO.Compression.ZipFile]::OpenRead($BuffaloZipPath)
+            # Match by basename rather than full path — InsightFace's zip
+            # layout has shifted across v0.7 asset uploads (sometimes
+            # prefixed with `buffalo_l/`, sometimes root-level). Fall back
+            # to any entry whose filename matches.
+            $expectedBase = Split-Path -Leaf $m.ZipEntry
             $entry = $zip.Entries | Where-Object { $_.FullName -ieq $m.ZipEntry } | Select-Object -First 1
             if (-not $entry) {
+                $entry = $zip.Entries |
+                    Where-Object { (Split-Path -Leaf $_.FullName) -ieq $expectedBase } |
+                    Select-Object -First 1
+            }
+            if (-not $entry) {
+                $available = ($zip.Entries | ForEach-Object { $_.FullName }) -join ', '
                 $zip.Dispose()
-                throw "Entry '$($m.ZipEntry)' not found in buffalo_l.zip"
+                throw "Entry matching '$expectedBase' not found in buffalo_l.zip (available: $available)"
             }
             $stream = $entry.Open()
             $tmp = $Dest + '.extract.tmp'
