@@ -90,16 +90,21 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         filename: "siglip2-b16-image.onnx",
         bundled: true,
     },
-    // SigLIP-2 text encoder — same onnx-community repo as the image encoder.
-    // Enables real NL search via `embed_text`. ~370 MB ONNX export.
+    // SigLIP-2 text encoder — int8-quantized variant (283 MB vs. 1.13 GB
+    // for fp32). Same architecture + embedding dim (768) as the image
+    // encoder and the fp32/fp16 text variants, so f32 tensor boundaries
+    // stay intact and the Rust ort loader needs no precision casting.
+    // Power users can swap to `text_model_fp16.onnx` (565 MB, ~same
+    // retrieval quality) or `text_model.onnx` (1.13 GB, fp32) from the
+    // Settings AI-models picker; swap is safe without a dim change.
     ModelSpec {
         name: "siglip2-b16-text",
         kind: "embedding-text",
         version: "2.0.0",
-        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model.onnx",
+        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/resolve/main/onnx/text_model_quantized.onnx",
         // sha256 to be locked after first-run download verification.
         sha256: "tbd",
-        size_bytes: 370_000_000,
+        size_bytes: 283_000_000,
         filename: "siglip2-b16-text.onnx",
         bundled: true,
     },
