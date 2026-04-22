@@ -29,15 +29,34 @@ updates:
     schedule:
       interval: "weekly"
       day: "tuesday"
+    # With grouping below, most weeks should produce 1–2 PRs max; this cap
+    # is a safety net for major-bump weeks.
     open-pull-requests-limit: 5
     commit-message:
       prefix: "chore(deps)"
     groups:
+      # Tauri releases every dep in lockstep; ship one PR.
       tauri:
         patterns:
           - "tauri"
           - "tauri-*"
           - "tauri-plugin-*"
+      # ort + its direct companions (ndarray, half) — ONNX stack moves together.
+      ai-runtime:
+        patterns:
+          - "ort"
+          - "ort-*"
+          - "ndarray"
+          - "half"
+          - "tokenizers"
+          - "hdbscan"
+      # Everything else patch/minor → one grouped PR. Major bumps still
+      # get individual PRs so their breaking-change review doesn't get
+      # buried in a ten-crate diff.
+      rust-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"

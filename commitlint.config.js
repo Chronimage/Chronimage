@@ -42,7 +42,10 @@ export default {
       ],
     ],
     'scope-empty': [2, 'never'],
-    'subject-case': [2, 'always', 'lower-case'],
+    // Allow sentence-case too — dependabot hardcodes "Bump X from Y to Z"
+    // with a capital B, and other renovate-style bots do similar. Keeping
+    // the rule strictly lower-case blocks every such PR on commitlint.
+    'subject-case': [2, 'always', ['lower-case', 'sentence-case']],
     'subject-max-length': [2, 'always', 100],
     'body-max-line-length': [1, 'always', 120],
   },
