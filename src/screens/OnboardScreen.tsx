@@ -11,6 +11,7 @@
  * (see `docs/adr/0003-bundled-default-models.md`).
  */
 
+import { useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useRef, useState } from 'react';
@@ -37,7 +38,7 @@ import {
   useStartImport,
 } from '../state/queries';
 import { useUi } from '../state/ui';
-import { debug } from '../util/log';
+import { debug, errorMessage } from '../util/log';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -393,21 +394,30 @@ function OnbWelcome({ catalogMode, onSelectMode }: OnbWelcomeProps) {
 interface OnbSourcesProps {
   activeImports: Map<number, ActiveImport>;
   onAddLocalFolder: () => Promise<void>;
+  onConnectGooglePhotos: () => Promise<void>;
   onAddGoogleTakeout: () => Promise<void>;
   onAddIcloud: () => Promise<void>;
   onImportIphone: (deviceId: string, deviceName: string) => Promise<void>;
   busy: boolean;
   error: Error | null;
+  gphotosStatus:
+    | { kind: 'idle' }
+    | { kind: 'signing-in' }
+    | { kind: 'picker-open'; sessionId: string }
+    | { kind: 'importing'; importId: number }
+    | { kind: 'error'; message: string };
 }
 
 function OnbSources({
   activeImports,
   onAddLocalFolder,
+  onConnectGooglePhotos,
   onAddGoogleTakeout,
   onAddIcloud,
   onImportIphone,
   busy,
   error,
+  gphotosStatus,
 }: OnbSourcesProps) {
   const { data: sources = [] } = useSources();
   const deleteSource = useDeleteSource();
@@ -516,11 +526,21 @@ function OnbSources({
           type="button"
           className="btn2"
           style={{ padding: '9px 16px', fontSize: 13 }}
-          onClick={onAddGoogleTakeout}
+          onClick={onConnectGooglePhotos}
           disabled={busy}
-          title="Select a Google Photos Takeout export folder"
+          title="Sign in with Google and pick photos via the Photo Picker"
         >
           <Icon name="cloud" size={14} /> Google Photos
+        </button>
+        <button
+          type="button"
+          className="btn2"
+          style={{ padding: '9px 16px', fontSize: 13, opacity: 0.85 }}
+          onClick={onAddGoogleTakeout}
+          disabled={busy}
+          title="Already downloaded a Google Photos Takeout export? Pick the folder."
+        >
+          <Icon name="cloud" size={14} /> Takeout folder
         </button>
         <button
           type="button"
@@ -576,6 +596,45 @@ function OnbSources({
       {error && (
         <div className="mono" style={{ fontSize: 11, color: 'var(--danger)', marginTop: 10 }}>
           {error.message}
+        </div>
+      )}
+
+      {/* ── Google Photos status banner ── */}
+      {gphotosStatus.kind !== 'idle' && (
+        <div
+          style={{
+            marginTop: 14,
+            padding: '10px 12px',
+            border: '1px solid var(--stroke)',
+            borderRadius: 6,
+            fontSize: 12,
+            color: gphotosStatus.kind === 'error' ? 'var(--danger)' : 'var(--fg)',
+            background: 'var(--bg-elev)',
+          }}
+        >
+          {gphotosStatus.kind === 'signing-in' && (
+            <>
+              <strong>Google Photos:</strong> Sign in in your browser. This pane updates automatically when
+              you finish.
+            </>
+          )}
+          {gphotosStatus.kind === 'picker-open' && (
+            <>
+              <strong>Google Photos:</strong> Pick the photos you want to import in the browser tab that just
+              opened. We'll start the download once you're done.
+            </>
+          )}
+          {gphotosStatus.kind === 'importing' && (
+            <>
+              <strong>Google Photos:</strong> Downloading picked photos + running import #
+              {gphotosStatus.importId}. Track progress below.
+            </>
+          )}
+          {gphotosStatus.kind === 'error' && (
+            <>
+              <strong>Google Photos:</strong> {gphotosStatus.message}
+            </>
+          )}
         </div>
       )}
 
@@ -971,6 +1030,17 @@ function OnbPeople() {
 export function OnboardScreen() {
   const [stepIdx, setStepIdx] = useState<number>(0);
   const [catalogMode, setCatalogMode] = useState<CatalogMode>('consolidate');
+  const queryClient = useQueryClient();
+
+  // Live status for the Google Photos flow. Rendered inline under the
+  // Sources step so the user isn't guessing whether the click landed.
+  const [gphotosStatus, setGphotosStatus] = useState<
+    | { kind: 'idle' }
+    | { kind: 'signing-in' }
+    | { kind: 'picker-open'; sessionId: string }
+    | { kind: 'importing'; importId: number }
+    | { kind: 'error'; message: string }
+  >({ kind: 'idle' });
 
   const { data: sources = [] } = useSources();
   const createSource = useCreateSource();
@@ -1049,6 +1119,131 @@ export function OnboardScreen() {
       });
       return next;
     });
+  }
+
+  async function handleConnectGooglePhotos(): Promise<void> {
+    // Full flow:
+    //   1. If not signed in → open OAuth in browser, poll flow until
+    //      completed.
+    //   2. Ensure the `sources` row exists (deterministic via
+    //      gphotos_ensure_source_row; the earlier background-task
+    //      pattern raced the TanStack cache and left the UI blank).
+    //   3. Invalidate useSources() so the row appears in the list.
+    //   4. Create a Photo Picker session; open the picker URL in the
+    //      browser.
+    //   5. Poll the session until mediaItemsSet = true.
+    //   6. Kick off import_google_photos with the source_id from step 2.
+    //   7. Record in activeImports so the existing progress surface
+    //      tracks it.
+    const {
+      gphotosBeginOauthFlow,
+      gphotosPollOauthFlow,
+      gphotosAuthStatus,
+      gphotosEnsureSourceRow,
+      gphotosCreatePickerSession,
+      gphotosPollPickerSession,
+      gphotosDeletePickerSession,
+      importGooglePhotos,
+    } = await import('../tauri/invoke');
+    const { open: openShell } = await import('@tauri-apps/plugin-shell');
+
+    setGphotosStatus({ kind: 'signing-in' });
+
+    try {
+      // Step 1: OAuth if needed.
+      let connected = await gphotosAuthStatus();
+      if (!connected) {
+        const { auth_url, flow_id } = await gphotosBeginOauthFlow();
+        await openShell(auth_url);
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 305_000) {
+          const status = await gphotosPollOauthFlow(flow_id);
+          if (status.state === 'completed') {
+            connected = true;
+            break;
+          }
+          if (status.state === 'failed') {
+            setGphotosStatus({ kind: 'error', message: status.message });
+            return;
+          }
+          if (status.state === 'timed_out') {
+            setGphotosStatus({
+              kind: 'error',
+              message: 'Sign-in timed out. Close the browser tab and try again.',
+            });
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        if (!connected) {
+          setGphotosStatus({ kind: 'error', message: 'Sign-in did not complete.' });
+          return;
+        }
+      }
+
+      // Step 2 + 3: ensure source row + refresh the list.
+      const sourceRow = await gphotosEnsureSourceRow();
+      await queryClient.invalidateQueries({ queryKey: ['sources'] });
+
+      // Step 4: open the Photo Picker.
+      const picker = await gphotosCreatePickerSession();
+      if (!picker.pickerUri) {
+        setGphotosStatus({
+          kind: 'error',
+          message:
+            'Photo Picker returned no URL — check that the Photo Picker API is enabled on your Google Cloud project.',
+        });
+        return;
+      }
+      await openShell(picker.pickerUri);
+      setGphotosStatus({ kind: 'picker-open', sessionId: picker.id });
+
+      // Step 5: poll until user finishes picking. 10 min cap.
+      const pickerDeadline = Date.now() + 600_000;
+      let ready = false;
+      while (Date.now() < pickerDeadline) {
+        const snap = await gphotosPollPickerSession(picker.id);
+        if (snap.mediaItemsSet) {
+          ready = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      if (!ready) {
+        setGphotosStatus({
+          kind: 'error',
+          message:
+            "Didn't detect any photos picked — close the Chronimage picker tab and click Google Photos again to retry.",
+        });
+        return;
+      }
+
+      // Step 6: import.
+      const resp = await importGooglePhotos(sourceRow.id, picker.id);
+      setGphotosStatus({ kind: 'importing', importId: resp.import_id });
+      setActiveImports((prev) => {
+        const next = new Map(prev);
+        next.set(resp.import_id, {
+          importId: resp.import_id,
+          sourceId: sourceRow.id,
+          sourceName: sourceRow.name,
+          total: 0,
+          done: 0,
+          currentFile: '',
+          etaSeconds: null,
+          finished: false,
+        });
+        return next;
+      });
+      try {
+        await gphotosDeletePickerSession(picker.id);
+      } catch (err) {
+        debug('gphotos onboard: delete picker session failed (non-fatal)', err);
+      }
+    } catch (err) {
+      debug('gphotos onboard: connect flow failed', err);
+      setGphotosStatus({ kind: 'error', message: errorMessage(err) });
+    }
   }
 
   async function handleAddGoogleTakeout(): Promise<void> {
@@ -1208,7 +1403,9 @@ export function OnboardScreen() {
           {step === 'sources' && (
             <OnbSources
               activeImports={activeImports}
+              gphotosStatus={gphotosStatus}
               onAddLocalFolder={handleAddLocalFolder}
+              onConnectGooglePhotos={handleConnectGooglePhotos}
               onAddGoogleTakeout={handleAddGoogleTakeout}
               onAddIcloud={handleAddIcloud}
               onImportIphone={handleImportIphone}

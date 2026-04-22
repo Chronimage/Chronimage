@@ -58,7 +58,6 @@ rayon = "1.10"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-tracing-loki = { version = "0.2", default-features = false, features = ["compat-0-2-1"] }
 
 # Storage + migrations (Phase 1 will flesh these out)
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "uuid"] }
@@ -122,6 +121,10 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+
+# .env loader — dev convenience so CHRONIMAGE_* env vars (e.g. the Google
+# Photos OAuth client_secret) can live in the gitignored .env.local.
+dotenvy = "0.15"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.5"

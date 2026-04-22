@@ -22,41 +22,41 @@ fn install_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("chronimage=debug,tauri=info,sqlx=warn"));
 
-    let registry = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_target(false).compact());
+    let fmt_layer = fmt::layer().with_target(true).compact();
 
-    // Ship logs to Loki when available (dev only). Silently skip if Loki is not running.
+    // Ship to Loki in dev via our own minimal layer (see util::loki). The
+    // `tracing-loki` crate's background task silently stopped delivering
+    // pushes (Loki's distributor metrics showed zero backend lines despite
+    // init reporting success), so we replaced it with a ~200-line custom
+    // layer that uses reqwest 0.12 directly + `eprintln!`s on push failure.
     #[cfg(debug_assertions)]
     {
         let loki_url =
             std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3101".to_string());
-        let builder_result = tracing_loki::builder()
-            .label("app", "chronimage")
-            .and_then(|b| b.label("env", "dev"))
-            .and_then(|b| b.extra_field("pid", std::process::id().to_string()))
-            .and_then(|b| {
-                b.build_url(
-                    tracing_loki::url::Url::parse(&format!("{loki_url}/loki/api/v1/push"))
-                        .expect("loki url"),
-                )
-            });
-        match builder_result {
-            Ok((loki_layer, task)) => {
-                tauri::async_runtime::spawn(task);
-                let _ = registry.with(loki_layer).try_init();
-                tracing::info!(loki_url, "loki log shipping enabled");
-            }
-            Err(e) => {
-                let _ = registry.try_init();
-                tracing::warn!(error = %e, "loki layer init failed, stdout only");
-            }
-        }
+        let push_url = format!("{loki_url}/loki/api/v1/push");
+        let labels: chronimage::util::loki::Labels = vec![
+            ("app".into(), "chronimage".into()),
+            ("env".into(), "dev".into()),
+            // Parity with the frontend's `layer=frontend` — a single
+            // `{app="chronimage"}` query surfaces both streams interleaved.
+            ("layer".into(), "backend".into()),
+            ("pid".into(), std::process::id().to_string()),
+        ];
+        let loki_layer = chronimage::util::loki::LokiLayer::spawn(push_url, labels);
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .with(loki_layer)
+            .try_init();
+        tracing::info!(loki_url, "loki log shipping enabled");
     }
 
     #[cfg(not(debug_assertions))]
     {
-        let _ = registry.try_init();
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .try_init();
     }
 }
 
@@ -71,6 +71,13 @@ fn apply_window_effects(window: &tauri::WebviewWindow) {
 fn apply_window_effects(_window: &tauri::WebviewWindow) {}
 
 fn main() {
+    // Load .env.local (and .env) early so downstream code reading via
+    // std::env::var (e.g. CHRONIMAGE_GPHOTOS_CLIENT_SECRET) sees values
+    // the dev put in the gitignored files. Silent failure if absent —
+    // production installs don't ship these files.
+    let _ = dotenvy::from_filename(".env.local");
+    let _ = dotenvy::dotenv();
+
     install_tracing();
 
     tauri::Builder::default()
@@ -106,10 +113,18 @@ fn main() {
             commands::import_google_takeout,
             commands::detect_icloud_path,
             commands::list_iphone_devices,
-            commands::gphotos_start_oauth,
-            commands::gphotos_complete_oauth,
+            commands::gphotos_begin_oauth_flow,
+            commands::gphotos_poll_oauth_flow,
+            commands::gphotos_cancel_oauth_flow,
             commands::gphotos_auth_status,
             commands::gphotos_sign_out,
+            commands::gphotos_account_info,
+            commands::gphotos_ensure_source_row,
+            commands::gphotos_manual_cleanup_instructions,
+            commands::gphotos_create_picker_session,
+            commands::gphotos_poll_picker_session,
+            commands::gphotos_delete_picker_session,
+            commands::import_google_photos,
             #[cfg(debug_assertions)]
             commands::__test_generate_fixture,
             commands::detect_hardware,

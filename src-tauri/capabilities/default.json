@@ -31,6 +31,15 @@
     "notification:default",
     "os:default",
     "shell:default",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "https://accounts.google.com/**" },
+        { "url": "https://photos.google.com/**" },
+        { "url": "https://photospicker.googleapis.com/**" },
+        { "url": "https://takeout.google.com/**" }
+      ]
+    },
     "store:default",
     "updater:default"
   ]
