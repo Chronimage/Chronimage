@@ -1,8 +1,8 @@
-# Next session · Phase 1 — closing the remaining exit tests
+# Next session · Phase 1 — exit the phase
 
-Branch: `develop` (post PR #35 + #36). All four NFR-bearing Rust integration tests are green; CI model packaging, Google Photos OAuth scaffolding, and the `phase-1-import-throughput` e2e skeleton all landed. What's left is the last Rust stress stub, three e2e fixtures, and finishing the Google Photos connector + verifying the beta release pipeline.
+Branch: `develop` (post PR #35, merged as `ed5b011`). The full Phase 1 frontend is now real-data backed — catalog, people, onboarding, settings all off fixtures; five-section inspector, duplicates panel, people drill-down, real thumbnails, two new rediscovery rows, updater-channel picker. Coverage gates re-passing (84 tests · src/state 90.5%). What remains to close Phase 1: one Rust stress stub, three e2e specs, and a first beta tag to exercise the packaging workflow.
 
-## Scoreboard on develop (2026-04-21, post-PR #36)
+## Exit-criteria scoreboard
 
 | Test | Status |
 |---|---|
@@ -10,34 +10,41 @@ Branch: `develop` (post PR #35 + #36). All four NFR-bearing Rust integration tes
 | `phase_1_catalog_size` | ✅ 0.00202 ratio |
 | `phase_1_face_clustering` | ✅ F1 1.0000 (LFW) |
 | `phase_1_search_latency` | ✅ 607 ms p95 (int8 vec0 KNN) |
-| `phase_1_stress` | ❌ `unimplemented!()` |
-| `phase-1-import-throughput.spec.ts` | 🟡 wired, skips unless `CHRONIMAGE_E2E_TAURI=1` |
+| `phase_1_stress` | ❌ `unimplemented!()` — last Rust stub |
+| `phase-1-import-throughput.spec.ts` | 🟡 wired; skips unless `CHRONIMAGE_E2E_TAURI=1` |
 | `phase-1-source-cleanup.spec.ts` | ❌ top-level `test.skip()` |
 | `phase-1-rediscovery.spec.ts` | ❌ top-level `test.skip()` |
-| `phase-1-search-latency.spec.ts` | ❌ top-level `test.skip()` |
+| `phase-1-search-latency.spec.ts` | ❌ top-level `test.skip()` (Rust test carries the NFR) |
 
 ## Five starts — pick one
 
 ### 1. `phase_1_stress` 8-hour nightly loop · ~3 h
-Last Rust integration test stub. `#[ignore]`-gated → zero CI cost.
-**First action:** edit [phase_1_stress.rs:8](src-tauri/tests/phase_1_stress.rs#L8). Reuse `synthesize_jpeg` from [util/synthetic.rs](src-tauri/src/util/synthetic.rs) (added in PR #36) + `run_pipeline_headless`. Interleave search queries + face cluster rebuilds; RSS sample via `sysinfo`. Assert no panic hook fired, peak RSS < 2 GB.
+Last unclosed Rust integration test. `#[ignore]`-gated so zero CI cost; completes the Rust side of the exit matrix.
+**First action:** edit [phase_1_stress.rs:13](src-tauri/tests/phase_1_stress.rs#L13). Reuse `synthesize_jpeg` + `run_pipeline_headless` helpers from the existing integration tests. Loop: import 50k synthetic photos, run search every 5 min, rebuild face clusters every 30 min, sample RSS via `sysinfo`. Assert: zero panics hooked, peak RSS < 2 GB, final pool free-list count monotone.
 
-### 2. Cut first beta tag + verify CI packaging · ~45 min
-PR #36 added `Fetch bundled models` to release workflows but the step hasn't been exercised yet. Ship a `v0.1.0-beta.1` tag from `develop` and watch the `release-beta` workflow produce a signed `.msi` — this is the cheapest way to confirm the packaging step works on a cold Windows runner before it matters.
-**First action:** `git tag -s v0.1.0-beta.1 -m 'first beta smoke'` → `git push origin v0.1.0-beta.1` → watch `gh run watch` on the `release-beta` workflow → confirm MSI has non-zero `models/bundled/` resource and installs.
+### 2. Seed + un-skip 3 e2e specs · ~4 h bundled
+Three `test.skip()` specs remain. The pattern from import-throughput works for all three: debug-only Tauri commands seed the catalog, spec drives `page.evaluate(() => __TAURI__.core.invoke(...))`.
+**First action:** add `__test_seed_catalog(rows)` + `__test_seed_source_copies(tmpdir, sha256)` next to `__test_generate_fixture` in [commands.rs](src-tauri/src/commands.rs) (cfg(debug_assertions) only). Then un-skip [phase-1-source-cleanup.spec.ts](tests/e2e/phase-1-source-cleanup.spec.ts), [phase-1-rediscovery.spec.ts](tests/e2e/phase-1-rediscovery.spec.ts), [phase-1-search-latency.spec.ts](tests/e2e/phase-1-search-latency.spec.ts) under the same `CHRONIMAGE_E2E_TAURI=1` gate.
 
-### 3. Remaining three e2e specs · ~4 h bundled
-[phase-1-source-cleanup.spec.ts](tests/e2e/phase-1-source-cleanup.spec.ts), [phase-1-rediscovery.spec.ts](tests/e2e/phase-1-rediscovery.spec.ts), [phase-1-search-latency.spec.ts](tests/e2e/phase-1-search-latency.spec.ts) are all `test.skip()` TODOs. Mirror the pattern PR #36 established for import-throughput: un-skip under `CHRONIMAGE_E2E_TAURI=1`, drive via `page.evaluate(() => __TAURI__.core.invoke(...))`.
-**First action:** add `__test_seed_catalog(rows)` + `__test_seed_source_copies(tmpdir)` debug-only Tauri commands next to `__test_generate_fixture` in [commands.rs:1043](src-tauri/src/commands.rs#L1043). Each seeder backfills one e2e's prerequisites; the specs become `describe > beforeAll(seed) > test(assert)`.
+### 3. Install Windows 11 SDK locally · ~10 min (unblocks 4+5) · user-driven
+Session-to-session blocker: `pnpm tauri dev` can't link without `kernel32.lib` — VS 2026 has MSVC but no Windows SDK. CI has its own SDK so PR #35 merged fine, but the next session should be able to run the app end-to-end locally.
+**First action:** open Visual Studio Installer → Modify VS 2026 Professional → Individual components → tick **Windows 11 SDK (10.0.22621.0)** → install. Alternatively: `winget install --id Microsoft.WindowsSDK.10.0.22621 --silent`. Verify with `cargo check --manifest-path src-tauri/Cargo.toml` → no linker error.
 
-### 4. Google Photos: loopback HTTP listener + first `mediaItems.list` · ~4 h
-PR #36 landed the OAuth PKCE + keyring store; frontend hands off to the system browser but the redirect has nowhere to land. Add a tiny loopback server that binds `127.0.0.1:<ephemeral>`, captures the `?code=&state=` query, and returns a "you can close this tab" HTML page. Then `user_initiated_list_media_items(page_size, page_token)` behind the existing access-token refresh logic.
-**First action:** extend [src-tauri/src/sources/google_photos.rs](src-tauri/src/sources/google_photos.rs) with a `spawn_redirect_listener()` helper (tokio + `hyper`) that returns `(Url, oneshot::Receiver<(code, state)>)`. Thread it through [gphotos_start_oauth:992](src-tauri/src/commands.rs#L992).
+### 4. Live Playwright screenshot pass across Phase 1 surfaces · ~2 h (needs #3)
+Now that every screen is wired to real data, capture visual goldens while nothing is mid-flight. Covers catalog grid, detail inspector, people drill-down, duplicates panel, onboarding wizard, settings. Becomes the regression baseline for Phase 2.
+**First action:** with the app running via `pnpm tauri dev`, write [tests/e2e/phase-1-visual.spec.ts](tests/e2e/phase-1-visual.spec.ts) that drives through every routed screen and `await expect(page).toHaveScreenshot()`. Store goldens under `tests/fixtures/visual/phase-1/`.
 
-### 5. sqlite-vec 0.1.10+ diskann spike (Phase 2 prep) · ~90 min research
-`docs/prds/phase-2.md` § 9 carries this. Confirm 0.1.10+ ships diskann on Windows before committing to Phase 2 scope.
-**First action:** `cargo update -p sqlite-vec --precise <latest>` in a scratch worktree, add a `vec_photo_embeddings_diskann` table, re-run `phase_1_search_latency`, capture p95 + index-build time in a new ADR under [docs/adr/](docs/adr/).
+### 5. First beta tag + packaging smoke · ~45 min
+Cheapest way to confirm the `Fetch bundled models` release step works before it matters at beta time. Signed MSI from `develop`.
+**First action:** `git tag -s v0.1.0-beta.1 -m 'first beta smoke' && git push origin v0.1.0-beta.1` → `gh run watch <release-beta run id>` → download the MSI artifact → unzip, verify `models/bundled/` has the 6 pinned files with matching SHA256s.
 
 ## Recommended order
 
-**#1** is safe high-leverage code (last Rust stub). **#2** is a 45-minute verification pass with real-world consequences if the packaging step is subtly broken — do it next if #36's CI confidence matters. **#3** + **#4** are roughly equal-weight; pick by where the UX pressure is. Defer **#5** until Phase 1 fully exits.
+**#1** is safe, high-leverage, closes the last Rust exit. **#3** first if you'll be working locally tomorrow — it's 10 min that unblocks #4 permanently. **#2** buys the final four PRD boxes. **#4** captures the visual-regression baseline while the UI is freshly assembled. **#5** is a 45-min fire-and-forget verification. Defer nothing to Phase 2 prep — close Phase 1 first.
+
+## Deferred follow-ups (log, not blockers)
+
+- Face-crop thumbnails for `PeopleScreen` + sidebar covers (new `get_face_crop_thumbnail` command; ~2 h).
+- `refresh_smart_albums` manual-trigger UI (backend exists, no frontend consumer).
+- Click-to-open-detail on `DuplicatesPanel` thumbnails (currently read-only review).
+- Rotate the PAT used in the 2026-04-21 session transcript — it's leaked.
