@@ -127,6 +127,12 @@ fn main() {
             commands::import_google_photos,
             #[cfg(debug_assertions)]
             commands::__test_generate_fixture,
+            #[cfg(debug_assertions)]
+            commands::__test_seed_source_copies,
+            #[cfg(debug_assertions)]
+            commands::__test_seed_dated_photos,
+            #[cfg(debug_assertions)]
+            commands::__test_seed_embeddings,
             commands::detect_hardware,
             commands::embed_image,
             commands::score_aesthetic,

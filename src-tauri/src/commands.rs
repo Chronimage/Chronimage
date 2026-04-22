@@ -1399,6 +1399,243 @@ pub async fn __test_generate_fixture(dir: String, count: usize) -> AppResult<usi
     Ok(written)
 }
 
+/// Seed `count` photos + SHA256-verified `source_copies` rows against
+/// `source_id`. Writes real JPEG bytes to `dir` so the later
+/// `cleanup_execute` SHA re-verification path has something real to hash.
+///
+/// Debug-only. Backs `tests/e2e/phase-1-source-cleanup.spec.ts`.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn __test_seed_source_copies(
+    source_id: i64,
+    dir: String,
+    count: usize,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<i64>> {
+    use crate::util::synthetic::synthesize_jpeg;
+    use sha2::{Digest, Sha256};
+    use std::path::PathBuf;
+
+    let dir_path = PathBuf::from(&dir);
+    std::fs::create_dir_all(&dir_path)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut photo_ids = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let bytes = synthesize_jpeg(i);
+        if bytes.is_empty() {
+            continue;
+        }
+        let filename = format!("cleanup_{i:05}.jpg");
+        let path = dir_path.join(&filename);
+        std::fs::write(&path, &bytes)?;
+        let sha = hex::encode(Sha256::digest(&bytes));
+
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, size_bytes, is_raw, imported_at) \
+             VALUES (?1, ?2, 512, 512, ?3, 0, ?4) RETURNING id",
+        )
+        .bind(&sha)
+        .bind(&filename)
+        .bind(bytes.len() as i64)
+        .bind(&now)
+        .fetch_one(&state.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO source_copies \
+             (source_id, photo_id, path, verified_sha256, is_primary, last_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+        )
+        .bind(source_id)
+        .bind(photo_id)
+        .bind(path.to_string_lossy().to_string())
+        .bind(&sha)
+        .bind(&now)
+        .execute(&state.pool)
+        .await?;
+
+        photo_ids.push(photo_id);
+    }
+
+    tracing::info!(count = photo_ids.len(), dir, "seeded source copies");
+    Ok(photo_ids)
+}
+
+/// Counts returned by `__test_seed_dated_photos`.
+#[cfg(debug_assertions)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DatedSeedCounts {
+    pub on_this_day: i64,
+    pub unseen: i64,
+}
+
+/// Seed the catalog so the rediscovery rows on the Catalog home have data:
+/// - `on_this_day_count` photos captured on today's MM-DD 2–3 years ago.
+/// - `unseen_count` recent high-aesthetic photos with a `photo_views` row
+///   whose `last_viewed_at` sits > 2 years in the past, so the "unseen in
+///   2 years" query picks them up.
+///
+/// Debug-only. Backs `tests/e2e/phase-1-rediscovery.spec.ts`.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn __test_seed_dated_photos(
+    on_this_day_count: i64,
+    unseen_count: i64,
+    state: State<'_, AppState>,
+) -> AppResult<DatedSeedCounts> {
+    let now = chrono::Utc::now();
+    let now_ts = now.to_rfc3339();
+    let month_day = now.format("%m-%dT12:00:00Z").to_string();
+
+    // On-this-day: rotate through 2 historical years so we don't jam all
+    // inserts into one timestamp (which would collide on the filename-sha).
+    for i in 0..on_this_day_count {
+        let year = now.format("%Y").to_string().parse::<i32>().unwrap_or(2026) - 2 - (i % 2) as i32;
+        let captured_at = format!("{year}-{month_day}");
+        let sha = format!("otd-{i:016x}");
+        let filename = format!("otd_{i:04}.jpg");
+        sqlx::query(
+            "INSERT INTO photos (sha256, filename, width, height, is_raw, imported_at, \
+             captured_at, aesthetic_score) \
+             VALUES (?1, ?2, 512, 512, 0, ?3, ?4, 7.5)",
+        )
+        .bind(&sha)
+        .bind(&filename)
+        .bind(&now_ts)
+        .bind(&captured_at)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    // Unseen: recent photos with a stale view timestamp + a high aesthetic
+    // score (the `unseen_photos` query filters on `aesthetic_score >= min_score`,
+    // default 0.0 — we use 7.5 to be robust to future threshold bumps).
+    let three_years_ago = (now - chrono::Duration::days(3 * 365 + 10)).to_rfc3339();
+    for i in 0..unseen_count {
+        let sha = format!("unseen-{i:016x}");
+        let filename = format!("unseen_{i:04}.jpg");
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, is_raw, imported_at, \
+             captured_at, aesthetic_score) \
+             VALUES (?1, ?2, 512, 512, 0, ?3, ?3, 7.5) RETURNING id",
+        )
+        .bind(&sha)
+        .bind(&filename)
+        .bind(&now_ts)
+        .fetch_one(&state.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO photo_views (photo_id, last_viewed_at, view_count) \
+             VALUES (?1, ?2, 1)",
+        )
+        .bind(photo_id)
+        .bind(&three_years_ago)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    tracing::info!(on_this_day_count, unseen_count, "seeded dated photos");
+    Ok(DatedSeedCounts {
+        on_this_day: on_this_day_count,
+        unseen: unseen_count,
+    })
+}
+
+/// Seed `count` photos + synthetic 768-dim L2-unit embeddings into
+/// `photos`, `photo_embeddings`, `vec_photo_embeddings` and
+/// `vec_photo_embeddings_int8`. Used to exercise the NL-search round-trip
+/// from the browser without having to generate real JPEG bytes.
+///
+/// Debug-only. Backs `tests/e2e/phase-1-search-latency.spec.ts`.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub async fn __test_seed_embeddings(count: usize, state: State<'_, AppState>) -> AppResult<usize> {
+    fn lcg_unit_vec(seed: u64) -> Vec<f32> {
+        let mut state = seed.wrapping_mul(0x5851_F42D_4C95_7F2D).wrapping_add(1);
+        let mut v: Vec<f32> = Vec::with_capacity(768);
+        for _ in 0..768 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let bits = (state >> 41) as u32;
+            let unit = (bits as f32) / ((1u32 << 23) as f32);
+            v.push(unit * 2.0 - 1.0);
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in &mut v {
+                *x /= norm;
+            }
+        }
+        v
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Ensure a model row exists so photo_embeddings.model_id FK resolves.
+    let model_id: i64 = sqlx::query_scalar(
+        "INSERT INTO models (name, kind, version, sha256, size_bytes) \
+         VALUES ('siglip2-b16-image', 'embedding', 'e2e-fixture', 'fixture', 0) \
+         ON CONFLICT (name, version) DO UPDATE SET sha256=excluded.sha256 \
+         RETURNING id",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(1);
+
+    let mut written = 0usize;
+    for i in 0..count {
+        let v = lcg_unit_vec(i as u64 + 1);
+        let f32_bytes: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let i8_bytes = crate::catalog::db::quantize_unit_f32_to_i8_bytes(&v);
+
+        let sha = format!("emb-{i:016x}");
+        let filename = format!("emb_{i:06}.jpg");
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, is_raw, imported_at) \
+             VALUES (?1, ?2, 100, 100, 0, ?3) RETURNING id",
+        )
+        .bind(&sha)
+        .bind(&filename)
+        .bind(&now)
+        .fetch_one(&state.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO photo_embeddings (photo_id, model_id, embedding, updated_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(photo_id)
+        .bind(model_id)
+        .bind(&f32_bytes)
+        .bind(&now)
+        .execute(&state.pool)
+        .await?;
+
+        // Best-effort into the vec0 tables — skip silently if sqlite-vec
+        // isn't loaded (some test harnesses stub it out).
+        let _ = sqlx::query("INSERT INTO vec_photo_embeddings(rowid, embedding) VALUES (?1, ?2)")
+            .bind(photo_id)
+            .bind(&f32_bytes)
+            .execute(&state.pool)
+            .await;
+        let _ = sqlx::query(
+            "INSERT INTO vec_photo_embeddings_int8(rowid, embedding) VALUES (?1, vec_int8(?2))",
+        )
+        .bind(photo_id)
+        .bind(&i8_bytes)
+        .execute(&state.pool)
+        .await;
+
+        written += 1;
+    }
+
+    tracing::info!(written, "seeded synthetic embeddings");
+    Ok(written)
+}
+
 // ── Rediscovery commands ──────────────────────────────────────────────────
 
 /// Photos taken on today's month+day in any prior year.
