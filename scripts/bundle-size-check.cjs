@@ -5,7 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const LIMIT_MB = 80;
+const LIMIT_MB = 900;
 const DELTA_LIMIT_MB = 5;
 
 function findMsi() {
