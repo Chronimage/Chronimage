@@ -53,18 +53,20 @@ jobs:
 
       - name: Stamp MSI-compatible version into insider config
         # Insider tags follow v<major>.<minor>.<patch>-insider.<N>; derive
-        # MSI-compatible ProductVersion 0.1.0.N. Same pattern as beta.
+        # semver `X.Y.Z-N` with a numeric pre-release so tauri's parser
+        # accepts it and the MSI bundler gets a valid ProductVersion.
+        # See release-beta.yml for the full rationale.
         shell: pwsh
         run: |
           $tag = "${{ github.event.inputs.tag }}"
           if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)-insider\.(\d+)$') {
             throw "Unexpected tag format '$tag' — expected v<major>.<minor>.<patch>-insider.<n>"
           }
-          $msiVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$($Matches[4])"
-          Write-Host "Derived MSI version: $msiVersion"
+          $confVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])-$($Matches[4])"
+          Write-Host "Derived conf version: $confVersion"
           $confPath = 'src-tauri/tauri.insider.conf.json'
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
-          $conf | Add-Member -NotePropertyName version -NotePropertyValue $msiVersion -Force
+          $conf | Add-Member -NotePropertyName version -NotePropertyValue $confVersion -Force
           $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding utf8
 
       - name: Build signed insider MSI
