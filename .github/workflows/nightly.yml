@@ -70,13 +70,15 @@ jobs:
         # past MSI's 65535 limit on the 4th segment. Use GitHub's
         # per-workflow run_number instead — monotonic, zero-indexed,
         # well under 65535 for anything short of a decade of nightly runs.
+        # See release-beta.yml for the semver-with-numeric-pre-release
+        # rationale — format is `X.Y.Z-N` with N as a bare integer.
         shell: pwsh
         run: |
-          $msiVersion = "0.1.0.${{ github.run_number }}"
-          Write-Host "Derived MSI version: $msiVersion (run #${{ github.run_number }})"
+          $confVersion = "0.1.0-${{ github.run_number }}"
+          Write-Host "Derived conf version: $confVersion (run #${{ github.run_number }})"
           $confPath = 'src-tauri/tauri.nightly.conf.json'
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
-          $conf | Add-Member -NotePropertyName version -NotePropertyValue $msiVersion -Force
+          $conf | Add-Member -NotePropertyName version -NotePropertyValue $confVersion -Force
           $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding utf8
 
       - name: Build signed nightly MSI

@@ -60,24 +60,24 @@ jobs:
         run: pwsh scripts/fetch-bundled-models.ps1
 
       - name: Stamp MSI-compatible version into beta config
-        # MSI ProductVersion must be X.Y.Z[.N] with numeric-only segments,
-        # each ≤ 65535. Our base tauri.conf.json ships 0.1.0 (no suffix);
-        # for each beta tag v0.1.0-beta.N we derive the MSI form
-        # 0.1.0.N and patch it into tauri.beta.conf.json so wix accepts
-        # the build. Preserves the tag's semver identity in the
-        # auto-updater manifest (which ships separately) while keeping
-        # the installer's ProductVersion legal.
+        # Tauri's config parser wants strict 3-segment semver; its MSI
+        # bundler also requires that any pre-release identifier be
+        # numeric-only and ≤ 65535 (the Windows ProductVersion 4th-segment
+        # limit). The only format that satisfies both is `X.Y.Z-N` where
+        # N is a bare integer: semver-valid, tauri parses it, MSI maps
+        # the pre-release number onto ProductVersion's 4th segment.
+        # For each beta tag v0.1.0-beta.N we emit 0.1.0-N.
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)-beta\.(\d+)$') {
             throw "Unexpected tag format '$tag' — expected v<major>.<minor>.<patch>-beta.<n>"
           }
-          $msiVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3]).$($Matches[4])"
-          Write-Host "Derived MSI version: $msiVersion"
+          $confVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])-$($Matches[4])"
+          Write-Host "Derived conf version: $confVersion (MSI ProductVersion 4th segment = $($Matches[4]))"
           $confPath = 'src-tauri/tauri.beta.conf.json'
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
-          $conf | Add-Member -NotePropertyName version -NotePropertyValue $msiVersion -Force
+          $conf | Add-Member -NotePropertyName version -NotePropertyValue $confVersion -Force
           $conf | ConvertTo-Json -Depth 10 | Set-Content $confPath -Encoding utf8
 
       - name: Build signed beta MSI
