@@ -12,11 +12,7 @@ yanked = "deny"
 # Only error if the workspace *directly* depends on an unmaintained crate;
 # transitive unmaintained deps (tauri → wry → gtk-rs, etc.) are warnings only.
 unmaintained = "workspace"
-ignore = [
-  # rsa Marvin Attack timing side-channel via sqlx-mysql transitive dep;
-  # we use sqlite only and there is no upstream fix available.
-  { id = "RUSTSEC-2023-0071", reason = "transitive via sqlx-mysql; we use sqlite only" },
-]
+ignore = []
 
 [licenses]
 confidence-threshold = 0.9

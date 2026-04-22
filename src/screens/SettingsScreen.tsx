@@ -8,8 +8,9 @@
  *   4. Storage & indexing — in-memory toggles
  */
 
+import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   type ModelSource,
   type ModelStatus,
@@ -18,6 +19,7 @@ import {
   useDownloadModels,
 } from '../state/queries';
 import { useUi } from '../state/ui';
+import { DOWNLOAD_PROGRESS_EVENT, type DownloadProgressEvent } from '../tauri/invoke';
 import { debug } from '../util/log';
 import { GooglePhotosPanel } from './GooglePhotosPanel';
 
@@ -203,11 +205,29 @@ function sourceBadge(source: ModelSource): { label: string; accent: 'ok' | 'info
   }
 }
 
-function ModelRow({ model, onSwap }: { model: ModelStatus; onSwap: () => void }) {
+function ModelRow({
+  model,
+  onSwap,
+  onInstall,
+  installing,
+  progressPct,
+}: {
+  model: ModelStatus;
+  onSwap: () => void;
+  onInstall: () => void;
+  installing: boolean;
+  /** 0-100 while a download is in flight; `null` when idle or complete. */
+  progressPct: number | null;
+}) {
   const badge = sourceBadge(model.source);
   const featureLabel = KIND_LABEL[model.kind] ?? model.kind;
   const presets = PRESETS_BY_KIND[model.kind];
   const swappable = model.kind in KIND_TO_REINDEX && (presets?.length ?? 0) > 0;
+  // A bundled model can still be "missing" on disk if the installer copy
+  // failed or the dev ran `pnpm tauri dev` without running
+  // `scripts/fetch-bundled-models.ps1`. Expose a one-click manual install
+  // that fetches it from the pinned URL at build time.
+  const missing = model.source === 'missing';
 
   return (
     <div
@@ -224,6 +244,34 @@ function ModelRow({ model, onSwap }: { model: ModelStatus; onSwap: () => void })
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 2 }}>
           {featureLabel} · {model.filename} · {fmtBytes(model.sizeBytes)}
         </div>
+        {installing && (
+          <div
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={progressPct ?? 0}
+            aria-label={`Installing ${model.name}`}
+            style={{
+              marginTop: 6,
+              height: 4,
+              background: 'color-mix(in oklch, var(--accent) 15%, var(--bg-elev))',
+              borderRadius: 2,
+              overflow: 'hidden',
+              maxWidth: 320,
+            }}
+          >
+            <div
+              style={{
+                width: `${progressPct ?? 0}%`,
+                height: '100%',
+                background: 'var(--accent)',
+                // Indeterminate-feeling shimmer when the backend hasn't
+                // emitted a progress event yet (progressPct still null).
+                transition: 'width 200ms ease-out',
+              }}
+            />
+          </div>
+        )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span
@@ -249,24 +297,45 @@ function ModelRow({ model, onSwap }: { model: ModelStatus; onSwap: () => void })
         >
           {badge.label}
         </span>
-        <button
-          type="button"
-          onClick={onSwap}
-          disabled={!swappable}
-          title={swappable ? 'Swap to a different model' : 'No alternatives available yet'}
-          style={{
-            fontSize: 11,
-            padding: '3px 10px',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--stroke)',
-            background: 'var(--bg-elev)',
-            color: swappable ? 'var(--fg)' : 'var(--fg-mute)',
-            cursor: swappable ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--mono-font)',
-          }}
-        >
-          Swap…
-        </button>
+        {missing ? (
+          <button
+            type="button"
+            onClick={onInstall}
+            disabled={installing}
+            title={installing ? 'Downloading…' : 'Download this model from its pinned URL'}
+            style={{
+              fontSize: 11,
+              padding: '3px 10px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid color-mix(in oklch, var(--accent) 40%, var(--stroke))',
+              background: 'color-mix(in oklch, var(--accent) 18%, var(--bg-elev))',
+              color: 'var(--accent)',
+              cursor: installing ? 'wait' : 'pointer',
+              fontFamily: 'var(--mono-font)',
+            }}
+          >
+            {installing ? 'Installing…' : 'Install'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onSwap}
+            disabled={!swappable}
+            title={swappable ? 'Swap to a different model' : 'No alternatives available yet'}
+            style={{
+              fontSize: 11,
+              padding: '3px 10px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--stroke)',
+              background: 'var(--bg-elev)',
+              color: swappable ? 'var(--fg)' : 'var(--fg-mute)',
+              cursor: swappable ? 'pointer' : 'not-allowed',
+              fontFamily: 'var(--mono-font)',
+            }}
+          >
+            Swap…
+          </button>
+        )}
       </div>
     </div>
   );
@@ -526,6 +595,69 @@ export function SettingsScreen() {
   } = useAiModelsStatus();
 
   const [pickerFor, setPickerFor] = useState<ModelStatus | null>(null);
+  // Tracks which model name is currently being installed so the row shows
+  // an "Installing…" affordance without blocking the whole UI.
+  const [installingName, setInstallingName] = useState<string | null>(null);
+  // Maps model.name → percent (0-100) while a download is in flight. Gets
+  // cleared on completion so the row falls back to the Installed/Bundled
+  // badge without a stale progress bar.
+  const [progressByName, setProgressByName] = useState<Record<string, number>>({});
+  const installMutation = useDownloadModels();
+
+  // Subscribe once to `chronimage://download-progress` — the backend emits
+  // these from `download_models` regardless of whether the download was
+  // triggered by this component or another caller (e.g., ModelPickerModal
+  // swap). Cleanup on unmount.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let alive = true;
+    listen<DownloadProgressEvent>(DOWNLOAD_PROGRESS_EVENT, (event) => {
+      const p = event.payload;
+      const percent =
+        p.total_bytes > 0
+          ? Math.min(100, Math.round((p.downloaded_bytes / p.total_bytes) * 100))
+          : p.done
+            ? 100
+            : 0;
+      setProgressByName((prev) => {
+        if (p.done) {
+          const { [p.model_name]: _removed, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [p.model_name]: percent };
+      });
+    })
+      .then((off) => {
+        if (alive) {
+          unlisten = off;
+        } else {
+          off();
+        }
+      })
+      .catch((err) => debug('settings: listen download-progress failed', err));
+    return () => {
+      alive = false;
+      unlisten?.();
+    };
+  }, []);
+
+  async function handleInstallModel(model: ModelStatus) {
+    setInstallingName(model.name);
+    try {
+      await installMutation.mutateAsync([model.name]);
+      await refetchModels();
+    } catch (err) {
+      debug('settings: install model failed', model.name, err);
+    } finally {
+      setInstallingName(null);
+      // Progress cleared by the `done: true` event, but wipe defensively
+      // in case the backend reported success without a final event.
+      setProgressByName((prev) => {
+        const { [model.name]: _removed, ...rest } = prev;
+        return rest;
+      });
+    }
+  }
 
   function handleAppNameBlur() {
     const trimmed = localAppName.trim();
@@ -641,7 +773,14 @@ export function SettingsScreen() {
               </div>
             )}
             {models.map((m) => (
-              <ModelRow key={m.filename} model={m} onSwap={() => setPickerFor(m)} />
+              <ModelRow
+                key={m.filename}
+                model={m}
+                onSwap={() => setPickerFor(m)}
+                onInstall={() => handleInstallModel(m)}
+                installing={installingName === m.name}
+                progressPct={progressByName[m.name] ?? null}
+              />
             ))}
           </div>
 
