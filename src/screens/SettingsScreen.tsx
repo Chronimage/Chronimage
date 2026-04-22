@@ -203,11 +203,26 @@ function sourceBadge(source: ModelSource): { label: string; accent: 'ok' | 'info
   }
 }
 
-function ModelRow({ model, onSwap }: { model: ModelStatus; onSwap: () => void }) {
+function ModelRow({
+  model,
+  onSwap,
+  onInstall,
+  installing,
+}: {
+  model: ModelStatus;
+  onSwap: () => void;
+  onInstall: () => void;
+  installing: boolean;
+}) {
   const badge = sourceBadge(model.source);
   const featureLabel = KIND_LABEL[model.kind] ?? model.kind;
   const presets = PRESETS_BY_KIND[model.kind];
   const swappable = model.kind in KIND_TO_REINDEX && (presets?.length ?? 0) > 0;
+  // A bundled model can still be "missing" on disk if the installer copy
+  // failed or the dev ran `pnpm tauri dev` without running
+  // `scripts/fetch-bundled-models.ps1`. Expose a one-click manual install
+  // that fetches it from the pinned URL at build time.
+  const missing = model.source === 'missing';
 
   return (
     <div
@@ -249,24 +264,45 @@ function ModelRow({ model, onSwap }: { model: ModelStatus; onSwap: () => void })
         >
           {badge.label}
         </span>
-        <button
-          type="button"
-          onClick={onSwap}
-          disabled={!swappable}
-          title={swappable ? 'Swap to a different model' : 'No alternatives available yet'}
-          style={{
-            fontSize: 11,
-            padding: '3px 10px',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--stroke)',
-            background: 'var(--bg-elev)',
-            color: swappable ? 'var(--fg)' : 'var(--fg-mute)',
-            cursor: swappable ? 'pointer' : 'not-allowed',
-            fontFamily: 'var(--mono-font)',
-          }}
-        >
-          Swap…
-        </button>
+        {missing ? (
+          <button
+            type="button"
+            onClick={onInstall}
+            disabled={installing}
+            title={installing ? 'Downloading…' : 'Download this model from its pinned URL'}
+            style={{
+              fontSize: 11,
+              padding: '3px 10px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid color-mix(in oklch, var(--accent) 40%, var(--stroke))',
+              background: 'color-mix(in oklch, var(--accent) 18%, var(--bg-elev))',
+              color: 'var(--accent)',
+              cursor: installing ? 'wait' : 'pointer',
+              fontFamily: 'var(--mono-font)',
+            }}
+          >
+            {installing ? 'Installing…' : 'Install'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onSwap}
+            disabled={!swappable}
+            title={swappable ? 'Swap to a different model' : 'No alternatives available yet'}
+            style={{
+              fontSize: 11,
+              padding: '3px 10px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--stroke)',
+              background: 'var(--bg-elev)',
+              color: swappable ? 'var(--fg)' : 'var(--fg-mute)',
+              cursor: swappable ? 'pointer' : 'not-allowed',
+              fontFamily: 'var(--mono-font)',
+            }}
+          >
+            Swap…
+          </button>
+        )}
       </div>
     </div>
   );
@@ -526,6 +562,22 @@ export function SettingsScreen() {
   } = useAiModelsStatus();
 
   const [pickerFor, setPickerFor] = useState<ModelStatus | null>(null);
+  // Tracks which model name is currently being installed so the row shows
+  // an "Installing…" affordance without blocking the whole UI.
+  const [installingName, setInstallingName] = useState<string | null>(null);
+  const installMutation = useDownloadModels();
+
+  async function handleInstallModel(model: ModelStatus) {
+    setInstallingName(model.name);
+    try {
+      await installMutation.mutateAsync([model.name]);
+      await refetchModels();
+    } catch (err) {
+      debug('settings: install model failed', model.name, err);
+    } finally {
+      setInstallingName(null);
+    }
+  }
 
   function handleAppNameBlur() {
     const trimmed = localAppName.trim();
@@ -641,7 +693,13 @@ export function SettingsScreen() {
               </div>
             )}
             {models.map((m) => (
-              <ModelRow key={m.filename} model={m} onSwap={() => setPickerFor(m)} />
+              <ModelRow
+                key={m.filename}
+                model={m}
+                onSwap={() => setPickerFor(m)}
+                onInstall={() => handleInstallModel(m)}
+                installing={installingName === m.name}
+              />
             ))}
           </div>
 
