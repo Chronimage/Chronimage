@@ -11,6 +11,7 @@ import {
   cleanupDryRun,
   cleanupExecute,
   createSource,
+  type DiskInfo,
   deleteSource,
   detectIcloudPath,
   downloadModels,
@@ -19,6 +20,8 @@ import {
   faceClustersList,
   findDuplicates,
   firstTimeOnNewCamera,
+  getDefaultCatalogPath,
+  getDiskInfo,
   getThumbnail,
   IMPORT_PROGRESS_EVENT,
   importGoogleTakeout,
@@ -39,10 +42,24 @@ import {
   type PhotoRow,
   photoLocation,
   photoQuality,
+  REBUILD_PROGRESS_EVENT,
+  RECLUSTER_PROGRESS_EVENT,
+  type RebuildReceipt,
+  type ReclusterReceipt,
+  type RecycleReceipt,
+  type RemovePreview,
+  type RemoveReceipt,
+  rebuildThumbnails,
+  reclusterFaces,
   recordPhotoView,
+  recycleSourceCopies,
   refreshSmartAlbums,
+  removePhotosFromCatalog,
+  removePhotosPreview,
+  type SourceDeletionPlan,
   searchPhotos,
   searchSuggestions,
+  sourceDeletionPreview,
   startImport,
   unflaggedFavorites,
   unseenPhotos,
@@ -53,6 +70,7 @@ export type {
   CleanupExecuteResult,
   CleanupPlan,
   ClusterRow,
+  DiskInfo,
   DuplicateGroup,
   ImportProgressEvent,
   ImportSummary,
@@ -63,13 +81,19 @@ export type {
   PhotoLocation,
   PhotoQuality,
   PhotoRow,
+  RebuildReceipt,
+  ReclusterReceipt,
+  RecycleReceipt,
+  RemovePreview,
+  RemoveReceipt,
   SourceCleanupItem,
+  SourceDeletionPlan,
   SourceRow,
   StartImportResponse,
   TagRow,
   UsbDevice,
 } from '../tauri/invoke';
-export { IMPORT_PROGRESS_EVENT };
+export { IMPORT_PROGRESS_EVENT, REBUILD_PROGRESS_EVENT, RECLUSTER_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
 
@@ -157,8 +181,65 @@ export function useCreateSource() {
 
 export function useDeleteSource() {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (sourceId: number) => deleteSource(sourceId),
+  return useMutation<
+    RemoveReceipt,
+    Error,
+    { sourceId: number; recycleFiles?: boolean; removeOrphanPhotos?: boolean }
+  >({
+    mutationFn: ({ sourceId, recycleFiles, removeOrphanPhotos }) =>
+      deleteSource(sourceId, { recycleFiles, removeOrphanPhotos }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['cleanup'] });
+      qc.invalidateQueries({ queryKey: ['imports'] });
+      qc.invalidateQueries({ queryKey: ['albums'] });
+    },
+  });
+}
+
+export function useSourceDeletionPreview(sourceId: number | null) {
+  return useQuery<SourceDeletionPlan, Error>({
+    queryKey: ['source_deletion_preview', sourceId] as const,
+    queryFn: () =>
+      typeof sourceId === 'number'
+        ? sourceDeletionPreview(sourceId)
+        : Promise.reject(new Error('no source_id')),
+    enabled: typeof sourceId === 'number',
+    staleTime: 10_000,
+  });
+}
+
+export function useRemovePhotosPreview(photoIds: number[]) {
+  const key = photoIds
+    .slice()
+    .sort((a, b) => a - b)
+    .join(',');
+  return useQuery<RemovePreview, Error>({
+    queryKey: ['remove_photos_preview', key] as const,
+    queryFn: () => removePhotosPreview(photoIds),
+    enabled: photoIds.length > 0,
+    staleTime: 10_000,
+  });
+}
+
+export function useRemovePhotosFromCatalog() {
+  const qc = useQueryClient();
+  return useMutation<RemoveReceipt, Error, number[]>({
+    mutationFn: (photoIds: number[]) => removePhotosFromCatalog(photoIds),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['duplicates'] });
+    },
+  });
+}
+
+export function useRecycleSourceCopies() {
+  const qc = useQueryClient();
+  return useMutation<RecycleReceipt, Error, number[]>({
+    mutationFn: (photoIds: number[]) => recycleSourceCopies(photoIds),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sources'] });
       qc.invalidateQueries({ queryKey: ['cleanup'] });
@@ -297,7 +378,8 @@ export function useThumbnailUrl(photoId: number | null | undefined, sizePx = 320
         const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         const blob = new Blob([buf as ArrayBuffer], { type: 'image/jpeg' });
         return URL.createObjectURL(blob);
-      } catch {
+      } catch (err) {
+        console.warn('[thumbnail] get_thumbnail failed for photo', photoId, JSON.stringify(err), err);
         return null;
       }
     },
@@ -406,5 +488,59 @@ export function useAiModelsStatus() {
 export function useRecordPhotoView() {
   return useMutation<void, Error, number>({
     mutationFn: (photoId: number) => recordPhotoView(photoId),
+  });
+}
+
+// ── Disk / catalog-home helpers ───────────────────────────────────────────────
+
+export function useDefaultCatalogPath() {
+  return useQuery<string, Error>({
+    queryKey: ['default_catalog_path'],
+    queryFn: getDefaultCatalogPath,
+    staleTime: Infinity,
+  });
+}
+
+export function useDiskInfo(path: string | undefined) {
+  return useQuery<DiskInfo, Error>({
+    queryKey: ['disk_info', path],
+    queryFn: () => (path ? getDiskInfo(path) : Promise.reject(new Error('no path'))),
+    enabled: !!path,
+    staleTime: 60_000,
+  });
+}
+
+// ── Face clustering + thumbnail rebuild ─────────────────────────────────────
+
+/**
+ * Fire the backend HDBSCAN pass over every face embedding + rewrite
+ * `faces.cluster_id`. Invalidates `['face-clusters']` on success so the
+ * People screen re-fetches.
+ */
+export function useReclusterFaces() {
+  const qc = useQueryClient();
+  return useMutation<ReclusterReceipt, Error, void>({
+    mutationFn: () => reclusterFaces(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
+      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
+      qc.invalidateQueries({ queryKey: ['search_suggestions'] });
+    },
+  });
+}
+
+/**
+ * Trigger a full rebuild of the 320 px thumbnail cache — used to repair
+ * pre-orientation-fix catalogs without a re-import. Invalidates the
+ * thumbnail cache so every `<Thumbnail>` re-fetches.
+ */
+export function useRebuildThumbnails() {
+  const qc = useQueryClient();
+  return useMutation<RebuildReceipt, Error, void>({
+    mutationFn: () => rebuildThumbnails(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['thumbnail'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
   });
 }

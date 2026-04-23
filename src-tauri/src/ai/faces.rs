@@ -48,7 +48,7 @@
 //! Both models ship inside `buffalo_l.zip` from InsightFace (MIT licence) and
 //! are extracted by `ai::download` on first run.
 
-use crate::{AppError, AppResult};
+use crate::{ai::providers::session_builder_with_ep, AppError, AppResult};
 use image::imageops::FilterType;
 use ort::session::Session;
 use std::path::Path;
@@ -146,12 +146,12 @@ impl FacesSession {
             ));
         }
 
-        let retina = Session::builder()
+        let retina = session_builder_with_ep("scrfd")
             .map_err(|e| AppError::Internal(format!("ort builder (retina): {e}")))?
             .commit_from_file(retina_path)
             .map_err(|e| AppError::Internal(format!("ort load retina: {e}")))?;
 
-        let arcface = Session::builder()
+        let arcface = session_builder_with_ep("arcface")
             .map_err(|e| AppError::Internal(format!("ort builder (arcface): {e}")))?
             .commit_from_file(arcface_path)
             .map_err(|e| AppError::Internal(format!("ort load arcface: {e}")))?;

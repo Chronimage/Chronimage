@@ -57,6 +57,7 @@ The generative path is intentionally gated behind an entitlement + first-run mod
 - [ ] Pin clusters via supercluster-rs algorithm (or Leaflet's cluster plugin)
 - [ ] Click cluster → zoom; click pin → photo detail overlay
 - [ ] Filter by time range (slider: "last week / last month / last year / all time")
+- [ ] **Offline reverse-geocoder** — embedded SQLite of ~100k city centroids from the GeoNames `cities15000` dataset (~5 MB compressed). Ship bundled via `scripts/fetch-bundled-models.*`. At import time (or in a post-hoc backfill), resolve each photo's `gps_lat/lng` to the nearest city + country and cache in a new `photos.place_label` column. Also populates human-readable labels in the Catalog **Places facet** (Phase 2 rehaul ADR 0007 v1 ships with raw coordinate buckets; this replaces them with "Bengaluru · 18 photos" etc). Map tooltips reuse the same lookup.
 
 ### 6. Keyboard shortcut overlay
 - [ ] Press `?` anywhere → modal showing all shortcuts grouped by context

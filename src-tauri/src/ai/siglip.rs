@@ -23,7 +23,7 @@
 //! `tokenizer.json` format) and is loaded via the `tokenizers` crate (v0.21,
 //! MIT/Apache-2.0).
 
-use crate::{AppError, AppResult};
+use crate::{ai::providers::session_builder_with_ep, AppError, AppResult};
 use image::imageops::FilterType;
 use ort::session::Session;
 use std::path::Path;
@@ -81,12 +81,12 @@ impl SigLipSession {
             ));
         }
 
-        let image_session = Session::builder()
+        let image_session = session_builder_with_ep("siglip-image")
             .map_err(|e| AppError::Internal(format!("ort builder (siglip image): {e}")))?
             .commit_from_file(image_model_path)
             .map_err(|e| AppError::Internal(format!("ort load siglip image: {e}")))?;
 
-        let text_session = Session::builder()
+        let text_session = session_builder_with_ep("siglip-text")
             .map_err(|e| AppError::Internal(format!("ort builder (siglip text): {e}")))?
             .commit_from_file(text_model_path)
             .map_err(|e| AppError::Internal(format!("ort load siglip text: {e}")))?;
@@ -266,25 +266,57 @@ fn preprocess_image(path: &Path) -> AppResult<Vec<f32>> {
 
 // ── output extraction helper ──────────────────────────────────────────────
 
+/// Candidate output names the ONNX exporter may have used for SigLIP-2's
+/// image encoder. Different HuggingFace exports use different names — see
+/// https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/tree/main/onnx
+/// where the vision_model re-export has flipped between `image_embeds` and
+/// `pooler_output` at various points. We try each in order and take the
+/// first that matches `expected_dim`.
+const IMAGE_EMBED_CANDIDATES: &[&str] = &["image_embeds", "pooler_output", "sentence_embedding"];
+const TEXT_EMBED_CANDIDATES: &[&str] = &["text_embeds", "pooler_output", "sentence_embedding"];
+
 fn extract_embedding(
     outputs: &ort::session::SessionOutputs,
-    name: &str,
+    primary_name: &str,
     expected_dim: usize,
 ) -> AppResult<Vec<f32>> {
-    let tensor = outputs
-        .get(name)
-        .ok_or_else(|| AppError::Internal(format!("output '{name}' not found in siglip model")))?;
-    let (_shape, data) = tensor
-        .try_extract_tensor::<f32>()
-        .map_err(|e| AppError::Internal(format!("extract siglip tensor '{name}': {e}")))?;
-    let flat: Vec<f32> = data.to_vec();
-    if flat.len() != expected_dim {
-        return Err(AppError::Internal(format!(
-            "siglip '{name}': expected {expected_dim}-dim embedding, got {}",
-            flat.len()
-        )));
+    // Pick the candidate list that includes the historical primary name.
+    let candidates: &[&str] = if primary_name == "text_embeds" {
+        TEXT_EMBED_CANDIDATES
+    } else {
+        IMAGE_EMBED_CANDIDATES
+    };
+
+    // Try each candidate in order. First one that exists AND matches the
+    // expected dimensionality wins.
+    let mut tried: Vec<String> = Vec::with_capacity(candidates.len());
+    for name in candidates {
+        let Some(tensor) = outputs.get(*name) else {
+            tried.push(format!("{name}=absent"));
+            continue;
+        };
+        let (_shape, data) = match tensor.try_extract_tensor::<f32>() {
+            Ok(v) => v,
+            Err(e) => {
+                tried.push(format!("{name}=extract-error:{e}"));
+                continue;
+            }
+        };
+        let flat: Vec<f32> = data.to_vec();
+        if flat.len() != expected_dim {
+            tried.push(format!("{name}=dim={}", flat.len()));
+            continue;
+        }
+        return Ok(flat);
     }
-    Ok(flat)
+
+    // None matched. Report all outputs the model actually exposes, so the
+    // log tells us exactly what the exporter named things.
+    let available: Vec<String> = outputs.keys().map(|s| s.to_string()).collect();
+    Err(AppError::Internal(format!(
+        "siglip output '{primary_name}' not found with expected {expected_dim}-dim; \
+         tried {tried:?}; model exposes {available:?}"
+    )))
 }
 
 // ── vector math helpers ───────────────────────────────────────────────────
@@ -392,7 +424,7 @@ pub fn get_or_load(model_path: &Path) -> AppResult<&'static SigLipSession> {
                 "siglip image model not found — run model download first".into(),
             ));
         }
-        let image_session = Session::builder()
+        let image_session = session_builder_with_ep("siglip-image-only")
             .map_err(|e| AppError::Internal(format!("ort builder (siglip image): {e}")))?
             .commit_from_file(model_path)
             .map_err(|e| AppError::Internal(format!("ort load siglip image: {e}")))?;

@@ -267,6 +267,19 @@ select {
   flex-direction: column;
   min-height: 0;
 }
+.sidepanel-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sidepanel-footer {
+  flex-shrink: 0;
+  padding: 10px;
+  border-top: 1px solid var(--stroke);
+  background: var(--bg-chrome);
+}
 .sidepanel .head {
   padding: 16px 16px 10px;
   display: flex;
@@ -287,7 +300,7 @@ select {
 }
 
 .sidepanel .section-label {
-  padding: 14px 16px 6px;
+  padding: 8px 16px 4px;
   font-family: var(--mono-font);
   font-size: 10px;
   letter-spacing: 0.1em;
@@ -427,6 +440,56 @@ select {
 }
 .toolbar .btn.ghost {
   border-color: var(--stroke);
+}
+/* Active toggle state — used by the grid-density view-mode switch. */
+.toolbar .btn.on {
+  background: color-mix(in oklch, var(--accent) 14%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in oklch, var(--accent) 40%, var(--stroke));
+}
+/* Phase-gated (Phase 2 / 3) — visually disabled, still readable so users
+   see the roadmap. Tooltip on hover explains which phase brings it live. */
+.toolbar .btn.phase-gated,
+.toolbar .btn.phase-gated:hover,
+.phase-gated {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: transparent;
+}
+
+/* Sort dropdown anchored to its trigger button in the catalog toolbar. */
+.sort-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  background: var(--bg-elev);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  z-index: 20;
+}
+.sort-menu-item {
+  all: unset;
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.sort-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.sort-menu-item.active {
+  color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 10%, transparent);
 }
 .toolbar .divider {
   width: 1px;
@@ -594,6 +657,21 @@ select {
   font-size: 11px;
 }
 
+/* VirtualGrid cells: ph must fill the fixed-height row cell */
+.cell > .ph {
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* People screen cluster cover: ph fills the square button */
+.person-card .faces > .ph {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
 /* Library grid */
 .libgrid {
   display: grid;
@@ -603,6 +681,77 @@ select {
 }
 .libgrid .cell {
   aspect-ratio: 4 / 3;
+}
+
+/* Masonry cells — position absolutely; the `.ph` child fills the cell so
+   the <img> can use object-fit: cover. No aspect-ratio lock — each cell's
+   explicit height is set by MasonryGrid based on the photo's EXIF dims. */
+.cell-masonry {
+  position: absolute;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  transition: transform 140ms ease;
+}
+.cell-masonry .cell-open {
+  border-radius: inherit;
+}
+.cell-masonry > .cell-open > .ph {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+}
+.cell-masonry.selected {
+  transform: scale(0.95);
+}
+.cell-masonry.selected .cell-open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklch, var(--accent) 14%, transparent);
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+/* Google-Photos-style selection circle (top-left). Hidden by default;
+   revealed on cell hover or when its photo is selected. */
+.sel-indicator {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.35);
+  color: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 120ms ease,
+    background 120ms ease,
+    color 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  z-index: 2;
+}
+.cell-masonry:hover .sel-indicator,
+.sel-indicator:focus-visible {
+  opacity: 1;
+}
+.sel-indicator.on {
+  opacity: 1;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.3);
+}
+.sel-indicator:hover {
+  background: rgba(0, 0, 0, 0.55);
+}
+.sel-indicator.on:hover {
+  background: color-mix(in oklch, var(--accent) 85%, black);
 }
 
 .album-row {
@@ -1352,8 +1501,9 @@ select {
 .detail-hero .ph {
   width: 100%;
   max-width: 1000px;
-  aspect-ratio: 3 / 2;
   max-height: 100%;
+  aspect-ratio: auto;
+  object-fit: contain;
   border-radius: 2px;
 }
 
@@ -1411,10 +1561,25 @@ select {
   color: var(--accent);
 }
 
+/* ── Page-title — unified across Catalog, People, Settings, placeholders.
+   Display-font + italic accent period. Size scales from 32 px at narrow
+   window widths up to 56 px on wide. */
+.page-title {
+  font-family: var(--display-font);
+  font-size: clamp(32px, 4vw, 56px);
+  margin: 0 0 var(--space-4);
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+.page-title em {
+  color: var(--accent);
+  font-style: italic;
+}
+
 /* Settings */
 .settings {
   padding: 40px 48px;
-  max-width: 880px;
 }
 .settings h1 {
   font-family: var(--display-font);

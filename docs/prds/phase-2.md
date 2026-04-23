@@ -8,6 +8,19 @@ Phase 1 ships a deep catalog that *surfaces* problems (near-duplicates, blur, cl
 
 This is the phase where Chronimage starts beating Aftershoot / Narrative Select on workflow cost — same AI quality, zero subscription, recoverable deletes.
 
+## Shipped early (week 1) — pulled ahead of the Cull/Export scope
+
+Three tracks that were originally Phase-2 backlog items but shipped during the week-1 hotfix pass:
+
+- **Import pipeline perf & model-integration fixes** — 22× wall-clock speedup (82 min → 3.8 min on 112 JPGs) via DirectML EP wiring + `opt-level = 3` dev overrides + NIMA NHWC fix + SigLIP output-name fallback. See [ADR 0004](../adr/0004-import-pipeline-perf-and-model-integration.md). Unlocks the rest of Phase 2 because every dev-loop import now takes minutes instead of hours.
+- **Onboarding wizard removed; catalog is the home** — 1500-LOC wizard deleted; first-run lands on the catalog empty-state with an inline mode chooser. Live import progress, Sources panel, Add-Source popover now live on the catalog screen. Settings gained a Library section for the global default-mode + catalog-home path. See [ADR 0005](../adr/0005-onboarding-removal-catalog-as-home.md).
+- **Two-scope deletion infrastructure** — explicit "Remove from catalog" vs "Move files to Recycle Bin" flows with confirmation modals, dry-run preview counts, `trash` crate routing, and transactional FK-cascade. Covers source-disconnect, bulk-photo-remove, and orphan-recycle. See [ADR 0006](../adr/0006-explicit-scope-deletion.md). **Remove Phase-2-backlog items that covered the same ground** (source-cleanup confirmation modal, on-disk delete route) — they're done.
+- **FTS5 delete trigger fix** — Phase-1 migration had a dormant bug (`DELETE FROM photos_fts` on a contentless FTS5 table); no Phase-1 code ever tripped it because `DELETE FROM photos` was never exercised. Fixed by migration `20260425000000` + app-level contentless-FTS5 cleanup before every photo delete. See [ADR 0006](../adr/0006-explicit-scope-deletion.md) §FTS5.
+- **Mock smart-album cleanup** — `SYSTEM_ALBUMS` seed list trimmed from 12 personalised design placeholders (`Kids — Ari & Leo`, `Milo (golden retriever)`, `Japan · Autumn '25`, etc.) to 2 rule-based (`Night & Low Light`, `Out-of-focus`). Migration `20260425000001` removes the 10 mock albums from existing databases, gated on `is_system = 1`.
+- **Debug tooling** — new `debug-import` skill ([.claude/commands/debug-import.md](../../.claude/commands/debug-import.md)) + `scripts/debug-import.sh` + integration test at `src-tauri/tests/debug_import.rs` drive the real pipeline against a folder and pull per-stage timings from Loki. Replaces the Playwright-over-tauri-driver path (which isn't installed on dev).
+
+These items are **out of scope for the rest of the Phase 2 backlog below** — they're listed here so the scope map stays honest.
+
 ## Personas & stories
 
 - **Jay (hobbyist, ~200k photos from Phase 1 import)**
@@ -29,6 +42,7 @@ This is the phase where Chronimage starts beating Aftershoot / Narrative Select 
 - [ ] Issue filters: Near-duplicates · Out of focus · Eyes closed · Over/under exposed · Screenshots · Low-res/web
 - [ ] Session summary card: kept / rejected / time remaining / estimated minutes left
 - [ ] "Review rejects before deleting" exit action that routes to Cull Bin
+- [ ] **Rate 1–5 stars from the catalog detail view** — toolbar button currently soft-disabled; sets `photos.star_rating` (schema column already present). Keyboard shortcut `1`–`5` in detail view; star row above the filmstrip.
 
 ### 2. Cull verdict engine (Rust)
 - [ ] `src-tauri/src/cull/verdict.rs` — `apply_verdict(photo_id, verdict)` where `verdict ∈ { Keep, RejectA, RejectB, RejectBoth, Skip }`
@@ -36,6 +50,7 @@ This is the phase where Chronimage starts beating Aftershoot / Narrative Select 
 - [ ] RAW+JPG pair handling: RejectA/RejectB operate on the pair members; RejectBoth drops both
 - [ ] Idempotent — re-applying a verdict is a no-op
 - [ ] Progress event `chronimage.cull.progress` fires per verdict so the UI can animate
+- [ ] **Flag shortcut from the catalog detail view** — detail-view Flag button (currently soft-disabled) fires `apply_verdict(photo_id, Verdict::RejectA)` with no pair context; routes to Cull Bin. Keyboard shortcut `X` in detail view.
 
 ### 3. Cull Bin screen (ported from `screens_cullbin.jsx`)
 - [ ] Ported with filters (All rejects / Near-dupes / Out of focus / Eyes closed / Screenshots)
@@ -97,13 +112,25 @@ This is the phase where Chronimage starts beating Aftershoot / Narrative Select 
 - [ ] Fallback plan if sqlite-vec ANN remains delayed: swap to `hnsw-rs` crate + `vec_photo_embeddings_f32` for distance verification, keeping the int8 table as the scan fallback.
 - [ ] Revisit `phase_1_search_latency.rs` threshold after the upgrade lands — should aim for PRD's original 500 ms with headroom.
 
+### 10. Manual tagging
+
+Manual tags complement the zero-shot object tags (`tags.kind='object'`, Phase 2 week-1 rehaul, ADR 0007) and the auto-face tags from clustering. Users need a way to apply their own labels — the Tag toolbar button is soft-disabled until this ships.
+
+- [ ] Multi-select → **Tag** dropdown in the Catalog toolbar: `Add tag…` (free-text input + existing-tag autocomplete) / `Remove tag…` / recent-tags list
+- [ ] Detail inspector: inline-editable tag chip row (tab-complete, Backspace to remove, Enter to commit)
+- [ ] Persists as `tags` rows with `kind='user'` — schema already present from Phase 1
+- [ ] Tags are searchable via the existing FTS5 `photos_fts.tags` column — `photos_fts_insert/after_delete/update` triggers already maintain the index
+- [ ] `list_user_tags() -> Vec<{ label, photo_count }>` command for autocomplete + a future "Tags" facet drilldown
+- [ ] Bulk rename a user tag (`rename_user_tag(old, new)`) — single SQL update across the `tags` table; FTS re-index happens via the existing triggers
+
 ## Non-goals
 
 - No RAW develop (Phase 3)
 - No prompt-edit (Phase 4)
 - No automatic cull — user always triggers the workflow
-- No delete-from-source (that's the separate **source cleanup** feature in Phase 1)
+- No delete-from-source — that flow shipped in week 1 ([ADR 0005](../adr/0005-no-wizard-catalog-is-home.md) covers source-disconnect + Remove-from-catalog + Recycle-Bin routing).
 - No mobile companion for cull (future)
+- No more onboarding wizard — catalog is the home ([ADR 0005](../adr/0005-no-wizard-catalog-is-home.md)); the old "Sources" primary nav rail entry is gone.
 
 ## Non-functional requirements
 

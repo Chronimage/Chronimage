@@ -81,6 +81,11 @@ export interface PhotoRow {
   aesthetic_score: number | null;
   paired_photo_id: number | null;
   raw_format: string | null;
+  /** EXIF Orientation (1–8). 1 = no rotation. Values 5–8 imply a 90°
+   * transform so display width/height are swapped vs. stored dimensions. */
+  orientation: number;
+  /** Laplacian-variance sharpness score from Stage 2.6. */
+  sharpness_score: number | null;
 }
 
 export interface SourceRow {
@@ -96,10 +101,19 @@ export async function listAlbums(): Promise<AlbumRow[]> {
   return tauriInvoke<AlbumRow[]>('list_albums');
 }
 
+export type PhotoSortBy =
+  | 'captured_desc'
+  | 'captured_asc'
+  | 'imported_desc'
+  | 'filename_asc'
+  | 'aesthetic_desc'
+  | 'random';
+
 export interface ListPhotosParams {
   limit?: number;
   offset?: number;
   albumId?: number | null;
+  sortBy?: PhotoSortBy | null;
 }
 
 export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]> {
@@ -107,6 +121,7 @@ export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]>
     limit: params?.limit ?? null,
     offset: params?.offset ?? null,
     albumId: params?.albumId ?? null,
+    sortBy: params?.sortBy ?? null,
   });
 }
 
@@ -126,8 +141,58 @@ export async function createSource(name: string, kind: string, rootPath?: string
   });
 }
 
-export async function deleteSource(sourceId: number): Promise<void> {
-  return tauriInvoke<void>('delete_source', { sourceId });
+export interface RemoveReceipt {
+  removed_photos: number;
+  removed_thumbnails: number;
+  errors: string[];
+}
+
+export interface RecycleReceipt {
+  recycled_count: number;
+  skipped_count: number;
+  errors: string[];
+}
+
+export interface SourceDeletionPlan {
+  photos_total: number;
+  orphan_photos: number;
+  local_files: number;
+  total_bytes: number;
+  cloud_only: number;
+}
+
+export interface RemovePreview {
+  photo_count: number;
+  local_files: number;
+  cloud_only_photos: number;
+  total_bytes: number;
+}
+
+export async function deleteSource(
+  sourceId: number,
+  opts?: { recycleFiles?: boolean; removeOrphanPhotos?: boolean },
+): Promise<RemoveReceipt> {
+  return tauriInvoke<RemoveReceipt>('delete_source', {
+    sourceId,
+    recycleFiles: opts?.recycleFiles ?? false,
+    removeOrphanPhotos: opts?.removeOrphanPhotos ?? true,
+  });
+}
+
+export async function sourceDeletionPreview(sourceId: number): Promise<SourceDeletionPlan> {
+  return tauriInvoke<SourceDeletionPlan>('source_deletion_preview', { sourceId });
+}
+
+export async function removePhotosPreview(photoIds: number[]): Promise<RemovePreview> {
+  return tauriInvoke<RemovePreview>('remove_photos_preview', { photoIds });
+}
+
+export async function removePhotosFromCatalog(photoIds: number[]): Promise<RemoveReceipt> {
+  return tauriInvoke<RemoveReceipt>('remove_photos_from_catalog', { photoIds });
+}
+
+export async function recycleSourceCopies(photoIds: number[]): Promise<RecycleReceipt> {
+  return tauriInvoke<RecycleReceipt>('recycle_source_copies', { photoIds });
 }
 
 // ── Import commands ─────────────────────────────────────────────────────────
@@ -624,4 +689,67 @@ export async function importGooglePhotos(
     sessionId,
     clientId: clientId ?? null,
   });
+}
+
+// ── Disk / catalog-home helpers ─────────────────────────────────────────────
+
+export interface DiskInfo {
+  free_bytes: number;
+  total_bytes: number;
+}
+
+export async function getDefaultCatalogPath(): Promise<string> {
+  return tauriInvoke<string>('get_default_catalog_path');
+}
+
+export async function getDiskInfo(path: string): Promise<DiskInfo> {
+  return tauriInvoke<DiskInfo>('get_disk_info', { path });
+}
+
+// ── Face-cluster rebuild ────────────────────────────────────────────────────
+
+export const RECLUSTER_PROGRESS_EVENT = 'chronimage://recluster-progress';
+
+export interface ReclusterProgress {
+  phase: 'start' | 'done';
+  total_faces: number;
+  clustered_faces: number;
+  cluster_count: number;
+}
+
+export interface ReclusterReceipt {
+  total_faces: number;
+  clustered_faces: number;
+  cluster_count: number;
+  named_preserved: number;
+  new_clusters: number;
+  pruned_empty: number;
+  elapsed_ms: number;
+}
+
+export async function reclusterFaces(): Promise<ReclusterReceipt> {
+  return tauriInvoke<ReclusterReceipt>('recluster_faces');
+}
+
+// ── Thumbnail cache rebuild ─────────────────────────────────────────────────
+
+export const REBUILD_PROGRESS_EVENT = 'chronimage://rebuild-progress';
+
+export interface RebuildProgress {
+  total: number;
+  done: number;
+  failed: number;
+  current_photo_id: number;
+  phase: 'start' | 'tick' | 'done';
+}
+
+export interface RebuildReceipt {
+  total: number;
+  regenerated: number;
+  failed: number;
+  elapsed_ms: number;
+}
+
+export async function rebuildThumbnails(): Promise<RebuildReceipt> {
+  return tauriInvoke<RebuildReceipt>('rebuild_thumbnails');
 }

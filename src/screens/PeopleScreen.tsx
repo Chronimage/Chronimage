@@ -7,16 +7,21 @@
  *   face_cluster_merge  → useFaceClusterMerge()
  */
 
+import { listen } from '@tauri-apps/api/event';
 import { useEffect, useState } from 'react';
 import { Icon } from '../primitives/Icon';
 import { Thumbnail } from '../primitives/Thumbnail';
 import {
   type ClusterRow,
+  RECLUSTER_PROGRESS_EVENT,
   useFaceClusterMerge,
   useFaceClusterName,
   useFaceClusters,
   usePhotosForCluster,
+  useReclusterFaces,
 } from '../state/queries';
+import type { ReclusterProgress } from '../tauri/invoke';
+import { debug } from '../util/log';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -73,9 +78,12 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: Clu
           aspectRatio: '1',
           borderRadius: 'var(--radius-sm)',
           overflow: 'hidden',
-          background: `oklch(0.45 0.14 ${hue})`,
+          position: 'relative',
+          background: cluster.coverPhotoId != null ? 'var(--bg-elev)' : `oklch(0.45 0.14 ${hue})`,
           backgroundImage:
-            'repeating-linear-gradient(-45deg, transparent 0 6px, rgba(255,255,255,0.07) 6px 7px)',
+            cluster.coverPhotoId != null
+              ? 'none'
+              : 'repeating-linear-gradient(-45deg, transparent 0 6px, rgba(255,255,255,0.07) 6px 7px)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -85,7 +93,15 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: Clu
           padding: 0,
         }}
       >
-        <Icon name="faces" size={28} />
+        {cluster.coverPhotoId != null ? (
+          <Thumbnail
+            photoId={cluster.coverPhotoId}
+            photo={{ hue, filename: `Cluster ${cluster.id}` }}
+            subtle
+          />
+        ) : (
+          <Icon name="faces" size={28} />
+        )}
       </button>
 
       {/* Face count badge */}
@@ -153,6 +169,36 @@ export function PeopleScreen() {
   const { data: clusters = [], isLoading, isError } = useFaceClusters(60);
   const nameCluster = useFaceClusterName();
   const mergeCluster = useFaceClusterMerge();
+  const recluster = useReclusterFaces();
+
+  // Live recluster progress — backend emits `start` / `done` phases. We show
+  // the button as `Re-clustering…` while a pass is in flight.
+  const [reclusterPhase, setReclusterPhase] = useState<'idle' | 'running'>('idle');
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const u = await listen<ReclusterProgress>(RECLUSTER_PROGRESS_EVENT, (evt) => {
+          if (evt.payload.phase === 'start') setReclusterPhase('running');
+          else if (evt.payload.phase === 'done') setReclusterPhase('idle');
+        });
+        if (cancelled) u();
+        else unlisten = u;
+      } catch (err) {
+        debug('people: recluster listen failed', err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  function onReclusterClick() {
+    recluster.mutate();
+  }
+  const reclusterBusy = reclusterPhase === 'running' || recluster.isPending;
 
   const openedCluster =
     openedClusterId === null ? null : (clusters.find((c) => c.id === openedClusterId) ?? null);
@@ -192,9 +238,7 @@ export function PeopleScreen() {
       <div className="canvas-scroll">
         <div
           style={{
-            maxWidth: 1200,
             padding: 'var(--space-6) var(--space-6) 40px',
-            margin: '0 auto',
           }}
         >
           {/* Header */}
@@ -208,44 +252,74 @@ export function PeopleScreen() {
               flexWrap: 'wrap',
             }}
           >
-            <h1 style={{ margin: 0 }}>
+            <h1 className="page-title" style={{ margin: 0 }}>
               People<em>.</em>
             </h1>
 
-            {/* Segmented filter */}
-            <fieldset
-              aria-label="Filter clusters"
+            <div
               style={{
                 display: 'flex',
-                gap: 2,
-                background: 'var(--bg-elev)',
-                border: '1px solid var(--stroke)',
-                borderRadius: 'var(--radius-md)',
-                padding: 3,
-                margin: 0,
+                alignItems: 'center',
+                gap: 'var(--space-3)',
+                flexWrap: 'wrap',
               }}
             >
-              {TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  className={filter === tab.id ? 'btn2 primary' : 'btn2'}
-                  onClick={() => setFilter(tab.id)}
-                  style={{
-                    padding: '5px 14px',
-                    fontSize: 12,
-                    fontFamily: 'var(--mono-font)',
-                    border: 'none',
-                    background: filter === tab.id ? 'var(--accent)' : 'transparent',
-                    color: filter === tab.id ? 'var(--accent-ink)' : 'var(--fg-dim)',
-                    borderRadius: 'var(--radius-sm)',
-                  }}
-                  aria-pressed={filter === tab.id}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </fieldset>
+              {/* Re-cluster button */}
+              <button
+                type="button"
+                className="btn2 ghost"
+                onClick={onReclusterClick}
+                disabled={reclusterBusy}
+                style={{
+                  padding: '6px 12px',
+                  fontSize: 12,
+                  fontFamily: 'var(--mono-font)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  opacity: reclusterBusy ? 0.7 : 1,
+                }}
+                title="Re-run HDBSCAN over every face embedding. Preserves user-assigned names."
+              >
+                <Icon name="wand" size={13} />
+                {reclusterBusy ? 'Re-clustering…' : 'Re-cluster'}
+              </button>
+
+              {/* Segmented filter */}
+              <fieldset
+                aria-label="Filter clusters"
+                style={{
+                  display: 'flex',
+                  gap: 2,
+                  background: 'var(--bg-elev)',
+                  border: '1px solid var(--stroke)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 3,
+                  margin: 0,
+                }}
+              >
+                {TABS.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className={filter === tab.id ? 'btn2 primary' : 'btn2'}
+                    onClick={() => setFilter(tab.id)}
+                    style={{
+                      padding: '5px 14px',
+                      fontSize: 12,
+                      fontFamily: 'var(--mono-font)',
+                      border: 'none',
+                      background: filter === tab.id ? 'var(--accent)' : 'transparent',
+                      color: filter === tab.id ? 'var(--accent-ink)' : 'var(--fg-dim)',
+                      borderRadius: 'var(--radius-sm)',
+                    }}
+                    aria-pressed={filter === tab.id}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </fieldset>
+            </div>
           </div>
 
           {/* Merge hint banner */}
@@ -314,9 +388,30 @@ export function PeopleScreen() {
               }}
             >
               <Icon name="faces" size={36} />
-              <div style={{ marginTop: 'var(--space-3)', fontSize: 14 }}>
-                No face clusters yet — run an import to detect faces.
+              <div style={{ marginTop: 'var(--space-3)', fontSize: 14 }}>No face clusters yet.</div>
+              <div style={{ marginTop: 'var(--space-2)', fontSize: 12.5, color: 'var(--fg-mute)' }}>
+                Faces are clustered automatically after every import. If you imported photos before the latest
+                update, click Re-cluster to rebuild.
               </div>
+              <button
+                type="button"
+                className="btn2 ghost"
+                onClick={onReclusterClick}
+                disabled={reclusterBusy}
+                style={{
+                  marginTop: 'var(--space-4)',
+                  padding: '8px 16px',
+                  fontSize: 12,
+                  fontFamily: 'var(--mono-font)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  opacity: reclusterBusy ? 0.7 : 1,
+                }}
+              >
+                <Icon name="wand" size={13} />
+                {reclusterBusy ? 'Re-clustering…' : 'Re-cluster now'}
+              </button>
             </div>
           )}
 

@@ -111,7 +111,7 @@ zip = "2"
 # Foundry "germanium" build (ABI incompatible with ort's expectations) and
 # `Session::commit_from_file` hung indefinitely in init. download-binaries
 # pins the standard Microsoft release so Session loads deterministically.
-ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "directml"] }
 image = "0.25"
 num_cpus = "1"
 # HDBSCAN face clustering — MIT OR Apache-2.0
@@ -125,6 +125,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # .env loader — dev convenience so CHRONIMAGE_* env vars (e.g. the Google
 # Photos OAuth client_secret) can live in the gitignored .env.local.
 dotenvy = "0.15"
+trash = "5.2.5"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.6"
@@ -152,6 +153,45 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [profile.dev]
 incremental = true
 opt-level = 0
+
+# ── dev-profile overrides for compute-heavy crates ──────────────────────────
+#
+# `opt-level = 0` on the image decoder + ONNX Runtime + perceptual-hash +
+# RAW libraries makes imports 50–100× slower than release. Bumping just the
+# hot dependencies to `opt-level = 3` keeps our own code at level 0 (fast
+# rebuild, fast iteration) while eliminating the "debug imports take 44 s
+# per photo" trap. Our source files aren't affected — only the dep graph.
+# Confirmed at 2026-04-23 via debug-import against a 112-JPG folder:
+# every stage (hash+EXIF+thumb, NIMA, SigLIP, SCRFD/ArcFace) was bound by
+# un-optimised JPEG decode inside each crate.
+[profile.dev.package."image"]
+opt-level = 3
+[profile.dev.package."image-webp"]
+opt-level = 3
+[profile.dev.package."zune-jpeg"]
+opt-level = 3
+[profile.dev.package."zune-core"]
+opt-level = 3
+[profile.dev.package."png"]
+opt-level = 3
+[profile.dev.package."image_hasher"]
+opt-level = 3
+[profile.dev.package."rustdct"]
+opt-level = 3
+[profile.dev.package."transpose"]
+opt-level = 3
+[profile.dev.package."rustfft"]
+opt-level = 3
+[profile.dev.package."ort"]
+opt-level = 3
+[profile.dev.package."ort-sys"]
+opt-level = 3
+[profile.dev.package."ndarray"]
+opt-level = 3
+[profile.dev.package."sha2"]
+opt-level = 3
+[profile.dev.package."digest"]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1

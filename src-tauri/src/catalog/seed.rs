@@ -8,7 +8,12 @@ struct AlbumSeed {
     rule_json: &'static str,
 }
 
-// ── 12 design-specified system albums ────────────────────────────────────────
+// ── System smart albums ───────────────────────────────────────────────────────
+//
+// Only rule-based albums that compute against real photo data are seeded.
+// Personalised placeholders from the design mockup (named people, trips,
+// hobbies) were removed — those will be user-created smart albums, not
+// seeded fixtures.
 //
 // Rediscovery albums ("On this day", "First time on new camera",
 // "Unflagged favorites") are owned by catalog::rediscovery and seeded
@@ -16,70 +21,10 @@ struct AlbumSeed {
 
 const SYSTEM_ALBUMS: &[AlbumSeed] = &[
     AlbumSeed {
-        name: "Portraits",
-        description: "People in focus",
-        tag: "faces",
-        rule_json: r#"{"type":"tag","value":"faces"}"#,
-    },
-    AlbumSeed {
-        name: "Golden Hour",
-        description: "Warm sunset light",
-        tag: "lighting",
-        rule_json: r#"{"type":"tag","value":"golden_hour"}"#,
-    },
-    AlbumSeed {
-        name: "Kids — Ari & Leo",
-        description: "Family, 2024–26",
-        tag: "people",
-        rule_json: r#"{"type":"cluster","value":"kids"}"#,
-    },
-    AlbumSeed {
-        name: "Food & Kitchen",
-        description: "Meals worth remembering",
-        tag: "scenes",
-        rule_json: r#"{"type":"tag","value":"food"}"#,
-    },
-    AlbumSeed {
-        name: "Japan · Autumn '25",
-        description: "Kyoto → Tokyo",
-        tag: "place",
-        rule_json: r#"{"type":"tag","value":"japan"}"#,
-    },
-    AlbumSeed {
-        name: "Loop 2 · product shots",
-        description: "Studio catalog",
-        tag: "work",
-        rule_json: r#"{"type":"tag","value":"product"}"#,
-    },
-    AlbumSeed {
         name: "Night & Low Light",
         description: "ISO ≥ 3200",
         tag: "lighting",
         rule_json: r#"{"type":"exif","field":"iso","op":"gte","value":3200}"#,
-    },
-    AlbumSeed {
-        name: "Weddings & Events",
-        description: "Client deliveries",
-        tag: "event",
-        rule_json: r#"{"type":"tag","value":"event"}"#,
-    },
-    AlbumSeed {
-        name: "Milo (golden retriever)",
-        description: "On-device recognition",
-        tag: "people",
-        rule_json: r#"{"type":"cluster","value":"pets"}"#,
-    },
-    AlbumSeed {
-        name: "Screenshots & Docs",
-        description: "Auto-archived",
-        tag: "utility",
-        rule_json: r#"{"type":"tag","value":"screenshot"}"#,
-    },
-    AlbumSeed {
-        name: "Burst & Duplicates",
-        description: "Flagged by similarity",
-        tag: "cull",
-        rule_json: r#"{"type":"tag","value":"duplicate"}"#,
     },
     AlbumSeed {
         name: "Out-of-focus",
@@ -133,7 +78,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn seeds_12_system_albums_on_empty_catalog() {
+    async fn seeds_rule_based_system_albums_on_empty_catalog() {
         let tmp = TempDir::new().expect("tempdir");
         let pool = open_pool(PoolOptions::new(tmp.path().join("c.db")))
             .await
@@ -146,8 +91,8 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count");
-        // 12 static + 4 rediscovery = 16 total system albums.
-        assert_eq!(count, 16);
+        // 2 static rule-based + 4 rediscovery = 6 total system albums.
+        assert_eq!(count, 6);
     }
 
     #[tokio::test]
@@ -165,6 +110,6 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count");
-        assert_eq!(count, 16);
+        assert_eq!(count, 6);
     }
 }

@@ -16,8 +16,10 @@ import {
   type ModelStatus,
   useAiModelsStatus,
   useAiReindex,
+  useDefaultCatalogPath,
   useDownloadModels,
 } from '../state/queries';
+import { useCatalogHome, useImportMode } from '../state/settings';
 import { useUi } from '../state/ui';
 import { DOWNLOAD_PROGRESS_EVENT, type DownloadProgressEvent } from '../tauri/invoke';
 import { debug } from '../util/log';
@@ -775,6 +777,26 @@ export function SettingsScreen() {
   const preferredChannel = useUi((s) => s.tweaks.preferredChannel);
   const setTweaks = useUi((s) => s.setTweaks);
 
+  const [importMode, setImportMode] = useImportMode();
+  const [catalogHome, setCatalogHome] = useCatalogHome();
+  const { data: defaultCatalogHome } = useDefaultCatalogPath();
+  const effectiveHome = catalogHome ?? defaultCatalogHome ?? null;
+
+  async function pickCatalogHome() {
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: 'Choose catalog home',
+      });
+      if (typeof selected === 'string' && selected.length > 0) {
+        await setCatalogHome(selected);
+      }
+    } catch (err) {
+      debug('settings: catalog-home picker failed', err);
+    }
+  }
+
   async function pickCachePath() {
     try {
       const selected = await openDialog({ directory: true, multiple: false });
@@ -872,7 +894,7 @@ export function SettingsScreen() {
   return (
     <div className="canvas">
       <div className="canvas-scroll">
-        <div className="settings" style={{ maxWidth: 740, padding: '28px 32px 48px', margin: '0 auto' }}>
+        <div className="settings" style={{ padding: '28px 32px 48px' }}>
           <h1>
             Settings<em>.</em>
           </h1>
@@ -924,6 +946,108 @@ export function SettingsScreen() {
                   minWidth: 220,
                 }}
               />
+            </div>
+          </div>
+
+          {/* ── 1a. Library ── */}
+          <div className="set-section" style={{ marginTop: 28 }}>
+            <h3
+              style={{
+                margin: '0 0 14px',
+                fontSize: 13,
+                color: 'var(--fg-dim)',
+                fontFamily: 'var(--mono-font)',
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+              }}
+            >
+              Library
+            </h3>
+
+            <div
+              className="set-row"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 24,
+                paddingBottom: 14,
+                borderBottom: '1px solid var(--stroke)',
+              }}
+            >
+              <div className="lbl" style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: 'var(--fg)' }}>Default import mode</div>
+                <div style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 2 }}>
+                  What happens to files when you add a new source
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="settings-import-mode"
+                    value="index_in_place"
+                    checked={importMode === 'index_in_place'}
+                    onChange={() => {
+                      setImportMode('index_in_place').catch((err) =>
+                        debug('settings: setImportMode failed', err),
+                      );
+                    }}
+                  />
+                  <span style={{ fontSize: 12 }}>Index in place</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input
+                    type="radio"
+                    name="settings-import-mode"
+                    value="consolidate"
+                    checked={importMode === 'consolidate'}
+                    onChange={() => {
+                      setImportMode('consolidate').catch((err) =>
+                        debug('settings: setImportMode failed', err),
+                      );
+                    }}
+                  />
+                  <span style={{ fontSize: 12 }}>Consolidate</span>
+                </label>
+              </div>
+            </div>
+
+            <div
+              className="set-row"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 24,
+                paddingBottom: 14,
+                paddingTop: 14,
+                borderBottom: '1px solid var(--stroke)',
+              }}
+            >
+              <div className="lbl" style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: 'var(--fg)' }}>Catalog home</div>
+                <div style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 2 }}>
+                  Destination for new photos when Consolidate mode is on. Existing photos are not migrated.
+                </div>
+                <code
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--fg-dim)',
+                    display: 'block',
+                    marginTop: 4,
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {effectiveHome ?? '…'}
+                </code>
+              </div>
+              <button
+                type="button"
+                className="btn2 ghost"
+                onClick={pickCatalogHome}
+                style={{ fontSize: 12, padding: '6px 12px', whiteSpace: 'nowrap' }}
+              >
+                Change…
+              </button>
             </div>
           </div>
 

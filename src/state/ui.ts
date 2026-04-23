@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { loadPersisted, savePersisted } from '../util/store';
 
-export type ScreenId = 'onboard' | 'catalog' | 'cull' | 'cullbin' | 'develop' | 'people' | 'settings';
+export type ScreenId = 'catalog' | 'cull' | 'cullbin' | 'develop' | 'people' | 'settings';
 
 export interface Screen {
   id: ScreenId;
@@ -9,7 +9,6 @@ export interface Screen {
 }
 
 export const SCREENS: Record<ScreenId, Screen> = {
-  onboard: { id: 'onboard', label: 'Sources' },
   catalog: { id: 'catalog', label: 'Catalog' },
   cull: { id: 'cull', label: 'Cull' },
   cullbin: { id: 'cullbin', label: 'Cull Bin' },
@@ -17,6 +16,14 @@ export const SCREENS: Record<ScreenId, Screen> = {
   people: { id: 'people', label: 'People' },
   settings: { id: 'settings', label: 'Settings' },
 };
+
+export type PhotoSortBy =
+  | 'captured_desc'
+  | 'captured_asc'
+  | 'imported_desc'
+  | 'filename_asc'
+  | 'aesthetic_desc'
+  | 'random';
 
 export interface Tweaks {
   theme: 'dark' | 'light';
@@ -36,6 +43,8 @@ export interface Tweaks {
   cachePath: string | null;
   /** Release channel the user opts into for auto-updates. */
   preferredChannel: 'stable' | 'beta' | 'nightly' | 'insider';
+  /** Catalog grid sort order. Persisted so the user's choice survives reload. */
+  sortBy: PhotoSortBy;
 }
 
 export const DEFAULT_TWEAKS: Tweaks = {
@@ -53,6 +62,7 @@ export const DEFAULT_TWEAKS: Tweaks = {
   nightlyReindex: true,
   cachePath: null,
   preferredChannel: 'stable',
+  sortBy: 'captured_desc',
 };
 
 const TWEAKS_STORE_KEY = 'tweaks';
@@ -69,7 +79,7 @@ interface UiState {
 }
 
 export const useUi = create<UiState>((set, get) => ({
-  screen: SCREENS.onboard,
+  screen: SCREENS.catalog,
   tweaks: DEFAULT_TWEAKS,
   hydrated: false,
   setScreen: (id) => set({ screen: SCREENS[id] }),

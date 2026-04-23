@@ -1,6 +1,6 @@
-import { useVirtualizer } from '@tanstack/react-virtual';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
+import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon } from '../../primitives/Icon';
 import { Thumbnail } from '../../primitives/Thumbnail';
 import {
@@ -11,14 +11,21 @@ import {
   usePhotoQuality,
   usePhotos,
   useRecordPhotoView,
+  useRecycleSourceCopies,
+  useRemovePhotosFromCatalog,
+  useRemovePhotosPreview,
   useSearchPhotos,
   useSearchSuggestions,
+  useSources,
   useTags,
   useUnflaggedFavorites,
   useUnseenPhotos,
 } from '../../state/queries';
+import { useUi } from '../../state/ui';
 import type { PhotoRow } from '../../tauri/invoke';
+import { CatalogEmptyState } from './CatalogEmptyState';
 import { DuplicatesPanel } from './DuplicatesPanel';
+import { MasonryGrid } from './MasonryGrid';
 
 export interface CatalogScreenProps {
   albumId: string;
@@ -26,124 +33,17 @@ export interface CatalogScreenProps {
 
 const FACETS = ['All', 'People', 'Places', 'Objects', 'Events', 'Colors', 'Cameras'];
 
-const ROW_HEIGHT = 190;
-const MIN_CELL_WIDTH = 170;
-
-function useColumnCount(containerRef: React.RefObject<HTMLDivElement | null>) {
-  const [cols, setCols] = useState(4);
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const w = entry.contentRect.width;
-      setCols(Math.max(1, Math.floor(w / MIN_CELL_WIDTH)));
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [containerRef]);
-  return cols;
-}
-
-interface VirtualGridProps {
-  photos: PhotoRow[];
-  selected: Set<number>;
-  onToggle: (id: number) => void;
-  onFocus: (globalIndex: number) => void;
-  scrollRef: React.RefObject<HTMLDivElement | null>;
-  onEndReached?: () => void;
-  hasMore?: boolean;
-  isFetchingMore?: boolean;
-}
-
-function VirtualGrid({
-  photos,
-  selected,
-  onToggle,
-  onFocus,
-  scrollRef,
-  onEndReached,
-  hasMore,
-  isFetchingMore,
-}: VirtualGridProps) {
-  const gridRef = useRef<HTMLDivElement>(null);
-  const cols = useColumnCount(gridRef);
-
-  const rows = useMemo(() => {
-    const result: PhotoRow[][] = [];
-    for (let i = 0; i < photos.length; i += cols) {
-      result.push(photos.slice(i, i + cols));
-    }
-    return result;
-  }, [photos, cols]);
-
-  const rowVirtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 3,
-  });
-
-  // Trigger next-page fetch when the last virtualized row is within 5 rows of the end.
-  const virtualItems = rowVirtualizer.getVirtualItems();
-  const lastVisibleIndex = virtualItems.length > 0 ? (virtualItems[virtualItems.length - 1]?.index ?? 0) : 0;
-  useEffect(() => {
-    if (!onEndReached || !hasMore || isFetchingMore) return;
-    if (rows.length === 0) return;
-    if (lastVisibleIndex >= rows.length - 5) {
-      onEndReached();
-    }
-  }, [lastVisibleIndex, rows.length, onEndReached, hasMore, isFetchingMore]);
-
-  return (
-    <div ref={gridRef} style={{ position: 'relative', height: rowVirtualizer.getTotalSize() }}>
-      {rowVirtualizer.getVirtualItems().map((vrow) => {
-        const rowPhotos = rows[vrow.index] ?? [];
-        return (
-          <div
-            key={vrow.key}
-            data-index={vrow.index}
-            ref={rowVirtualizer.measureElement}
-            style={{
-              position: 'absolute',
-              top: vrow.start,
-              left: 0,
-              right: 0,
-              display: 'flex',
-              gap: 3,
-              padding: '0 3px',
-            }}
-          >
-            {rowPhotos.map((p, cellIdx) => {
-              const globalIndex = vrow.index * cols + cellIdx;
-              const hue = (p.id * 31) % 360;
-              return (
-                <button
-                  type="button"
-                  key={p.id}
-                  className="cell"
-                  style={{ flex: 1, minWidth: 0 }}
-                  onClick={() => onToggle(p.id)}
-                  onDoubleClick={() => onFocus(globalIndex)}
-                  aria-pressed={selected.has(p.id)}
-                  aria-label={`Select ${p.filename}`}
-                >
-                  <Thumbnail
-                    photoId={p.id}
-                    photo={{ hue, filename: p.filename, id: String(p.id) }}
-                    selected={selected.has(p.id)}
-                    subtle
-                  />
-                </button>
-              );
-            })}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+const SORT_LABELS: Record<
+  'captured_desc' | 'captured_asc' | 'imported_desc' | 'filename_asc' | 'aesthetic_desc' | 'random',
+  string
+> = {
+  captured_desc: 'Newest first',
+  captured_asc: 'Oldest first',
+  imported_desc: 'Recently imported',
+  filename_asc: 'Filename A→Z',
+  aesthetic_desc: 'Best aesthetic',
+  random: 'Random',
+};
 
 // ── Detail inspector ──────────────────────────────────────────────────────────
 
@@ -249,7 +149,8 @@ function DetailInspector({ photo, metaParts, exifParts }: DetailInspectorProps) 
         {tagsLoading && <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>Loading tags…</div>}
         {!tagsLoading && tags.length === 0 && (
           <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>
-            No tags yet. Auto-tagging runs as part of import (SigLIP + face clustering).
+            No tags on this photo yet. Zero-shot object tagging arrives with Phase 2 §10 (manual tags) and
+            Phase C4f (SigLIP zero-shot) in the catalog rehaul.
           </div>
         )}
         {!tagsLoading && tags.length > 0 && (
@@ -314,18 +215,27 @@ function DetailInspector({ photo, metaParts, exifParts }: DetailInspectorProps) 
         {quality && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
             <QualityBar label="Aesthetic" value={quality.aesthetic != null ? quality.aesthetic / 10 : null} />
-            <QualityBar label="Sharpness" value={quality.sharpness} warnBelow={0.3} />
+            {/* Sharpness score is Laplacian variance — long-tailed (0 to ~2000).
+                Clip to a reasonable display range so the bar spans visibly:
+                800+ = "tack sharp", 100 = edge of acceptable, <100 = blur. */}
+            <QualityBar
+              label="Sharpness"
+              value={quality.sharpness != null ? Math.min(1, Math.max(0, quality.sharpness / 800)) : null}
+              warnBelow={100 / 800}
+            />
+            {quality.face_count > 0 && quality.best_face_quality != null && (
+              <QualityBar label="Face clarity" value={quality.best_face_quality} warnBelow={0.5} />
+            )}
+            {quality.face_count > 0 && quality.min_eyes_open != null && (
+              <QualityBar label="Eyes open" value={quality.min_eyes_open} warnBelow={0.4} />
+            )}
             {quality.face_count > 0 && (
-              <>
-                <QualityBar label="Face clarity" value={quality.best_face_quality} warnBelow={0.5} />
-                <QualityBar label="Eyes open" value={quality.min_eyes_open} warnBelow={0.4} />
-                <div
-                  className="mono"
-                  style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 'var(--space-1)' }}
-                >
-                  {quality.face_count} {quality.face_count === 1 ? 'face' : 'faces'} detected
-                </div>
-              </>
+              <div
+                className="mono"
+                style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 'var(--space-1)' }}
+              >
+                {quality.face_count} {quality.face_count === 1 ? 'face' : 'faces'} detected
+              </div>
             )}
           </div>
         )}
@@ -504,23 +414,56 @@ function DetailView({
           {photo.filename} · {photoIndex + 1}/{totalPhotos}
         </span>
         <div style={{ flex: 1 }} />
-        <button type="button" className="btn">
+        <button
+          type="button"
+          className="btn phase-gated"
+          disabled
+          aria-disabled="true"
+          title="Coming in Phase 2"
+        >
           <Icon name="star" size={13} /> Rate
         </button>
-        <button type="button" className="btn">
+        <button
+          type="button"
+          className="btn phase-gated"
+          disabled
+          aria-disabled="true"
+          title="Coming in Phase 2"
+        >
           <Icon name="flag" size={13} /> Flag
         </button>
         <div className="divider" />
-        <button type="button" className="btn">
+        <button
+          type="button"
+          className="btn phase-gated"
+          disabled
+          aria-disabled="true"
+          title="Coming in Phase 3"
+        >
           <Icon name="brush" size={13} /> Develop
         </button>
-        <button type="button" className="btn">
+        <button
+          type="button"
+          className="btn phase-gated"
+          disabled
+          aria-disabled="true"
+          title="Coming in Phase 2"
+        >
           <Icon name="export" size={13} /> Export
         </button>
       </div>
       <div className="detail-stage" style={{ overflowY: 'auto' }}>
         <div className="detail-hero">
-          <div style={{ width: '100%', maxWidth: 1000, aspectRatio: '3/2', maxHeight: '100%' }}>
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 1000,
+              maxHeight: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
             <Thumbnail
               photoId={photo.id}
               sizePx={1280}
@@ -654,17 +597,55 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [showDuplicates, setShowDuplicates] = useState(false);
+  const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
   const searching = query.trim().length > 0;
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  const gridDensity = useUi((s) => s.tweaks.gridDensity);
+  const sortBy = useUi((s) => s.tweaks.sortBy);
+  const setTweaks = useUi((s) => s.setTweaks);
+  // Density → masonry min-column-width. compact = denser grid (4+ cols on a
+  // standard laptop), spacious = wider cells (fewer cols).
+  const masonryMinWidth = gridDensity === 'spacious' ? 340 : gridDensity === 'compact' ? 180 : 220;
+
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
+
   const { data: albums = [] } = useAlbums();
+  const { data: sources = [] } = useSources();
   const numericAlbumId = albumId !== 'all' ? Number(albumId) : null;
   const {
     data: photos = [],
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = usePhotos({ albumId: numericAlbumId });
+  } = usePhotos({ albumId: numericAlbumId, sortBy });
+
+  const selectedIds = useMemo(() => [...selected], [selected]);
+  const { data: removePreview } = useRemovePhotosPreview(removeDialogOpen ? selectedIds : []);
+  const removeFromCatalog = useRemovePhotosFromCatalog();
+  const recycleFiles = useRecycleSourceCopies();
+  const removeBusy = removeFromCatalog.isPending || recycleFiles.isPending;
+
+  async function handleRemoveConfirm(choices: Set<string>) {
+    const ids = selectedIds;
+    if (ids.length === 0) return;
+    try {
+      if (choices.has('recycle')) {
+        await recycleFiles.mutateAsync(ids);
+      }
+      await removeFromCatalog.mutateAsync(ids);
+      setSelected(new Set());
+    } finally {
+      setRemoveDialogOpen(false);
+    }
+  }
+
+  function formatBytes(bytes: number): string {
+    if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(1)} TB`;
+    if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+    if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+    return `${(bytes / 1e3).toFixed(0)} KB`;
+  }
   const loadMorePhotos = useCallback(() => {
     void fetchNextPage();
   }, [fetchNextPage]);
@@ -755,12 +736,58 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
           <span className="kbd">⌘K</span>
         </div>
         <div className="divider" />
-        <button type="button" className="btn" aria-label="Grid view">
+        <button
+          type="button"
+          className={`btn${gridDensity === 'comfortable' || gridDensity === 'compact' ? ' on' : ''}`}
+          aria-label="Grid view"
+          title="Grid view (denser columns)"
+          onClick={() => setTweaks({ gridDensity: 'comfortable' })}
+          aria-pressed={gridDensity !== 'spacious'}
+        >
           <Icon name="grid" size={13} />
         </button>
-        <button type="button" className="btn" aria-label="Stack view">
+        <button
+          type="button"
+          className={`btn${gridDensity === 'spacious' ? ' on' : ''}`}
+          aria-label="Stack view"
+          title="Stack view (wider columns)"
+          onClick={() => setTweaks({ gridDensity: 'spacious' })}
+          aria-pressed={gridDensity === 'spacious'}
+        >
           <Icon name="layers" size={13} />
         </button>
+        <div className="sort-wrap" style={{ position: 'relative' }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setSortMenuOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={sortMenuOpen}
+            title="Sort order"
+          >
+            <Icon name="history" size={13} /> {SORT_LABELS[sortBy]}
+            <Icon name="chevD" size={10} />
+          </button>
+          {sortMenuOpen && (
+            <div role="menu" className="sort-menu" onMouseLeave={() => setSortMenuOpen(false)}>
+              {(Object.keys(SORT_LABELS) as Array<keyof typeof SORT_LABELS>).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`sort-menu-item${sortBy === key ? ' active' : ''}`}
+                  role="menuitemradio"
+                  aria-checked={sortBy === key}
+                  onClick={() => {
+                    setTweaks({ sortBy: key });
+                    setSortMenuOpen(false);
+                  }}
+                >
+                  {SORT_LABELS[key]}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           className="btn"
@@ -775,24 +802,59 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
             <span className="mono" style={{ fontSize: 11, color: 'var(--accent)' }}>
               {selected.size} selected
             </span>
-            <button type="button" className="btn">
+            <button
+              type="button"
+              className="btn phase-gated"
+              disabled
+              title="Coming in Phase 3 — RAW Develop"
+              aria-disabled="true"
+            >
               <Icon name="brush" size={13} /> Develop
             </button>
-            <button type="button" className="btn">
+            <button
+              type="button"
+              className="btn phase-gated"
+              disabled
+              title="Coming in Phase 2 — Cull workflow"
+              aria-disabled="true"
+            >
               <Icon name="cull" size={13} /> Cull
             </button>
-            <button type="button" className="btn">
+            <button
+              type="button"
+              className="btn phase-gated"
+              disabled
+              title="Coming in Phase 2 — Export sheet"
+              aria-disabled="true"
+            >
               <Icon name="export" size={13} /> Export
             </button>
-            <button type="button" className="btn">
+            <button
+              type="button"
+              className="btn phase-gated"
+              disabled
+              title="Coming in Phase 2 — Manual tagging"
+              aria-disabled="true"
+            >
               <Icon name="tag" size={13} /> Tag
+            </button>
+            <button
+              type="button"
+              className="btn"
+              style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
+              onClick={() => setRemoveDialogOpen(true)}
+              title="Remove selected photos from catalog"
+            >
+              <Icon name="reject" size={13} /> Remove
             </button>
           </>
         )}
       </div>
 
       <div className="canvas-scroll" ref={scrollRef}>
-        {!searching ? (
+        {sources.length === 0 && photos.length === 0 && !searching ? (
+          <CatalogEmptyState />
+        ) : !searching ? (
           <>
             <div className="catalog-hero">
               <div>
@@ -807,20 +869,14 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 >
                   {albumId === 'all' ? 'SMART ALBUM · ALL PHOTOS' : 'SMART ALBUM · AUTO-CURATED'}
                 </div>
-                <h1>
+                <h1 className="page-title">
                   {displayAlbum.name}
                   <em>.</em>
                 </h1>
                 <div className="mono" style={{ fontSize: 12, color: 'var(--fg-dim)', marginTop: 6 }}>
-                  {displayAlbum.photo_count.toLocaleString()} photos ·{' '}
-                  {displayAlbum.description ?? 'Last updated 2h ago'}
+                  {displayAlbum.photo_count.toLocaleString()} photos
+                  {displayAlbum.description ? ` · ${displayAlbum.description}` : ''}
                 </div>
-              </div>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <Chip variant="solid">Ari</Chip>
-                <Chip>Backyard</Chip>
-                <Chip>Golden hour</Chip>
-                <Chip tone="info">CLIP 0.82+</Chip>
               </div>
             </div>
 
@@ -856,7 +912,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               selected={selected}
               onToggle={toggle}
             />
-            <VirtualGrid
+            <MasonryGrid
               photos={photos}
               selected={selected}
               onToggle={toggle}
@@ -865,6 +921,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               onEndReached={loadMorePhotos}
               hasMore={hasNextPage}
               isFetchingMore={isFetchingNextPage}
+              minColumnWidth={masonryMinWidth}
             />
             <div
               style={{
@@ -939,18 +996,58 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 ))}
               </div>
             ) : (
-              <VirtualGrid
+              <MasonryGrid
                 photos={photos}
                 selected={selected}
                 onToggle={toggle}
                 onFocus={openDetail}
                 scrollRef={scrollRef}
+                minColumnWidth={masonryMinWidth}
               />
             )}
           </div>
         )}
       </div>
       {showDuplicates && <DuplicatesPanel onClose={() => setShowDuplicates(false)} />}
+      <ConfirmDialog
+        open={removeDialogOpen}
+        title={`Remove ${selected.size} ${selected.size === 1 ? 'photo' : 'photos'}?`}
+        description={
+          removePreview ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div>All catalog metadata — tags, faces, embeddings, view history — will be removed.</div>
+              {removePreview.local_files > 0 && (
+                <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-mute)' }}>
+                  {removePreview.local_files} local files · {formatBytes(removePreview.total_bytes)}
+                  {removePreview.cloud_only_photos > 0 &&
+                    ` · ${removePreview.cloud_only_photos} cloud-only (no file to recycle)`}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
+              Calculating impact…
+            </div>
+          )
+        }
+        confirmLabel={`Remove ${selected.size} ${selected.size === 1 ? 'photo' : 'photos'}`}
+        confirmTone="danger"
+        options={
+          removePreview && removePreview.local_files > 0
+            ? [
+                {
+                  id: 'recycle',
+                  label: `Also move ${removePreview.local_files} files to Recycle Bin (${formatBytes(removePreview.total_bytes)})`,
+                  description: 'Files can be restored from the Recycle Bin if you change your mind.',
+                  defaultChecked: false,
+                },
+              ]
+            : []
+        }
+        busy={removeBusy}
+        onCancel={() => setRemoveDialogOpen(false)}
+        onConfirm={handleRemoveConfirm}
+      />
     </div>
   );
 }

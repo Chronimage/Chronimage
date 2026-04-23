@@ -1,50 +1,42 @@
-# Next session · Phase 1 — exit the phase
+# Next session — starting moves (post-rehaul)
+_Refreshed 2026-04-25_
 
-Branch: `develop` (post PR #35, merged as `ed5b011`). The full Phase 1 frontend is now real-data backed — catalog, people, onboarding, settings all off fixtures; five-section inspector, duplicates panel, people drill-down, real thumbnails, two new rediscovery rows, updater-channel picker. Coverage gates re-passing (84 tests · src/state 90.5%). What remains to close Phase 1: one Rust stress stub, three e2e specs, and a first beta tag to exercise the packaging workflow.
+Phase 2 week 2 catalog + People rehaul is shipped (see [`docs/checkpoints/latest.md`](checkpoints/latest.md) + [ADR 0007](adr/0007-catalog-masonry-and-clustering-wire.md)). Working tree is heavy but all gates green: 278 Rust tests, clippy clean, `pnpm typecheck` + 85 vitest tests clean.
 
-## Exit-criteria scoreboard
+Pick one of these (ordered by leverage on the v1 roadmap).
 
-| Test | Status |
-|---|---|
-| `phase_1_raw_jpg_pair` | ✅ 1.0000 precision (5 000 pairs) |
-| `phase_1_catalog_size` | ✅ 0.00202 ratio |
-| `phase_1_face_clustering` | ✅ F1 1.0000 (LFW) |
-| `phase_1_search_latency` | ✅ 607 ms p95 (int8 vec0 KNN) |
-| `phase_1_stress` | ❌ `unimplemented!()` — last Rust stub |
-| `phase-1-import-throughput.spec.ts` | 🟡 wired; skips unless `CHRONIMAGE_E2E_TAURI=1` |
-| `phase-1-source-cleanup.spec.ts` | ❌ top-level `test.skip()` |
-| `phase-1-rediscovery.spec.ts` | ❌ top-level `test.skip()` |
-| `phase-1-search-latency.spec.ts` | ❌ top-level `test.skip()` (Rust test carries the NFR) |
+## 1. Commit the rehaul — then start Cull screen (Phase 2 §1). [~1 d]
 
-## Five starts — pick one
+- **First command:** `git status` → stage in three logical commits (`feat(catalog): masonry grid + EXIF orientation`, `feat(ai): face clustering wired + re-cluster UX`, `feat(ui): detail inspector + sort + selection polish`).
+- **Why highest leverage:** Phase 2's real scope is Cull + Export. The rehaul was a prerequisite; Cull now starts from a catalog that looks finished. Cull screen is the largest single on-PRD v1 feature still un-started.
+- **First file to edit after commits:** new `src/screens/cull/CullScreen.tsx` (currently `PlaceholderScreen`). Backend: new `src-tauri/src/cull/` module for pair selection + verdict recording. See [`docs/prds/phase-2.md`](prds/phase-2.md) §1–§2.
 
-### 1. `phase_1_stress` 8-hour nightly loop · ~3 h
-Last unclosed Rust integration test. `#[ignore]`-gated so zero CI cost; completes the Rust side of the exit matrix.
-**First action:** edit [phase_1_stress.rs:13](src-tauri/tests/phase_1_stress.rs#L13). Reuse `synthesize_jpeg` + `run_pipeline_headless` helpers from the existing integration tests. Loop: import 50k synthetic photos, run search every 5 min, rebuild face clusters every 30 min, sample RSS via `sysinfo`. Assert: zero panics hooked, peak RSS < 2 GB, final pool free-list count monotone.
+## 2. Phase C4 — Six facets (deferred from rehaul). [~1–2 d]
 
-### 2. Seed + un-skip 3 e2e specs · ~4 h bundled
-Three `test.skip()` specs remain. The pattern from import-throughput works for all three: debug-only Tauri commands seed the catalog, spec drives `page.evaluate(() => __TAURI__.core.invoke(...))`.
-**First action:** add `__test_seed_catalog(rows)` + `__test_seed_source_copies(tmpdir, sha256)` next to `__test_generate_fixture` in [commands.rs](src-tauri/src/commands.rs) (cfg(debug_assertions) only). Then un-skip [phase-1-source-cleanup.spec.ts](tests/e2e/phase-1-source-cleanup.spec.ts), [phase-1-rediscovery.spec.ts](tests/e2e/phase-1-rediscovery.spec.ts), [phase-1-search-latency.spec.ts](tests/e2e/phase-1-search-latency.spec.ts) under the same `CHRONIMAGE_E2E_TAURI=1` gate.
+- **First command:** `pnpm migrate:new photo_colors` then edit `src-tauri/src/import/pipeline.rs` to add Stage 2.7.
+- **Why:** The facet chips (People / Cameras / Events / Places / Colors / Objects) render but don't filter. Wiring them unlocks the "find photos like this" UX that the masonry + clustering already enable. Two new pipeline stages (dominant OKLCH colors + zero-shot object tags via SigLIP text encoder) are the heavy lifts; the other four facets are pure SQL.
+- **Scope blocker:** user-facing value is high, but the catalog still ships without it. If Cull is critical-path, defer.
 
-### 3. Install Windows 11 SDK locally · ~10 min (unblocks 4+5) · user-driven
-Session-to-session blocker: `pnpm tauri dev` can't link without `kernel32.lib` — VS 2026 has MSVC but no Windows SDK. CI has its own SDK so PR #35 merged fine, but the next session should be able to run the app end-to-end locally.
-**First action:** open Visual Studio Installer → Modify VS 2026 Professional → Individual components → tick **Windows 11 SDK (10.0.22621.0)** → install. Alternatively: `winget install --id Microsoft.WindowsSDK.10.0.22621 --silent`. Verify with `cargo check --manifest-path src-tauri/Cargo.toml` → no linker error.
+## 3. Face-crop covers for PeopleScreen. [~2 h]
 
-### 4. Live Playwright screenshot pass across Phase 1 surfaces · ~2 h (needs #3)
-Now that every screen is wired to real data, capture visual goldens while nothing is mid-flight. Covers catalog grid, detail inspector, people drill-down, duplicates panel, onboarding wizard, settings. Becomes the regression baseline for Phase 2.
-**First action:** with the app running via `pnpm tauri dev`, write [tests/e2e/phase-1-visual.spec.ts](tests/e2e/phase-1-visual.spec.ts) that drives through every routed screen and `await expect(page).toHaveScreenshot()`. Store goldens under `tests/fixtures/visual/phase-1/`.
+- **First command:** open `src-tauri/src/commands.rs`, add a `get_face_thumbnail` command next to `generate_thumbnail_bytes`.
+- **Why:** PeopleScreen cluster cards currently show full-photo thumbs when `cover_face_id` is set. A face-bounding-box crop (20% padding, EXIF-oriented, cached at `{thumbnails_dir}/face_{face_id}_{size}.jpg`) is the single remaining UX gap on the People rehaul.
+- Small, bounded, visible. Good first move if cognitive load from the rehaul is still high.
 
-### 5. First beta tag + packaging smoke · ~45 min
-Cheapest way to confirm the `Fetch bundled models` release step works before it matters at beta time. Signed MSI from `develop`.
-**First action:** `git tag -s v0.1.0-beta.1 -m 'first beta smoke' && git push origin v0.1.0-beta.1` → `gh run watch <release-beta run id>` → download the MSI artifact → unzip, verify `models/bundled/` has the 6 pinned files with matching SHA256s.
+## 4. Phase C3 — Highlights bento above the masonry. [~2 h]
 
-## Recommended order
+- **First command:** create `src/screens/catalog/Highlights.tsx` + new `highlights(limit)` Rust command (top-N by `aesthetic_score DESC`).
+- **Why:** The catalog hero is dense text; the Highlights strip gives the library a visual anchor above the fold. Low risk, small blast radius, purely additive.
 
-**#1** is safe, high-leverage, closes the last Rust exit. **#3** first if you'll be working locally tomorrow — it's 10 min that unblocks #4 permanently. **#2** buys the final four PRD boxes. **#4** captures the visual-regression baseline while the UI is freshly assembled. **#5** is a 45-min fire-and-forget verification. Defer nothing to Phase 2 prep — close Phase 1 first.
+## 5. Phase D5 — Responsive breakpoints. [~3 h]
 
-## Deferred follow-ups (log, not blockers)
+- **First command:** edit `src/styles/global.css` — add `@container` queries on `.body` at 1280 px + 900 px.
+- **Why:** App is desktop-first and doesn't actively break to 1024 px today, but the rehaul reshuffled layout enough that narrower windows start to clip. Not a regression blocker; schedule if polish-pass.
 
-- Face-crop thumbnails for `PeopleScreen` + sidebar covers (new `get_face_crop_thumbnail` command; ~2 h).
-- `refresh_smart_albums` manual-trigger UI (backend exists, no frontend consumer).
-- Click-to-open-detail on `DuplicatesPanel` thumbnails (currently read-only review).
-- Rotate the PAT used in the 2026-04-21 session transcript — it's leaked.
+---
+
+## Suggested ordering
+
+- **High-focus day:** 1 (commit rehaul) → 3 (face-crop covers) — ships both in one push.
+- **Feature-push day:** 1 → 2 (at least People + Cameras + Events facets).
+- **Cull-critical-path:** 1 → Cull scaffolding per PRD §1–§2; pull deferred items later.
