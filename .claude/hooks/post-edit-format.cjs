@@ -25,9 +25,8 @@ if (!filePath) process.exit(0);
 
 const rel = path.relative(process.cwd(), filePath).replace(/\\/g, '/');
 
-// Skip non-source and design-handoff
+// Skip non-source paths
 if (
-  rel.startsWith('design-handoff/') ||
   rel.startsWith('src-tauri/target/') ||
   rel.startsWith('node_modules/') ||
   rel.startsWith('dist/') ||

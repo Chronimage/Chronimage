@@ -100,5 +100,5 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 - **Don't include credentials or secrets** — if you find anything that looks like an API key or private key, redact it as `[REDACTED secret]` and flag it in Notes.
 - **Don't include binary content** — this is a markdown bundle.
-- **Don't include the contents of `design-handoff/`, `node_modules/`, `src-tauri/target/`, or `models/`** — the receiving session can re-obtain them from the repo.
+- **Don't include the contents of `node_modules/`, `src-tauri/target/`, or `models/`** — the receiving session can re-obtain them from the repo.
 - **Don't truncate the PRD or checkpoint** — they're load-bearing. If they're very long, split the bundle into multiple files (`-pt1.md`, `-pt2.md`) and cross-link, but don't omit content.

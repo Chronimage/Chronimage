@@ -81,7 +81,6 @@ function isTestFile(filePath) {
 function skipFile(filePath) {
   const p = filePath.replace(/\\/g, '/');
   return (
-    p.startsWith('design-handoff/') ||
     p.startsWith('node_modules/') ||
     p.startsWith('src-tauri/target/') ||
     p.startsWith('dist/') ||

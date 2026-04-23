@@ -1,5 +1,5 @@
 /**
- * SettingsScreen — ported from design-handoff/project/src/screens_misc.jsx lines 162–211.
+ * SettingsScreen — tweaks + AI-model status surface.
  *
  * Four sections:
  *   1. Identity          — app name (in-memory; TODO persist)

@@ -20,7 +20,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup.ts'],
     include: ['src/**/*.test.{ts,tsx}', 'tests/unit/**/*.test.{ts,tsx}'],
-    exclude: ['node_modules', 'dist', 'src-tauri', 'design-handoff', 'tests/e2e', 'tests/visual-goldens'],
+    exclude: ['node_modules', 'dist', 'src-tauri', 'tests/e2e', 'tests/visual-goldens'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'lcov'],

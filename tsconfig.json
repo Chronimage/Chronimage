@@ -40,7 +40,6 @@
     "node_modules",
     "dist",
     "src-tauri/target",
-    "design-handoff",
     "vite.config.ts",
     "vitest.config.ts",
     "playwright.config.ts",

@@ -21,7 +21,6 @@ Chronimage is starting from an empty repo. Before shipping features, every later
 Repository scaffold:
 - [ ] `CLAUDE.md` with agent onboarding, phase marker, resume protocol ✅ (created)
 - [ ] `.claude/{settings.json, agents/, commands/, hooks/}` — 7 commands, 6 agents, 5 hook scripts ✅
-- [ ] `design-handoff/` — read-only copy of the design bundle ✅
 - [ ] `.gitignore`, `.gitattributes` (Git LFS config for photo fixtures) ✅
 - [ ] `README.md`, `LICENSE` (TBD) ✅
 
@@ -43,11 +42,11 @@ Tauri backend (pending):
 
 React frontend (pending):
 - [ ] `index.html`, `src/main.tsx`, `src/app.tsx`
-- [ ] `src/styles/tokens.css` — ported from design `styles.css` (oklch vars, fonts, accent palette)
-- [ ] `src/styles/global.css` — ported from design (sidepanel, toolbar, canvas, chip, etc.)
-- [ ] `src/chrome/{Titlebar,Rail,StatusBar}.tsx` — ported from `design-handoff/chronimage/project/src/chrome.jsx`, typed
-- [ ] `src/primitives/{Chip,Seg,Slider,Toggle,Icon,Placeholder}.tsx` — ported from design primitives.jsx + placeholders.jsx
-- [ ] `src/state/{ui,fixtures}.ts` — Zustand screen store + stub photo/album data from design's `data.jsx`
+- [ ] `src/styles/tokens.css` — oklch vars, fonts, accent palette
+- [ ] `src/styles/global.css` — sidepanel, toolbar, canvas, chip, etc.
+- [ ] `src/chrome/{Titlebar,Rail,StatusBar}.tsx` — frameless chrome, typed
+- [ ] `src/primitives/{Chip,Seg,Slider,Toggle,Icon,Placeholder}.tsx`
+- [ ] `src/state/{ui,fixtures}.ts` — Zustand screen store + stub photo/album data
 - [ ] `src/tauri/invoke.ts` — typed wrappers around `@tauri-apps/api/invoke`
 - [ ] `src/util/log.ts` — `debug()` / `warn()` / `error()` wrappers
 - [ ] `src/routes/__root.tsx`, `src/routes/index.tsx` — TanStack Router skeleton with 6 stub routes (onboard, catalog, cull, cullbin, develop, settings)
