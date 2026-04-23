@@ -4,8 +4,10 @@ import { Rail } from './chrome/Rail';
 import { StatusBar } from './chrome/StatusBar';
 import { Titlebar } from './chrome/Titlebar';
 import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
+import { CullScreen, CullSidePanel } from './screens/cull';
+import { CullBinScreen, CullBinSidePanel } from './screens/cullbin';
+import { DevelopScreen, DevelopSidePanel } from './screens/develop';
 import { PeopleScreen } from './screens/PeopleScreen';
-import { PlaceholderScreen } from './screens/PlaceholderScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { useImportProgressListener } from './state/import';
 import { useUi } from './state/ui';
@@ -59,31 +61,16 @@ export function App() {
       mainPanel = <CatalogScreen albumId={albumId} />;
       break;
     case 'cull':
-      mainPanel = (
-        <PlaceholderScreen
-          title="Cull"
-          phase="Phase 2 · not yet shipped"
-          description="Compare / Grid / Swipe review modes with AI picks, issue flags, keyboard verdicts, and a recoverable Cull Bin. Lands after the catalog MVP is stable."
-        />
-      );
+      sidePanel = <CullSidePanel total={40} />;
+      mainPanel = <CullScreen />;
       break;
     case 'cullbin':
-      mainPanel = (
-        <PlaceholderScreen
-          title="Cull Bin"
-          phase="Phase 2 · not yet shipped"
-          description="Rejects live here for 30 days before permanent deletion. Restore any item, audit every cleanup action."
-        />
-      );
+      sidePanel = <CullBinSidePanel />;
+      mainPanel = <CullBinScreen />;
       break;
     case 'develop':
-      mainPanel = (
-        <PlaceholderScreen
-          title="Develop"
-          phase="Phase 3 · not yet shipped"
-          description="Lightweight RAW editor — exposure, curves, masks, and the AI preset library. Sony A7 IV ARW is the priority RAW format."
-        />
-      );
+      sidePanel = <DevelopSidePanel />;
+      mainPanel = <DevelopScreen />;
       break;
     case 'people':
       mainPanel = <PeopleScreen />;
