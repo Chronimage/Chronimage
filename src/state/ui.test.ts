@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_TWEAKS, SCREENS, useUi } from './ui';
 
 describe('useUi', () => {
-  it('starts on the onboard screen', () => {
+  it('starts on the catalog screen', () => {
     const { screen } = useUi.getState();
-    expect(screen.id).toBe('onboard');
+    expect(screen.id).toBe('catalog');
   });
 
   it('setScreen switches to the requested screen', () => {

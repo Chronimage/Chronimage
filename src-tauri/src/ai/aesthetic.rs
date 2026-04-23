@@ -7,7 +7,7 @@
 //! Input:  `input` — [1, 3, 224, 224] f32, ImageNet-normalised
 //! Output: `output` — [1, 10] f32 (softmax distribution over ratings 1–10)
 
-use crate::{AppError, AppResult};
+use crate::{ai::providers::session_builder_with_ep, AppError, AppResult};
 use image::imageops::FilterType;
 use ort::session::Session;
 use std::path::Path;
@@ -40,10 +40,10 @@ impl NimaSession {
                 "nima model not found — run model download first".into(),
             ));
         }
-        let session = Session::builder()
-            .map_err(|e| AppError::Internal(format!("ort builder: {e}")))?
+        let session = session_builder_with_ep("nima")
+            .map_err(|e| AppError::Internal(format!("ort builder (nima): {e}")))?
             .commit_from_file(model_path)
-            .map_err(|e| AppError::Internal(format!("ort load: {e}")))?;
+            .map_err(|e| AppError::Internal(format!("ort load nima: {e}")))?;
         Ok(Self {
             session: Mutex::new(session),
         })
@@ -53,8 +53,11 @@ impl NimaSession {
     /// Returns the expected aesthetic rating on the range [1.0, 10.0].
     pub fn score(&self, image_path: &Path) -> AppResult<f32> {
         let pixel_values = preprocess_image(image_path)?;
-        // Use (shape, vec) tuple — avoids ndarray version conflicts.
-        let shape = vec![1i64, 3, INPUT_SIZE as i64, INPUT_SIZE as i64];
+        // The bundled NIMA ONNX export uses NHWC (`[1, 224, 224, 3]`), not
+        // NCHW. Feeding the model NCHW triggers `ort run: Got invalid
+        // dimensions for input` at inference time — caught during the
+        // 2026-04-23 debug-import investigation.
+        let shape = vec![1i64, INPUT_SIZE as i64, INPUT_SIZE as i64, 3];
         let input_tensor = ort::value::Tensor::<f32>::from_array((shape, pixel_values))
             .map_err(|e| AppError::Internal(format!("ort tensor: {e}")))?;
 
@@ -101,18 +104,20 @@ fn expected_rating(probs: &[f32]) -> f32 {
 
 // ── image preprocessing ───────────────────────────────────────────────────
 
-/// Resize to 224×224, convert to RGB f32 channels-first, ImageNet-normalise.
+/// Resize to 224×224, convert to RGB f32, ImageNet-normalise, NHWC layout.
 fn preprocess_image(path: &Path) -> AppResult<Vec<f32>> {
     let img = image::open(path).map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
     let rgb = img
         .resize_exact(INPUT_SIZE, INPUT_SIZE, FilterType::Lanczos3)
         .into_rgb8();
 
+    // NHWC packing: row-major over (y, x, c) to match the model's expected
+    // [1, 224, 224, 3] input shape.
     let mut pixels = Vec::with_capacity(3 * (INPUT_SIZE as usize) * (INPUT_SIZE as usize));
-    for c in 0..3usize {
-        for y in 0..INPUT_SIZE {
-            for x in 0..INPUT_SIZE {
-                let px = rgb.get_pixel(x, y);
+    for y in 0..INPUT_SIZE {
+        for x in 0..INPUT_SIZE {
+            let px = rgb.get_pixel(x, y);
+            for c in 0..3usize {
                 let v = (px[c] as f32 / 255.0 - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
                 pixels.push(v);
             }

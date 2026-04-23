@@ -156,6 +156,14 @@ fn main() {
             commands::face_cluster_merge,
             commands::record_photo_view,
             commands::ai_reindex,
+            commands::get_default_catalog_path,
+            commands::get_disk_info,
+            commands::source_deletion_preview,
+            commands::remove_photos_preview,
+            commands::remove_photos_from_catalog,
+            commands::recycle_source_copies,
+            commands::recluster_faces,
+            commands::rebuild_thumbnails,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

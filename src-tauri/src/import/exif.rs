@@ -16,6 +16,9 @@ pub struct ExifData {
     pub focal_mm: Option<f64>,
     pub gps_lat: Option<f64>,
     pub gps_lng: Option<f64>,
+    /// TIFF/EXIF Orientation tag (1-8). See `ai::image_util::apply_exif_orientation`.
+    /// None when absent or not a u16 Short — callers should treat as 1 (no rotation).
+    pub orientation: Option<u32>,
 }
 
 /// Read EXIF from `path`. Returns `ExifData::default()` on any error so callers
@@ -111,6 +114,8 @@ pub fn read(path: &Path) -> ExifData {
         "W",
     );
 
+    let orientation = exif_u32(&exif, exif::Tag::Orientation).filter(|&v| (1..=8).contains(&v));
+
     ExifData {
         width,
         height,
@@ -125,6 +130,7 @@ pub fn read(path: &Path) -> ExifData {
         focal_mm,
         gps_lat,
         gps_lng,
+        orientation,
     }
 }
 

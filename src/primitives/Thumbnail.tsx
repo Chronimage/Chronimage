@@ -4,7 +4,7 @@
  * the thumbnail is unavailable (missing local copy, unsupported format, etc.).
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useThumbnailUrl } from '../state/queries';
 import { Placeholder, type PlaceholderProps } from './Placeholder';
 
@@ -17,11 +17,17 @@ export interface ThumbnailProps extends PlaceholderProps {
 export function Thumbnail({ photoId, sizePx = 320, alt, ...placeholderProps }: ThumbnailProps) {
   const { data: url } = useThumbnailUrl(photoId, sizePx);
 
-  // Revoke the blob URL when the component unmounts or the URL changes so we
-  // don't leak object URLs on a long Catalog scroll.
+  // Revoke the *previous* blob URL only when the URL changes — not on unmount.
+  // Revoking on unmount would invalidate the string still held in React Query's
+  // cache; if the component re-mounts before gcTime expires the cached URL is
+  // dead and the image silently fails.
+  const prevUrlRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    if (!url) return undefined;
-    return () => URL.revokeObjectURL(url);
+    const prev = prevUrlRef.current;
+    prevUrlRef.current = url;
+    if (prev && prev !== url) {
+      URL.revokeObjectURL(prev);
+    }
   }, [url]);
 
   if (!url) {

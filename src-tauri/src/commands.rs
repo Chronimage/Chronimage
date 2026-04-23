@@ -599,6 +599,70 @@ pub struct StartImportResponse {
 /// Launch the import pipeline as a detached task. Returns `{ import_id }`
 /// immediately; progress comes via `"chronimage://import-progress"` events.
 ///
+// ── Disk / catalog-home helpers ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct DiskInfo {
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Suggested default catalog home: `{Pictures}/Chronimage` (or `C:\Chronimage`
+/// as final fallback). The directory need not exist yet.
+#[tauri::command]
+pub fn get_default_catalog_path() -> String {
+    dirs::picture_dir()
+        .or_else(dirs::home_dir)
+        .map(|d| d.join("Chronimage").to_string_lossy().into_owned())
+        .unwrap_or_else(|| "C:\\Chronimage".to_string())
+}
+
+/// Free and total bytes for the drive that contains `path`. If `path` does not
+/// exist yet, walks up to the nearest ancestor that does. Returns an error only
+/// if no ancestor exists (e.g. the drive letter is invalid).
+#[tauri::command]
+pub fn get_disk_info(path: String) -> AppResult<DiskInfo> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    // Find the nearest existing ancestor so we can query a real drive.
+    let mut probe = std::path::PathBuf::from(&path);
+    while !probe.exists() {
+        if !probe.pop() {
+            return Err(AppError::NotFound(format!(
+                "no accessible ancestor for path: {path}"
+            )));
+        }
+    }
+
+    let wide: Vec<u16> = probe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut free_bytes: u64 = 0;
+    let mut total_bytes: u64 = 0;
+
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut free_bytes),
+            Some(&mut total_bytes),
+            None,
+        )
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    }
+
+    Ok(DiskInfo {
+        free_bytes,
+        total_bytes,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// The `sources` row for `source_id` must already exist.
 #[tauri::command]
 pub async fn start_import(
@@ -732,24 +796,485 @@ pub async fn create_source(
     Ok(row)
 }
 
-/// Remove a source and all its associated source_copies and import records.
-/// Photos themselves are NOT deleted — only the source-side linkage.
+// ── Source / photo deletion ──────────────────────────────────────────────────
+
+/// Dry-run counts for a source-deletion modal.
+#[derive(Debug, Serialize)]
+pub struct SourceDeletionPlan {
+    /// Photos that have `source_copies` rows for this source.
+    pub photos_total: i64,
+    /// Photos that would become orphans (no remaining `source_copies` after delete).
+    pub orphan_photos: i64,
+    /// Local files on disk that belong only to this source.
+    pub local_files: i64,
+    /// Combined size of those local files, in bytes.
+    pub total_bytes: i64,
+    /// Orphan photos that have no local path (cloud-only).
+    pub cloud_only: i64,
+}
+
+/// Receipt returned after `remove_photos_from_catalog`.
+#[derive(Debug, Serialize)]
+pub struct RemoveReceipt {
+    pub removed_photos: i64,
+    pub removed_thumbnails: i64,
+    pub errors: Vec<String>,
+}
+
+/// Receipt returned after `recycle_source_copies`.
+#[derive(Debug, Serialize)]
+pub struct RecycleReceipt {
+    pub recycled_count: i64,
+    pub skipped_count: i64,
+    pub errors: Vec<String>,
+}
+
+/// Dry-run counts for the remove-photos modal.
+#[derive(Debug, Serialize)]
+pub struct RemovePreview {
+    pub photo_count: i64,
+    pub local_files: i64,
+    pub cloud_only_photos: i64,
+    pub total_bytes: i64,
+}
+
+/// Preview the impact of disconnecting a source.
 #[tauri::command]
-pub async fn delete_source(state: State<'_, AppState>, source_id: i64) -> AppResult<()> {
+pub async fn source_deletion_preview(
+    state: State<'_, AppState>,
+    source_id: i64,
+) -> AppResult<SourceDeletionPlan> {
+    source_deletion_preview_impl(&state.pool, source_id).await
+}
+
+async fn source_deletion_preview_impl(
+    pool: &sqlx::SqlitePool,
+    source_id: i64,
+) -> AppResult<SourceDeletionPlan> {
+    let photos_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT photo_id) FROM source_copies WHERE source_id = ?1",
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await?;
+
+    // Orphans: photos whose ONLY source_copy is this source.
+    let orphan_photos: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+           SELECT photo_id FROM source_copies WHERE source_id = ?1
+           GROUP BY photo_id
+           HAVING COUNT(*) = (
+             SELECT COUNT(*) FROM source_copies sc2 WHERE sc2.photo_id = source_copies.photo_id
+           )
+         )",
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await?;
+
+    // Local files + bytes: orphans with a non-null path in this source.
+    let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(sc.path), COALESCE(SUM(p.size_bytes), 0)
+         FROM source_copies sc
+         JOIN photos p ON p.id = sc.photo_id
+         WHERE sc.source_id = ?1
+           AND sc.path IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM source_copies sc2
+             WHERE sc2.photo_id = sc.photo_id AND sc2.source_id != ?1
+           )",
+    )
+    .bind(source_id)
+    .fetch_one(pool)
+    .await?;
+    let local_files = row.0.unwrap_or(0);
+    let total_bytes = row.1.unwrap_or(0);
+
+    let cloud_only = orphan_photos - local_files;
+    let cloud_only = cloud_only.max(0);
+
+    Ok(SourceDeletionPlan {
+        photos_total,
+        orphan_photos,
+        local_files,
+        total_bytes,
+        cloud_only,
+    })
+}
+
+/// Disconnect a source, cascade orphan-photo cleanup, and optionally recycle
+/// the orphan files on disk.
+///
+/// Runs in a single transaction so the catalog is never partially-updated on
+/// error. Orphan photos (no remaining `source_copies` after this source's
+/// `source_copies` are deleted) are removed; `ON DELETE CASCADE` cleans up
+/// tags, faces, embeddings, views. The sqlite-vec virtual tables do NOT
+/// participate in FK cascade, so we delete from them explicitly by rowid.
+///
+/// `recycle_files` = true routes orphan local paths through the Windows
+/// Recycle Bin via the `trash` crate. File deletion is best-effort and
+/// happens OUTSIDE the DB transaction so a trash failure does not roll back
+/// the catalog update.
+#[tauri::command]
+pub async fn delete_source(
+    state: State<'_, AppState>,
+    source_id: i64,
+    recycle_files: bool,
+    remove_orphan_photos: bool,
+) -> AppResult<RemoveReceipt> {
+    delete_source_impl(&state.pool, source_id, recycle_files, remove_orphan_photos).await
+}
+
+async fn delete_source_impl(
+    pool: &sqlx::SqlitePool,
+    source_id: i64,
+    recycle_files: bool,
+    remove_orphan_photos: bool,
+) -> AppResult<RemoveReceipt> {
+    // Collect orphan paths BEFORE we mutate, so we can recycle them after.
+    let orphan_paths: Vec<String> = if recycle_files {
+        sqlx::query_scalar::<_, String>(
+            "SELECT sc.path FROM source_copies sc
+             WHERE sc.source_id = ?1
+               AND sc.path IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM source_copies sc2
+                 WHERE sc2.photo_id = sc.photo_id AND sc2.source_id != ?1
+               )",
+        )
+        .bind(source_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
+
+    // Collect orphan photo ids + sha256 so we can nuke their thumb-cache files
+    // and sqlite-vec rowids after the transaction commits.
+    let orphan_meta: Vec<(i64, String)> = if remove_orphan_photos {
+        sqlx::query_as::<_, (i64, String)>(
+            "SELECT p.id, p.sha256
+             FROM photos p
+             WHERE EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id AND sc.source_id = ?1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM source_copies sc2 WHERE sc2.photo_id = p.id AND sc2.source_id != ?1
+               )",
+        )
+        .bind(source_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
+
+    let mut tx = pool.begin().await?;
+
     sqlx::query("DELETE FROM imports WHERE source_id = ?1")
         .bind(source_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM source_copies WHERE source_id = ?1")
         .bind(source_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM sources WHERE id = ?1")
         .bind(source_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
-    tracing::info!(source_id, "source deleted");
-    Ok(())
+
+    let mut removed_photos = 0_i64;
+    if remove_orphan_photos {
+        for (pid, _sha) in &orphan_meta {
+            // Issue contentless FTS5 delete command with the CURRENT row state
+            // (filename + concatenated tags). Must run before the photo row
+            // and its tags are gone, so we have the values to pass.
+            let _ = sqlx::query(
+                "INSERT INTO photos_fts(photos_fts, rowid, filename, tags)
+                 SELECT 'delete', p.id, p.filename,
+                        COALESCE((SELECT group_concat(label, ' ') FROM tags WHERE photo_id = p.id), '')
+                 FROM photos p WHERE p.id = ?1",
+            )
+            .bind(pid)
+            .execute(&mut *tx)
+            .await;
+            // Manually clean sqlite-vec virtual tables (no FK cascade).
+            let _ = sqlx::query("DELETE FROM vec_photo_embeddings WHERE rowid = ?1")
+                .bind(pid)
+                .execute(&mut *tx)
+                .await;
+            let _ = sqlx::query("DELETE FROM vec_photo_embeddings_int8 WHERE rowid = ?1")
+                .bind(pid)
+                .execute(&mut *tx)
+                .await;
+        }
+        // Delete photos rows — FK cascade handles tags, faces, embeddings, views, source_copies.
+        let res = sqlx::query(
+            "DELETE FROM photos
+             WHERE id IN (SELECT id FROM photos p
+                          WHERE NOT EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id))",
+        )
+        .execute(&mut *tx)
+        .await?;
+        removed_photos = res.rows_affected() as i64;
+    }
+
+    tx.commit().await?;
+
+    // Best-effort post-commit cleanup (cache files + recycle bin).
+    let mut errors: Vec<String> = Vec::new();
+    let mut removed_thumbnails = 0_i64;
+    if remove_orphan_photos {
+        if let Ok(thumbs_dir) = crate::util::paths::thumbnails_dir() {
+            for (_pid, sha) in &orphan_meta {
+                let cache_path = thumbs_dir.join(format!("{sha}_320.jpg"));
+                if cache_path.exists() {
+                    match std::fs::remove_file(&cache_path) {
+                        Ok(()) => removed_thumbnails += 1,
+                        Err(e) => errors.push(format!("thumb-cache {}: {e}", cache_path.display())),
+                    }
+                }
+            }
+        }
+    }
+
+    if recycle_files {
+        for path in &orphan_paths {
+            let p = std::path::Path::new(path);
+            if !p.exists() {
+                continue;
+            }
+            if let Err(e) = trash::delete(p) {
+                errors.push(format!("recycle {path}: {e}"));
+            }
+        }
+    }
+
+    tracing::info!(
+        source_id,
+        removed_photos,
+        removed_thumbnails,
+        recycled_files = orphan_paths.len(),
+        "source deleted"
+    );
+
+    Ok(RemoveReceipt {
+        removed_photos,
+        removed_thumbnails,
+        errors,
+    })
+}
+
+/// Preview the impact of removing the given photos from the catalog.
+#[tauri::command]
+pub async fn remove_photos_preview(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+) -> AppResult<RemovePreview> {
+    remove_photos_preview_impl(&state.pool, &photo_ids).await
+}
+
+async fn remove_photos_preview_impl(
+    pool: &sqlx::SqlitePool,
+    photo_ids: &[i64],
+) -> AppResult<RemovePreview> {
+    if photo_ids.is_empty() {
+        return Ok(RemovePreview {
+            photo_count: 0,
+            local_files: 0,
+            cloud_only_photos: 0,
+            total_bytes: 0,
+        });
+    }
+
+    // Build a temporary in-memory set via a comma-join; sqlite doesn't support
+    // array binding so we validate the list as signed-integer ids then format.
+    let id_list = photo_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let photo_count = photo_ids.len() as i64;
+
+    let local_files: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM source_copies
+         WHERE photo_id IN ({id_list}) AND path IS NOT NULL"
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    let total_bytes: i64 = sqlx::query_scalar(&format!(
+        "SELECT COALESCE(SUM(p.size_bytes), 0) FROM photos p
+         WHERE p.id IN ({id_list})
+           AND EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id AND sc.path IS NOT NULL)"
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    let cloud_only_photos: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM photos p
+         WHERE p.id IN ({id_list})
+           AND NOT EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id AND sc.path IS NOT NULL)"
+    ))
+    .fetch_one(pool)
+    .await?;
+
+    Ok(RemovePreview {
+        photo_count,
+        local_files,
+        cloud_only_photos,
+        total_bytes,
+    })
+}
+
+/// Remove photos from the catalog (DB + thumbnail cache). Does NOT touch
+/// the original source files on disk.
+#[tauri::command]
+pub async fn remove_photos_from_catalog(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+) -> AppResult<RemoveReceipt> {
+    remove_photos_from_catalog_impl(&state.pool, &photo_ids).await
+}
+
+async fn remove_photos_from_catalog_impl(
+    pool: &sqlx::SqlitePool,
+    photo_ids: &[i64],
+) -> AppResult<RemoveReceipt> {
+    if photo_ids.is_empty() {
+        return Ok(RemoveReceipt {
+            removed_photos: 0,
+            removed_thumbnails: 0,
+            errors: Vec::new(),
+        });
+    }
+
+    // Collect sha256 for cache-file cleanup before deleting the photo rows.
+    let id_list = photo_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let shas: Vec<String> = sqlx::query_scalar::<_, String>(&format!(
+        "SELECT sha256 FROM photos WHERE id IN ({id_list})"
+    ))
+    .fetch_all(pool)
+    .await?;
+
+    let mut tx = pool.begin().await?;
+    for pid in photo_ids {
+        // Contentless FTS5 delete — must run before the photo and its tags
+        // are gone, so we can pass the pre-delete filename + tag concat.
+        let _ = sqlx::query(
+            "INSERT INTO photos_fts(photos_fts, rowid, filename, tags)
+             SELECT 'delete', p.id, p.filename,
+                    COALESCE((SELECT group_concat(label, ' ') FROM tags WHERE photo_id = p.id), '')
+             FROM photos p WHERE p.id = ?1",
+        )
+        .bind(pid)
+        .execute(&mut *tx)
+        .await;
+        let _ = sqlx::query("DELETE FROM vec_photo_embeddings WHERE rowid = ?1")
+            .bind(pid)
+            .execute(&mut *tx)
+            .await;
+        let _ = sqlx::query("DELETE FROM vec_photo_embeddings_int8 WHERE rowid = ?1")
+            .bind(pid)
+            .execute(&mut *tx)
+            .await;
+    }
+    let res = sqlx::query(&format!("DELETE FROM photos WHERE id IN ({id_list})"))
+        .execute(&mut *tx)
+        .await?;
+    let removed_photos = res.rows_affected() as i64;
+    tx.commit().await?;
+
+    // Best-effort thumbnail-cache cleanup.
+    let mut errors: Vec<String> = Vec::new();
+    let mut removed_thumbnails = 0_i64;
+    if let Ok(thumbs_dir) = crate::util::paths::thumbnails_dir() {
+        for sha in &shas {
+            let cache_path = thumbs_dir.join(format!("{sha}_320.jpg"));
+            if cache_path.exists() {
+                match std::fs::remove_file(&cache_path) {
+                    Ok(()) => removed_thumbnails += 1,
+                    Err(e) => errors.push(format!("thumb-cache {}: {e}", cache_path.display())),
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        removed_photos,
+        removed_thumbnails,
+        "photos removed from catalog"
+    );
+    Ok(RemoveReceipt {
+        removed_photos,
+        removed_thumbnails,
+        errors,
+    })
+}
+
+/// Send the on-disk files for the given photos to the Windows Recycle Bin.
+/// Does NOT touch the catalog DB — caller is responsible for a separate
+/// `remove_photos_from_catalog` call if they also want catalog removal.
+#[tauri::command]
+pub async fn recycle_source_copies(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+) -> AppResult<RecycleReceipt> {
+    recycle_source_copies_impl(&state.pool, &photo_ids).await
+}
+
+async fn recycle_source_copies_impl(
+    pool: &sqlx::SqlitePool,
+    photo_ids: &[i64],
+) -> AppResult<RecycleReceipt> {
+    if photo_ids.is_empty() {
+        return Ok(RecycleReceipt {
+            recycled_count: 0,
+            skipped_count: 0,
+            errors: Vec::new(),
+        });
+    }
+
+    let id_list = photo_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let paths: Vec<String> = sqlx::query_scalar::<_, String>(&format!(
+        "SELECT path FROM source_copies
+         WHERE photo_id IN ({id_list}) AND path IS NOT NULL"
+    ))
+    .fetch_all(pool)
+    .await?;
+
+    let mut recycled_count = 0_i64;
+    let mut skipped_count = 0_i64;
+    let mut errors: Vec<String> = Vec::new();
+
+    for path in &paths {
+        let p = std::path::Path::new(path);
+        if !p.exists() {
+            skipped_count += 1;
+            continue;
+        }
+        match trash::delete(p) {
+            Ok(()) => recycled_count += 1,
+            Err(e) => {
+                errors.push(format!("recycle {path}: {e}"));
+                skipped_count += 1;
+            }
+        }
+    }
+
+    tracing::info!(recycled_count, skipped_count, "source_copies recycled");
+    Ok(RecycleReceipt {
+        recycled_count,
+        skipped_count,
+        errors,
+    })
 }
 
 // ── Catalog read commands ─────────────────────────────────────────────────
@@ -803,17 +1328,44 @@ pub struct PhotoRow {
     pub aesthetic_score: Option<f64>,
     pub paired_photo_id: Option<i64>,
     pub raw_format: Option<String>,
+    /// EXIF Orientation tag (1–8). Default 1 = no rotation. Clients use
+    /// this to compute display aspect ratio (values 5–8 swap width/height)
+    /// for the masonry grid.
+    pub orientation: i64,
+    /// Laplacian-variance sharpness score from Stage 2.6. Higher = sharper.
+    /// Exposed so the detail inspector can surface it without a second read.
+    pub sharpness_score: Option<f64>,
 }
 
-/// List photos ordered by imported_at desc, with optional pagination and album filter.
+/// Translate a user-facing sort identifier to a SQL `ORDER BY` clause.
+///
+/// Unknown values fall back to the default newest-first order. Each variant
+/// appends `imported_at DESC` as a deterministic tie-breaker so pagination
+/// stays stable inside ties.
+fn sort_by_to_sql(sort_by: Option<&str>) -> &'static str {
+    match sort_by.unwrap_or("captured_desc") {
+        "captured_asc" => "ORDER BY captured_at ASC NULLS LAST, imported_at ASC",
+        "imported_desc" => "ORDER BY imported_at DESC",
+        "filename_asc" => "ORDER BY LOWER(filename) ASC, imported_at DESC",
+        "aesthetic_desc" => "ORDER BY aesthetic_score DESC NULLS LAST, imported_at DESC",
+        "random" => "ORDER BY RANDOM()",
+        // Default + explicit "captured_desc"
+        _ => "ORDER BY captured_at DESC NULLS LAST, imported_at DESC",
+    }
+}
+
+/// List photos with optional pagination, album filter, and sort.
 /// `limit` defaults to 100; `offset` defaults to 0.
 /// When `album_id` is provided the album's `rule_json` is evaluated to build a WHERE clause.
+/// `sort_by` accepts `captured_desc` (default) | `captured_asc` | `imported_desc`
+///   | `filename_asc` | `aesthetic_desc` | `random`.
 #[tauri::command]
 pub async fn list_photos(
     state: State<'_, AppState>,
     limit: Option<i64>,
     offset: Option<i64>,
     album_id: Option<i64>,
+    sort_by: Option<String>,
 ) -> AppResult<Vec<PhotoRow>> {
     let lim = limit.unwrap_or(100);
     let off = offset.unwrap_or(0);
@@ -844,11 +1396,13 @@ pub async fn list_photos(
         String::new()
     };
 
+    let order_clause = sort_by_to_sql(sort_by.as_deref());
+
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
          size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-         aesthetic_score, paired_photo_id, raw_format \
-         FROM photos {where_clause} ORDER BY imported_at DESC LIMIT ?1 OFFSET ?2"
+         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+         FROM photos {where_clause} {order_clause} LIMIT ?1 OFFSET ?2"
     );
     let rows = sqlx::query_as::<_, PhotoRow>(&sql)
         .bind(lim)
@@ -1652,7 +2206,7 @@ pub async fn on_this_day(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
          size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-         aesthetic_score, paired_photo_id, raw_format \
+         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
          FROM photos \
          WHERE captured_at IS NOT NULL \
            AND strftime('%m-%d', captured_at) = ?1 \
@@ -2105,7 +2659,7 @@ pub async fn unseen_photos(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
@@ -2140,7 +2694,7 @@ pub async fn first_time_on_new_camera(
          ) \
          SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
            p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
          FROM photos p \
          JOIN first_seen fs \
            ON fs.camera_make = p.camera_make \
@@ -2169,7 +2723,7 @@ pub async fn unflagged_favorites(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE p.aesthetic_score IS NOT NULL \
@@ -2283,6 +2837,213 @@ pub async fn face_cluster_merge(state: State<'_, AppState>, a: i64, b: i64) -> A
 
     tx.commit().await?;
     Ok(a)
+}
+
+// ── Face-cluster rebuild ──────────────────────────────────────────────────────
+
+/// Event channel for recluster progress.
+pub const RECLUSTER_PROGRESS_EVENT: &str = "chronimage://recluster-progress";
+
+/// Event channel for rebuild-thumbnails progress.
+pub const REBUILD_PROGRESS_EVENT: &str = "chronimage://rebuild-progress";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReclusterProgress {
+    pub phase: &'static str, // "start" | "done"
+    pub total_faces: i64,
+    pub clustered_faces: i64,
+    pub cluster_count: i64,
+}
+
+/// Run HDBSCAN over every face embedding and persist cluster assignments.
+///
+/// Idempotent — safe to call repeatedly. Named clusters preserve their name
+/// across re-runs via centroid cosine similarity (see
+/// `ai::cluster_persist::reeval_clusters`).
+#[tauri::command]
+pub async fn recluster_faces<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle<R>,
+) -> AppResult<crate::ai::cluster_persist::ReclusterReceipt> {
+    use tauri::Emitter;
+    let _ = app_handle.emit(
+        RECLUSTER_PROGRESS_EVENT,
+        ReclusterProgress {
+            phase: "start",
+            total_faces: 0,
+            clustered_faces: 0,
+            cluster_count: 0,
+        },
+    );
+
+    let receipt = crate::ai::cluster_persist::reeval_clusters(&state.pool).await?;
+
+    let _ = app_handle.emit(
+        RECLUSTER_PROGRESS_EVENT,
+        ReclusterProgress {
+            phase: "done",
+            total_faces: receipt.total_faces,
+            clustered_faces: receipt.clustered_faces,
+            cluster_count: receipt.cluster_count,
+        },
+    );
+
+    Ok(receipt)
+}
+
+// ── Thumbnail cache rebuild ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RebuildProgress {
+    pub total: i64,
+    pub done: i64,
+    pub failed: i64,
+    pub current_photo_id: i64,
+    pub phase: &'static str, // "start" | "tick" | "done"
+}
+
+#[derive(Debug, Serialize)]
+pub struct RebuildReceipt {
+    pub total: i64,
+    pub regenerated: i64,
+    pub failed: i64,
+    pub elapsed_ms: u64,
+}
+
+/// Delete every cached 320 px thumbnail and re-generate from source with
+/// EXIF orientation applied. Used to repair catalogs that were imported
+/// before the orientation fix landed (pre-2026-04-24). Emits per-photo
+/// progress events on `REBUILD_PROGRESS_EVENT`.
+#[tauri::command]
+pub async fn rebuild_thumbnails<R: tauri::Runtime>(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle<R>,
+) -> AppResult<RebuildReceipt> {
+    use tauri::Emitter;
+    let t0 = std::time::Instant::now();
+
+    // Load (photo_id, sha256, orientation) for every photo with a local
+    // source_copies entry. Cloud-only photos are skipped — nothing to
+    // regenerate from.
+    let rows: Vec<(i64, String, Option<i64>)> = sqlx::query_as(
+        "SELECT DISTINCT p.id, p.sha256, p.orientation
+         FROM photos p
+         JOIN source_copies sc ON sc.photo_id = p.id
+         WHERE sc.path IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let total = rows.len() as i64;
+    let _ = app_handle.emit(
+        REBUILD_PROGRESS_EVENT,
+        RebuildProgress {
+            total,
+            done: 0,
+            failed: 0,
+            current_photo_id: 0,
+            phase: "start",
+        },
+    );
+
+    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
+
+    let mut regenerated = 0_i64;
+    let mut failed = 0_i64;
+
+    for (photo_id, sha, orientation) in &rows {
+        let cache_path = thumbs_dir.join(format!("{sha}_320.jpg"));
+        let _ = std::fs::remove_file(&cache_path);
+
+        // Resolve any local path for this photo (prefer is_primary DESC).
+        let source_path: Option<String> = sqlx::query_scalar(
+            "SELECT path FROM source_copies
+             WHERE photo_id = ?1 AND path IS NOT NULL
+             ORDER BY is_primary DESC, id ASC LIMIT 1",
+        )
+        .bind(photo_id)
+        .fetch_optional(&state.pool)
+        .await?;
+        let Some(path) = source_path else {
+            failed += 1;
+            continue;
+        };
+        let path_buf = PathBuf::from(&path);
+        if !path_buf.exists() {
+            failed += 1;
+            continue;
+        }
+
+        let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
+        let cache_path_clone = cache_path.clone();
+        let task_result = tokio::task::spawn_blocking(move || -> AppResult<f32> {
+            let img = image::open(&path_buf)
+                .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+            let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
+            let resized = img.thumbnail(320, 320);
+            let mut buf = Vec::with_capacity(32 * 1024);
+            let mut cursor = std::io::Cursor::new(&mut buf);
+            resized
+                .write_to(&mut cursor, image::ImageFormat::Jpeg)
+                .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+            std::fs::write(&cache_path_clone, &buf)?;
+            Ok(crate::ai::image_util::laplacian_variance(&resized))
+        })
+        .await;
+
+        match task_result {
+            Ok(Ok(sharpness)) => {
+                regenerated += 1;
+                // Also update sharpness_score now that we have the oriented thumb.
+                let _ = sqlx::query("UPDATE photos SET sharpness_score = ?1 WHERE id = ?2")
+                    .bind(sharpness as f64)
+                    .bind(photo_id)
+                    .execute(&state.pool)
+                    .await;
+            }
+            _ => {
+                failed += 1;
+            }
+        }
+
+        let _ = app_handle.emit(
+            REBUILD_PROGRESS_EVENT,
+            RebuildProgress {
+                total,
+                done: regenerated,
+                failed,
+                current_photo_id: *photo_id,
+                phase: "tick",
+            },
+        );
+    }
+
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    let _ = app_handle.emit(
+        REBUILD_PROGRESS_EVENT,
+        RebuildProgress {
+            total,
+            done: regenerated,
+            failed,
+            current_photo_id: 0,
+            phase: "done",
+        },
+    );
+
+    tracing::info!(
+        total,
+        regenerated,
+        failed,
+        elapsed_ms,
+        "rebuild_thumbnails: done"
+    );
+
+    Ok(RebuildReceipt {
+        total,
+        regenerated,
+        failed,
+        elapsed_ms,
+    })
 }
 
 // ── Photo-view recording ──────────────────────────────────────────────────────
@@ -2490,7 +3251,7 @@ pub async fn search_photos(
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
          is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
-         focal_mm, aesthetic_score, paired_photo_id, raw_format \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
          FROM photos WHERE id IN ({placeholders})"
     );
 
@@ -2550,7 +3311,7 @@ pub async fn list_photos_for_cluster(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format \
+         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
          FROM photos p \
          JOIN ( \
             SELECT photo_id, MAX(quality) AS top_quality \
@@ -2688,15 +3449,34 @@ async fn generate_thumbnail_bytes(
     .fetch_optional(pool)
     .await?;
 
-    let path = source_path.ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
+    let path = source_path.ok_or_else(|| {
+        tracing::warn!(
+            photo_id,
+            "thumbnail: no source_copies path (cloud-only or not yet imported)"
+        );
+        AppError::NotFound(format!("photo {photo_id}: no local path in source_copies"))
+    })?;
     let path_buf = PathBuf::from(&path);
     if !path_buf.exists() {
-        return Err(AppError::NotFound(format!("photo {photo_id}")));
+        tracing::warn!(photo_id, path, "thumbnail: source file missing on disk");
+        return Err(AppError::NotFound(format!(
+            "photo {photo_id}: file not on disk: {path}"
+        )));
     }
+
+    // Look up the stored EXIF orientation (1–8) so we can rotate before
+    // resizing. Missing / unset column defaults to 1 (no rotation).
+    let orientation: Option<i64> =
+        sqlx::query_scalar("SELECT orientation FROM photos WHERE id = ?1")
+            .bind(source_photo_id)
+            .fetch_optional(pool)
+            .await?;
+    let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
 
     let bytes = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
         let img = image::open(&path_buf)
             .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
         let resized = img.thumbnail(size, size);
         let mut buf = Vec::with_capacity(64 * 1024);
         let mut cursor = std::io::Cursor::new(&mut buf);
@@ -2940,8 +3720,8 @@ mod tests {
         .await
         .expect("query");
 
-        // 12 static system albums + 4 rediscovery albums = 16 total.
-        assert_eq!(rows.len(), 16);
+        // 2 rule-based system albums + 4 rediscovery albums = 6 total.
+        assert_eq!(rows.len(), 6);
         assert!(rows.iter().all(|r| r.is_system));
     }
 
@@ -2953,7 +3733,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
              FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
         )
         .fetch_all(&pool)
@@ -2982,7 +3762,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
              FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
         )
         .fetch_all(&pool)
@@ -3037,7 +3817,7 @@ mod tests {
         let sql = format!(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
              FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
         );
         let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -3327,7 +4107,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format FROM photos \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -3376,7 +4156,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format FROM photos \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = ?1 \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -3416,7 +4196,7 @@ mod tests {
             "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
              p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
              p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
-             p.paired_photo_id, p.raw_format \
+             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -3459,7 +4239,7 @@ mod tests {
             "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
              p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
              p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
-             p.paired_photo_id, p.raw_format \
+             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -4534,5 +5314,284 @@ mod tests {
             matches!(res, Ok(_) | Err(AppError::Internal(_))),
             "unexpected variant: {res:?}",
         );
+    }
+
+    // ── Deletion command tests ────────────────────────────────────────────────
+
+    async fn insert_source(pool: &sqlx::SqlitePool, name: &str, kind: &str) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO sources (name, kind, status, config_json, created_at)
+             VALUES (?1, ?2, 'idle', '{}', ?3) RETURNING id",
+        )
+        .bind(name)
+        .bind(kind)
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("insert source")
+    }
+
+    async fn insert_photo(pool: &sqlx::SqlitePool, sha: &str, size: i64) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw, size_bytes)
+             VALUES (?1, 'photo.jpg', 4000, 3000, ?2, 0, ?3) RETURNING id",
+        )
+        .bind(sha)
+        .bind(&now)
+        .bind(size)
+        .fetch_one(pool)
+        .await
+        .expect("insert photo")
+    }
+
+    async fn insert_source_copy(
+        pool: &sqlx::SqlitePool,
+        photo_id: i64,
+        source_id: i64,
+        path: Option<&str>,
+        sha: &str,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO source_copies
+             (photo_id, source_id, path, is_primary, verified_sha256, last_seen_at)
+             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+        )
+        .bind(photo_id)
+        .bind(source_id)
+        .bind(path)
+        .bind(sha)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("insert source_copy");
+    }
+
+    #[tokio::test]
+    async fn source_deletion_preview_counts_orphans_and_shared() {
+        let pool = test_pool().await;
+        let src_a = insert_source(&pool, "A", "local").await;
+        let src_b = insert_source(&pool, "B", "local").await;
+
+        // Photo 1: only in src_a (orphan)
+        let p1 = insert_photo(&pool, "sha1", 1_000_000).await;
+        insert_source_copy(&pool, p1, src_a, Some("/tmp/p1.jpg"), "sha1").await;
+
+        // Photo 2: in both src_a and src_b (not orphan)
+        let p2 = insert_photo(&pool, "sha2", 2_000_000).await;
+        insert_source_copy(&pool, p2, src_a, Some("/tmp/p2.jpg"), "sha2").await;
+        insert_source_copy(&pool, p2, src_b, Some("/elsewhere/p2.jpg"), "sha2").await;
+
+        // Photo 3: only in src_a, cloud-only (no path)
+        let p3 = insert_photo(&pool, "sha3", 3_000_000).await;
+        insert_source_copy(&pool, p3, src_a, None, "sha3").await;
+
+        let plan = source_deletion_preview_impl(&pool, src_a)
+            .await
+            .expect("preview");
+
+        assert_eq!(plan.photos_total, 3, "src_a has 3 photos");
+        assert_eq!(
+            plan.orphan_photos, 2,
+            "p1 and p3 are orphans (p2 exists in src_b)"
+        );
+        assert_eq!(
+            plan.local_files, 1,
+            "only p1 has a local path among orphans"
+        );
+        assert_eq!(plan.total_bytes, 1_000_000, "bytes only from p1");
+        assert_eq!(plan.cloud_only, 1, "p3 is the cloud-only orphan");
+    }
+
+    #[tokio::test]
+    async fn delete_source_cascades_orphan_photos_and_keeps_shared() {
+        let pool = test_pool().await;
+        let src_a = insert_source(&pool, "A", "local").await;
+        let src_b = insert_source(&pool, "B", "local").await;
+
+        let p_orphan = insert_photo(&pool, "orphan", 500).await;
+        insert_source_copy(&pool, p_orphan, src_a, None, "orphan").await;
+
+        let p_shared = insert_photo(&pool, "shared", 600).await;
+        insert_source_copy(&pool, p_shared, src_a, None, "shared").await;
+        insert_source_copy(&pool, p_shared, src_b, None, "shared").await;
+
+        let receipt = delete_source_impl(&pool, src_a, false, true)
+            .await
+            .expect("delete");
+        assert_eq!(receipt.removed_photos, 1, "orphan photo removed");
+
+        // src_a gone; src_b kept.
+        let sources_remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sources WHERE id = ?1")
+                .bind(src_a)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sources_remaining, 0);
+
+        // p_orphan gone; p_shared kept.
+        let photos_remaining: Vec<i64> = sqlx::query_scalar("SELECT id FROM photos ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(photos_remaining, vec![p_shared]);
+
+        // p_shared's source_copy row from src_a removed; src_b row kept.
+        let copies_for_shared: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM source_copies WHERE photo_id = ?1")
+                .bind(p_shared)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(copies_for_shared, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_source_without_orphan_cleanup_leaves_orphan_photos() {
+        let pool = test_pool().await;
+        let src = insert_source(&pool, "A", "local").await;
+        let p = insert_photo(&pool, "lonely", 42).await;
+        insert_source_copy(&pool, p, src, None, "lonely").await;
+
+        let receipt = delete_source_impl(&pool, src, false, false)
+            .await
+            .expect("delete");
+        assert_eq!(receipt.removed_photos, 0, "orphan NOT removed");
+
+        let photo_still_there: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM photos WHERE id = ?1")
+                .bind(p)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(photo_still_there, 1, "photo row remains");
+    }
+
+    #[tokio::test]
+    async fn remove_photos_preview_splits_local_and_cloud_only() {
+        let pool = test_pool().await;
+        let src = insert_source(&pool, "A", "local").await;
+
+        let p_local = insert_photo(&pool, "L", 100).await;
+        insert_source_copy(&pool, p_local, src, Some("/tmp/L.jpg"), "L").await;
+
+        let p_cloud = insert_photo(&pool, "C", 200).await;
+        insert_source_copy(&pool, p_cloud, src, None, "C").await;
+
+        let preview = remove_photos_preview_impl(&pool, &[p_local, p_cloud])
+            .await
+            .expect("preview");
+        assert_eq!(preview.photo_count, 2);
+        assert_eq!(preview.local_files, 1);
+        assert_eq!(preview.cloud_only_photos, 1);
+        assert_eq!(preview.total_bytes, 100, "only p_local contributes bytes");
+    }
+
+    #[tokio::test]
+    async fn remove_photos_preview_empty_input_returns_zeros() {
+        let pool = test_pool().await;
+        let preview = remove_photos_preview_impl(&pool, &[]).await.unwrap();
+        assert_eq!(preview.photo_count, 0);
+        assert_eq!(preview.local_files, 0);
+        assert_eq!(preview.cloud_only_photos, 0);
+        assert_eq!(preview.total_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn remove_photos_from_catalog_deletes_rows_and_source_copies() {
+        let pool = test_pool().await;
+        let src = insert_source(&pool, "A", "local").await;
+
+        let p1 = insert_photo(&pool, "p1", 10).await;
+        insert_source_copy(&pool, p1, src, None, "p1").await;
+        let p2 = insert_photo(&pool, "p2", 20).await;
+        insert_source_copy(&pool, p2, src, None, "p2").await;
+
+        let receipt = remove_photos_from_catalog_impl(&pool, &[p1])
+            .await
+            .expect("remove");
+        assert_eq!(receipt.removed_photos, 1);
+
+        let remaining: Vec<i64> = sqlx::query_scalar("SELECT id FROM photos ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, vec![p2], "only p2 should remain");
+
+        let orphan_copies: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM source_copies WHERE photo_id = ?1")
+                .bind(p1)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            orphan_copies, 0,
+            "FK cascade removed source_copies for deleted photo"
+        );
+    }
+
+    #[tokio::test]
+    async fn recycle_source_copies_sends_local_files_to_trash_and_reports() {
+        let pool = test_pool().await;
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let file_a = tmp.path().join("a.jpg");
+        let file_b = tmp.path().join("b.jpg");
+        std::fs::write(&file_a, b"aaa").unwrap();
+        std::fs::write(&file_b, b"bbb").unwrap();
+
+        let src = insert_source(&pool, "A", "local").await;
+        let pa = insert_photo(&pool, "a", 3).await;
+        insert_source_copy(&pool, pa, src, Some(file_a.to_str().unwrap()), "a").await;
+        let pb = insert_photo(&pool, "b", 3).await;
+        insert_source_copy(&pool, pb, src, Some(file_b.to_str().unwrap()), "b").await;
+
+        let receipt = recycle_source_copies_impl(&pool, &[pa, pb])
+            .await
+            .expect("recycle");
+
+        // DB rows are UNTOUCHED (recycle is file-only).
+        let photo_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM photos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(photo_rows, 2, "recycle must NOT delete DB rows");
+
+        // Files are gone from their original location (in Recycle Bin on Windows;
+        // moved or deleted on other platforms depending on `trash` backend).
+        assert!(!file_a.exists(), "a.jpg should be gone from source dir");
+        assert!(!file_b.exists(), "b.jpg should be gone from source dir");
+        assert_eq!(
+            receipt.recycled_count, 2,
+            "both files should have been recycled"
+        );
+        assert_eq!(receipt.skipped_count, 0);
+        assert!(receipt.errors.is_empty(), "no errors expected");
+    }
+
+    #[tokio::test]
+    async fn recycle_source_copies_skips_missing_and_empty_input() {
+        let pool = test_pool().await;
+        let src = insert_source(&pool, "A", "local").await;
+
+        // Photo with a path that doesn't exist on disk.
+        let p = insert_photo(&pool, "ghost", 1).await;
+        insert_source_copy(&pool, p, src, Some("/nonexistent/ghost.jpg"), "ghost").await;
+
+        let receipt = recycle_source_copies_impl(&pool, &[p])
+            .await
+            .expect("recycle");
+        assert_eq!(receipt.recycled_count, 0);
+        assert_eq!(
+            receipt.skipped_count, 1,
+            "nonexistent path counted as skipped"
+        );
+
+        // Empty input is a no-op.
+        let empty = recycle_source_copies_impl(&pool, &[]).await.unwrap();
+        assert_eq!(empty.recycled_count, 0);
+        assert_eq!(empty.skipped_count, 0);
     }
 }

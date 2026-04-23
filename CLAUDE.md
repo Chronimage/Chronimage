@@ -2,7 +2,7 @@
 
 > **Resume protocol:** Read this file → read `docs/checkpoints/latest.md` → read the active PRD in `docs/prds/phase-N.md`. Do this on *every* session start before touching code.
 
-**Current phase:** Phase 1 — Deep AI Catalog (week 1 · scaffolding landed, feature implementation next)
+**Current phase:** Phase 2 — Cull + Cull Bin + Export (week 1 hotfix done 2026-04-24 · imports 22× faster · onboarding deleted · see ADR 0004, ADR 0005)
 
 ---
 

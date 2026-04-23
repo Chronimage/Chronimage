@@ -209,6 +209,12 @@ v1.0.0 still ships with `community_defaults() == all_true_except_insider` — bu
 - [ ] WinGet manifest PR
 - [ ] Runbook doc
 - [ ] 8 exit-criterion items (5 automated + 3 manual)
+- [ ] **Post-v1: mobile / tablet responsive pass** (filed from Phase 2 rehaul · ADR 0007). The Phase 2 rehaul shipped desktop-responsive breakpoints (720–3440 px window widths) but deliberately skipped touch-first UX. After v1 stable:
+  - Touch-target sizing (≥ 44 px hit areas on all controls)
+  - Sheet-based detail view (swipe-down to dismiss, like iOS Photos)
+  - Camera-roll-style gestures (pinch-zoom the masonry for density, long-press for selection)
+  - Tauri 2 mobile target (iOS + Android) — currently experimental; track upstream stability before committing
+  - Re-validate the masonry packer on sub-720 px widths (may need a 2-column minimum fallback)
 
 ---
 

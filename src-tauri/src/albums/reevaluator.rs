@@ -387,7 +387,7 @@ mod tests {
         seed_default_smart_albums(&pool).await.unwrap();
 
         let count = reevaluate_all(&pool).await.unwrap();
-        // 12 static + 4 rediscovery = 16 albums seeded.
-        assert_eq!(count, 16, "expected 16 albums evaluated, got {count}");
+        // 2 static rule-based + 4 rediscovery = 6 albums seeded.
+        assert_eq!(count, 6, "expected 6 albums evaluated, got {count}");
     }
 }

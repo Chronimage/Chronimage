@@ -44,19 +44,34 @@ describe('invoke wrappers', () => {
 
   it('listPhotos calls list_photos with default params', async () => {
     expect(Array.isArray(await listPhotos())).toBe(true);
-    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: null, offset: null, albumId: null });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', {
+      limit: null,
+      offset: null,
+      albumId: null,
+      sortBy: null,
+    });
   });
 
   it('listPhotos forwards limit and offset', async () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await listPhotos({ limit: 50, offset: 200 });
-    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: 50, offset: 200, albumId: null });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', {
+      limit: 50,
+      offset: 200,
+      albumId: null,
+      sortBy: null,
+    });
   });
 
   it('listPhotos forwards albumId', async () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await listPhotos({ albumId: 3 });
-    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', { limit: null, offset: null, albumId: 3 });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', {
+      limit: null,
+      offset: null,
+      albumId: 3,
+      sortBy: null,
+    });
   });
 
   it('refreshSmartAlbums calls refresh_smart_albums', async () => {
@@ -184,9 +199,31 @@ describe('invoke wrappers', () => {
     expect(tauriInvoke).toHaveBeenCalledWith('list_imports', { sourceId: 3 });
   });
 
-  it('deleteSource calls delete_source with sourceId', async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+  it('deleteSource calls delete_source with source + deletion options', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      removed_photos: 0,
+      removed_thumbnails: 0,
+      errors: [],
+    });
     await deleteSource(7);
-    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', { sourceId: 7 });
+    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', {
+      sourceId: 7,
+      recycleFiles: false,
+      removeOrphanPhotos: true,
+    });
+  });
+
+  it('deleteSource forwards opts when provided', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      removed_photos: 0,
+      removed_thumbnails: 0,
+      errors: [],
+    });
+    await deleteSource(9, { recycleFiles: true, removeOrphanPhotos: false });
+    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', {
+      sourceId: 9,
+      recycleFiles: true,
+      removeOrphanPhotos: false,
+    });
   });
 });

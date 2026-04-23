@@ -87,6 +87,17 @@ Following RapidRAW's proven path: Rust + wgpu compute shaders for the heavy lift
 - [ ] Rotate (free + 90° steps) stored in `edits.operations_json` (doesn't re-encode the RAW)
 - [ ] Upright / auto-straighten via Hough transform on detected horizon
 
+### 9. Advanced face metrics (filed from Phase 2 rehaul · ADR 0007)
+
+The catalog detail inspector currently hides an "Eyes open" quality bar because the underlying column (`photos.eyes_open`) is always NULL — SCRFD's 5 keypoints don't expose eyelid geometry. Phase 3 adds the dedicated model pass:
+
+- [ ] MediaPipe FaceMesh (468 landmarks, ~15 MB ONNX) or dlib's 68-point model — pick based on accuracy on the `phase_1_face_clustering` fixture. MediaPipe has better cross-face coverage; dlib is smaller.
+- [ ] New `src-tauri/src/ai/face_landmarks.rs` session singleton, similar shape to `FacesSession`. Wired via `providers::session_builder_with_ep` so it picks up DirectML on Windows.
+- [ ] Pipeline Stage 5.5 (or extend Stage 5): for each detected face, compute Eye Aspect Ratio (EAR) = (vertical eyelid distance) / (horizontal eye width). EAR < 0.18 = eye closed. Store mean EAR across both eyes in `photos.eyes_open` (0.0–1.0 scale).
+- [ ] Surface in the inspector Quality bars (already positioned; Phase 2 rehaul hid the bar when NULL).
+- [ ] Also exposes motion-blur / face-occlusion metrics (optional — future cull issue-filter work uses the same model).
+- [ ] Cost: ~50 ms per detected face on CPU, ~10 ms on DirectML. Negligible vs existing Stage 5 costs.
+
 ## Non-goals
 
 - No prompt-driven generative edits (Phase 4)

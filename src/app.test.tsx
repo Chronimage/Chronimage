@@ -12,11 +12,11 @@ describe('App shell', () => {
     expect(brand?.querySelector('em')?.textContent).toBe('ge');
   });
 
-  it('renders the rail with all 6 primary screen buttons plus Settings', () => {
+  it('renders the rail with all 5 primary screen buttons plus Settings', () => {
     const { container } = render(<App />);
     const buttons = container.querySelectorAll('.rail button');
-    // 6 primary items (Sources, Catalog, People, Cull, Cull Bin, Develop) + Settings
-    expect(buttons.length).toBe(7);
+    // 5 primary items (Catalog, People, Cull, Cull Bin, Develop) + Settings
+    expect(buttons.length).toBe(6);
   });
 
   it('renders the status bar', () => {

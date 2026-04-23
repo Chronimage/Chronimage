@@ -1,0 +1,21 @@
+-- Drop the broken `photos_fts_delete` trigger from migration
+-- 20260420000000_phase1_catalog.sql.
+--
+-- That trigger used `DELETE FROM photos_fts WHERE rowid = old.id` which
+-- SQLite rejects on contentless FTS5 tables with:
+--   "cannot DELETE from contentless fts5 table: photos_fts"
+--
+-- The companion migration 20260424000000_fts5_triggers_fix.sql repaired the
+-- tags_fts_* and photos_fts_update triggers but left this one in place —
+-- so until now, any `DELETE FROM photos` would fail.
+--
+-- FTS cleanup is now done in application code BEFORE deleting the photo row
+-- (see `commands::remove_photos_from_catalog_impl` and
+-- `commands::delete_source_impl`). Those handlers issue the correct
+-- contentless FTS5 delete command (`INSERT INTO photos_fts(photos_fts, ...)
+-- VALUES('delete', ...)`) while the photo + tags still exist in their
+-- parent tables, so the pre-delete filename + tag concatenation is available.
+--
+-- Forward-only. Do NOT edit once merged.
+
+DROP TRIGGER IF EXISTS photos_fts_delete;

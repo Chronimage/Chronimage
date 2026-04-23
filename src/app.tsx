@@ -4,10 +4,10 @@ import { Rail } from './chrome/Rail';
 import { StatusBar } from './chrome/StatusBar';
 import { Titlebar } from './chrome/Titlebar';
 import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
-import { OnboardScreen } from './screens/OnboardScreen';
 import { PeopleScreen } from './screens/PeopleScreen';
 import { PlaceholderScreen } from './screens/PlaceholderScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
+import { useImportProgressListener } from './state/import';
 import { useUi } from './state/ui';
 import { appVersion, currentChannel } from './tauri/invoke';
 import { error as logError } from './util/log';
@@ -21,6 +21,10 @@ export function App() {
   const setScreen = useUi((s) => s.setScreen);
   const tweaks = useUi((s) => s.tweaks);
   const hydrateFromStore = useUi((s) => s.hydrateFromStore);
+
+  // Subscribe once at the root to IMPORT_PROGRESS_EVENT so every screen can
+  // read the global import store without re-mounting the listener.
+  useImportProgressListener();
 
   useEffect(() => {
     // Restore persisted Settings tweaks from plugin-store exactly once at boot.
@@ -50,9 +54,6 @@ export function App() {
   let mainPanel: React.ReactNode = null;
 
   switch (screen.id) {
-    case 'onboard':
-      mainPanel = <OnboardScreen />;
-      break;
     case 'catalog':
       sidePanel = <CatalogSidePanel albumId={albumId} onAlbumChange={setAlbumId} />;
       mainPanel = <CatalogScreen albumId={albumId} />;
@@ -106,7 +107,11 @@ export function App() {
         <Titlebar screen={screen} appName={tweaks.appName} />
         <div className="body">
           <Rail screen={screen} onScreenChange={setScreen} />
-          {sidePanel}
+          {/* Always render a grid slot for the side panel so the main panel
+              lands in the `1fr` column; otherwise screens without a side
+              panel (Settings, People) sit in the `auto` column and get
+              sized to their content instead of filling the canvas. */}
+          {sidePanel ?? <div />}
           {mainPanel}
         </div>
         <StatusBar screen={screen} version={version} channel={channel} />

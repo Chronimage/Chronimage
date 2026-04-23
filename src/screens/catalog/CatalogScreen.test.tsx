@@ -18,10 +18,12 @@ describe('CatalogScreen', () => {
     expect(screen.getByPlaceholderText(/ask your library/i)).toBeInTheDocument();
   });
 
-  it('renders the facet chips row', () => {
+  it('renders the empty state mode chooser when there are no sources + no photos', () => {
     render(<CatalogScreen albumId="all" />, { wrapper });
-    expect(screen.getByText('All')).toBeInTheDocument();
-    expect(screen.getByText('People')).toBeInTheDocument();
+    // The mode chooser is the first thing a fresh user sees — no wizard, just
+    // the "pick a mode before you can add a source" panel.
+    expect(screen.getByText(/WHEN I IMPORT/i)).toBeInTheDocument();
+    expect(screen.getByText(/Add a folder/i)).toBeInTheDocument();
   });
 });
 

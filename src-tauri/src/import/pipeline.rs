@@ -14,9 +14,11 @@ use crate::{
     AppError, AppResult,
 };
 use chrono::Utc;
+use image::ImageFormat;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::{
+    io::Write as _,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -52,6 +54,13 @@ pub struct ImportResult {
 
 /// Maximum concurrent SHA256 tasks.
 const MAX_CONCURRENT_HASHES: usize = 4;
+
+/// Maximum concurrent AI-inference tasks (Stage 4 NIMA+SigLIP, Stage 5 face
+/// detect+embed). Higher values let image decode + preprocessing overlap with
+/// ort CPU inference on other photos, at the cost of oversubscribing cores
+/// when ort's intra-op thread pool is already wide. 4 matches Stage 2 and
+/// empirically keeps a modern 6–8 core CPU saturated without thrashing.
+const MAX_CONCURRENT_AI_TASKS: usize = 4;
 
 /// Run the full import pipeline, creating a fresh `imports` row first.
 ///
@@ -133,13 +142,28 @@ async fn execute_pipeline(
     pool: SqlitePool,
     on_progress: Arc<dyn Fn(ImportProgress) + Send + Sync>,
 ) -> AppResult<ImportResult> {
+    let pipeline_start = Instant::now();
+    tracing::info!(
+        source_id,
+        import_id,
+        root = %root.display(),
+        "import pipeline: begin"
+    );
+
     // ── Stage 1: scan ────────────────────────────────────────────────────────
+    let stage1_start = Instant::now();
     let root_clone = root.clone();
     let entries = tokio::task::spawn_blocking(move || scan_dir(&ScanOptions::new(root_clone)))
         .await
         .map_err(|e| AppError::Internal(format!("scan task join: {e}")))??;
 
     let total = entries.len();
+    tracing::info!(
+        import_id,
+        total,
+        elapsed_ms = stage1_start.elapsed().as_millis() as u64,
+        "import pipeline: stage 1 (scan) done"
+    );
 
     // Update total_files in the imports row immediately so the UI can show it.
     sqlx::query("UPDATE imports SET total_files = ?1 WHERE id = ?2")
@@ -149,6 +173,7 @@ async fn execute_pipeline(
         .await?;
 
     // ── Stage 2: hash + insert ───────────────────────────────────────────────
+    let stage2_start = Instant::now();
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES));
     let imported = Arc::new(AtomicUsize::new(0));
     let skipped = Arc::new(AtomicUsize::new(0));
@@ -177,10 +202,13 @@ async fn execute_pipeline(
                 .await
                 .map_err(|e| AppError::Internal(format!("semaphore closed: {e}")))?;
 
+            let photo_timer = Instant::now();
+            let hash_start = Instant::now();
             let path_clone = path.clone();
             let hash = tokio::task::spawn_blocking(move || crate::import::sha256_file(&path_clone))
                 .await
                 .map_err(|e| AppError::Internal(format!("hash task join: {e}")))??;
+            let hash_ms = hash_start.elapsed().as_millis() as u64;
 
             let filename = path
                 .file_name()
@@ -228,6 +256,7 @@ async fn execute_pipeline(
                 imported.fetch_add(1, Ordering::Relaxed);
 
                 // Stage 2.5: extract EXIF + pHash for this photo.
+                let meta_start = Instant::now();
                 let meta_path = path.clone();
                 let (exif, phash) = match tokio::task::spawn_blocking(move || {
                     let exif = crate::import::exif::read(&meta_path);
@@ -242,6 +271,7 @@ async fn execute_pipeline(
                         (crate::import::exif::ExifData::default(), None)
                     }
                 };
+                let meta_ms = meta_start.elapsed().as_millis() as u64;
 
                 if let Err(e) = sqlx::query(
                     "UPDATE photos SET \
@@ -258,8 +288,9 @@ async fn execute_pipeline(
                      focal_mm         = COALESCE(?11, focal_mm), \
                      gps_lat          = COALESCE(?12, gps_lat), \
                      gps_lng          = COALESCE(?13, gps_lng), \
-                     phash            = COALESCE(?14, phash) \
-                     WHERE id = ?15",
+                     phash            = COALESCE(?14, phash), \
+                     orientation      = COALESCE(?15, orientation) \
+                     WHERE id = ?16",
                 )
                 .bind(exif.width.map(|v| v as i64))
                 .bind(exif.height.map(|v| v as i64))
@@ -275,12 +306,75 @@ async fn execute_pipeline(
                 .bind(exif.gps_lat)
                 .bind(exif.gps_lng)
                 .bind(&phash)
+                .bind(exif.orientation.map(|v| v as i64))
                 .bind(photo_id)
                 .execute(&pool)
                 .await
                 {
                     tracing::warn!(error = %e, photo_id, "metadata UPDATE failed");
                 }
+
+                // Stage 2.6: apply EXIF orientation, cache a 320 px thumbnail,
+                // and compute a Laplacian-variance sharpness score from the
+                // same decoded + resized image. All in one spawn_blocking so
+                // we decode the JPG exactly once.
+                let thumb_start = Instant::now();
+                let thumb_path = path.clone();
+                let thumb_sha = hash.clone();
+                let thumb_orientation = exif.orientation;
+                let thumb_task = tokio::task::spawn_blocking(move || -> AppResult<Option<f32>> {
+                    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
+                    let cache_path = thumbs_dir.join(format!("{thumb_sha}_320.jpg"));
+                    // Always decode + compute sharpness; skip re-writing the
+                    // thumb file if it already exists.
+                    let img = image::open(&thumb_path)
+                        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+                    // Apply EXIF orientation BEFORE resizing so the cached
+                    // thumb lands in display-correct orientation.
+                    let img = crate::ai::image_util::apply_exif_orientation(img, thumb_orientation);
+                    let resized = img.thumbnail(320, 320);
+
+                    if !cache_path.exists() {
+                        let mut buf = Vec::with_capacity(32 * 1024);
+                        let mut cursor = std::io::Cursor::new(&mut buf);
+                        resized
+                            .write_to(&mut cursor, ImageFormat::Jpeg)
+                            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+                        cursor.flush()?;
+                        let _ = std::fs::create_dir_all(&thumbs_dir);
+                        std::fs::write(&cache_path, &buf)?;
+                    }
+
+                    // Sharpness from the oriented, resized image.
+                    let sharpness = crate::ai::image_util::laplacian_variance(&resized);
+                    Ok(Some(sharpness))
+                })
+                .await;
+
+                // Persist sharpness score if we got one. Best-effort.
+                if let Ok(Ok(Some(score))) = &thumb_task {
+                    if let Err(e) =
+                        sqlx::query("UPDATE photos SET sharpness_score = ?1 WHERE id = ?2")
+                            .bind(*score as f64)
+                            .bind(photo_id)
+                            .execute(&pool)
+                            .await
+                    {
+                        tracing::warn!(error = %e, photo_id, "sharpness UPDATE failed");
+                    }
+                }
+                let thumb_ms = thumb_start.elapsed().as_millis() as u64;
+
+                tracing::debug!(
+                    photo_id,
+                    size_bytes,
+                    is_raw = is_raw == 1,
+                    total_ms = photo_timer.elapsed().as_millis() as u64,
+                    hash_ms,
+                    meta_ms,
+                    thumb_ms,
+                    "import: stage-2 per-photo timing"
+                );
             } else {
                 skipped.fetch_add(1, Ordering::Relaxed);
             }
@@ -335,7 +429,22 @@ async fn execute_pipeline(
         }
     }
 
+    tracing::info!(
+        import_id,
+        imported = imported.load(Ordering::Relaxed),
+        skipped = skipped.load(Ordering::Relaxed),
+        errors = errors.load(Ordering::Relaxed),
+        elapsed_ms = stage2_start.elapsed().as_millis() as u64,
+        per_photo_ms = if total > 0 {
+            (stage2_start.elapsed().as_millis() as u64) / total as u64
+        } else {
+            0
+        },
+        "import pipeline: stage 2 (hash+EXIF+thumb) done"
+    );
+
     // ── Stage 3: detect RAW+JPG pairs and write paired_photo_id ─────────────
+    let stage3_start = Instant::now();
     let paths_only: Vec<PathBuf> = path_hash_id.iter().map(|(p, _, _)| p.clone()).collect();
     let (pairs, _) = crate::import::pair::detect_pairs(paths_only);
 
@@ -366,11 +475,24 @@ async fn execute_pipeline(
         }
     }
 
+    tracing::info!(
+        import_id,
+        pairs = pairs.len(),
+        elapsed_ms = stage3_start.elapsed().as_millis() as u64,
+        "import pipeline: stage 3 (pairs) done"
+    );
+
     // ── Stage 4: AI enrichment (NIMA + SigLIP, model-optional) ─────────────
+    let stage4_start = Instant::now();
+    let new_photo_count = new_photos.len();
     //
     // SigLIP: prefer the process-wide global session (init'd at boot from
     // bundled models) over the legacy `get_or_load` path. Falls back to
     // `get_or_load` when the global has not been seeded (e.g. CLI / headless).
+    //
+    // Each photo runs NIMA → SigLIP sequentially inside its own task, and up
+    // to `MAX_CONCURRENT_AI_TASKS` tasks run in parallel across photos. The
+    // static session references are `Copy`, so the tokio tasks share them.
     if !new_photos.is_empty() {
         if let Ok(models_dir) = crate::util::paths::models_dir() {
             let nima_session =
@@ -391,110 +513,167 @@ async fn execute_pipeline(
                     None
                 };
 
+                let ai_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_AI_TASKS));
+                let mut handles = Vec::with_capacity(new_photos.len());
+
                 for (path, photo_id) in &new_photos {
-                    // NIMA aesthetic score → photos.aesthetic_score
-                    if let Some(nima) = nima_session {
-                        let p = path.clone();
-                        match tokio::task::spawn_blocking(move || nima.score(&p)).await {
-                            Ok(Ok(score)) => {
-                                if let Err(e) = sqlx::query(
-                                    "UPDATE photos SET aesthetic_score = ?1 WHERE id = ?2",
-                                )
-                                .bind(score)
-                                .bind(photo_id)
-                                .execute(&pool)
-                                .await
-                                {
-                                    tracing::warn!(error = %e, photo_id, "aesthetic score update failed");
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                tracing::debug!(error = %e, photo_id, "nima score failed")
-                            }
+                    let path = path.clone();
+                    let photo_id = *photo_id;
+                    let pool = pool.clone();
+                    let sem = Arc::clone(&ai_sem);
+                    let nima_opt = nima_session;
+                    let siglip_opt = siglip_session;
+                    let model_id_opt = siglip_model_id;
+
+                    let handle = tokio::spawn(async move {
+                        let ai_timer = Instant::now();
+                        let _permit = match sem.acquire_owned().await {
+                            Ok(p) => p,
                             Err(e) => {
-                                tracing::debug!(error = %e, photo_id, "nima task join failed")
+                                tracing::warn!(error = %e, photo_id, "ai semaphore closed");
+                                return;
+                            }
+                        };
+
+                        // NIMA aesthetic score → photos.aesthetic_score
+                        let nima_start = Instant::now();
+                        if let Some(nima) = nima_opt {
+                            let p = path.clone();
+                            match tokio::task::spawn_blocking(move || nima.score(&p)).await {
+                                Ok(Ok(score)) => {
+                                    if let Err(e) = sqlx::query(
+                                        "UPDATE photos SET aesthetic_score = ?1 WHERE id = ?2",
+                                    )
+                                    .bind(score)
+                                    .bind(photo_id)
+                                    .execute(&pool)
+                                    .await
+                                    {
+                                        tracing::warn!(error = %e, photo_id, "aesthetic score update failed");
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::debug!(error = %e, photo_id, "nima score failed")
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, photo_id, "nima task join failed")
+                                }
                             }
                         }
-                    }
 
-                    // SigLIP embedding → photo_embeddings (BLOB) + vec_photo_embeddings (KNN).
-                    if let (Some(siglip), Some(model_id)) = (siglip_session, siglip_model_id) {
-                        let p = path.clone();
-                        match tokio::task::spawn_blocking(move || siglip.embed_image(&p)).await {
-                            Ok(Ok(vec)) => {
-                                let bytes: Vec<u8> =
-                                    vec.iter().flat_map(|f| f.to_le_bytes()).collect();
-                                let now_ts = Utc::now().to_rfc3339();
+                        let nima_ms = nima_start.elapsed().as_millis() as u64;
 
-                                // Primary BLOB store (search_photos BLOB fallback path).
-                                if let Err(e) = sqlx::query(
-                                    "INSERT OR REPLACE INTO photo_embeddings \
-                                     (photo_id, model_id, embedding, updated_at) \
-                                     VALUES (?1, ?2, ?3, ?4)",
-                                )
-                                .bind(photo_id)
-                                .bind(model_id)
-                                .bind(&bytes)
-                                .bind(&now_ts)
-                                .execute(&pool)
-                                .await
-                                {
-                                    tracing::warn!(error = %e, photo_id, "embedding insert failed");
+                        // SigLIP embedding → photo_embeddings (BLOB) + vec_photo_embeddings (KNN).
+                        let siglip_start = Instant::now();
+                        if let (Some(siglip), Some(model_id)) = (siglip_opt, model_id_opt) {
+                            let p = path.clone();
+                            match tokio::task::spawn_blocking(move || siglip.embed_image(&p)).await
+                            {
+                                Ok(Ok(vec)) => {
+                                    let bytes: Vec<u8> =
+                                        vec.iter().flat_map(|f| f.to_le_bytes()).collect();
+                                    let now_ts = Utc::now().to_rfc3339();
+
+                                    // Primary BLOB store (search_photos BLOB fallback path).
+                                    if let Err(e) = sqlx::query(
+                                        "INSERT OR REPLACE INTO photo_embeddings \
+                                         (photo_id, model_id, embedding, updated_at) \
+                                         VALUES (?1, ?2, ?3, ?4)",
+                                    )
+                                    .bind(photo_id)
+                                    .bind(model_id)
+                                    .bind(&bytes)
+                                    .bind(&now_ts)
+                                    .execute(&pool)
+                                    .await
+                                    {
+                                        tracing::warn!(error = %e, photo_id, "embedding insert failed");
+                                    }
+
+                                    // sqlite-vec f32 KNN store — retained for rare paths that
+                                    // need exact cosine ordering / re-rank.
+                                    if let Err(e) = sqlx::query(
+                                        "INSERT OR REPLACE INTO vec_photo_embeddings \
+                                         (rowid, embedding) VALUES (?1, ?2)",
+                                    )
+                                    .bind(photo_id)
+                                    .bind(&bytes)
+                                    .execute(&pool)
+                                    .await
+                                    {
+                                        tracing::debug!(
+                                            error = %e,
+                                            photo_id,
+                                            "vec_photo_embeddings insert skipped (sqlite-vec absent?)"
+                                        );
+                                    }
+
+                                    // sqlite-vec int8 KNN store — the primary search_photos path.
+                                    // 4× smaller bytes scanned per query → ~4× lower p95 at the
+                                    // same catalog size; distance ordering preserved.
+                                    let i8_bytes =
+                                        crate::catalog::db::quantize_unit_f32_to_i8_bytes(&vec);
+                                    if let Err(e) = sqlx::query(
+                                        "INSERT OR REPLACE INTO vec_photo_embeddings_int8 \
+                                         (rowid, embedding) VALUES (?1, vec_int8(?2))",
+                                    )
+                                    .bind(photo_id)
+                                    .bind(&i8_bytes)
+                                    .execute(&pool)
+                                    .await
+                                    {
+                                        tracing::debug!(
+                                            error = %e,
+                                            photo_id,
+                                            "vec_photo_embeddings_int8 insert skipped"
+                                        );
+                                    }
                                 }
-
-                                // sqlite-vec f32 KNN store — retained for rare paths that
-                                // need exact cosine ordering / re-rank.
-                                if let Err(e) = sqlx::query(
-                                    "INSERT OR REPLACE INTO vec_photo_embeddings \
-                                     (rowid, embedding) VALUES (?1, ?2)",
-                                )
-                                .bind(photo_id)
-                                .bind(&bytes)
-                                .execute(&pool)
-                                .await
-                                {
-                                    tracing::debug!(
-                                        error = %e,
-                                        photo_id,
-                                        "vec_photo_embeddings insert skipped (sqlite-vec absent?)"
-                                    );
+                                Ok(Err(e)) => {
+                                    tracing::debug!(error = %e, photo_id, "siglip embed failed")
                                 }
-
-                                // sqlite-vec int8 KNN store — the primary search_photos path.
-                                // 4× smaller bytes scanned per query → ~4× lower p95 at the
-                                // same catalog size; distance ordering preserved.
-                                let i8_bytes =
-                                    crate::catalog::db::quantize_unit_f32_to_i8_bytes(&vec);
-                                if let Err(e) = sqlx::query(
-                                    "INSERT OR REPLACE INTO vec_photo_embeddings_int8 \
-                                     (rowid, embedding) VALUES (?1, vec_int8(?2))",
-                                )
-                                .bind(photo_id)
-                                .bind(&i8_bytes)
-                                .execute(&pool)
-                                .await
-                                {
-                                    tracing::debug!(
-                                        error = %e,
-                                        photo_id,
-                                        "vec_photo_embeddings_int8 insert skipped"
-                                    );
+                                Err(e) => {
+                                    tracing::debug!(error = %e, photo_id, "siglip task join failed")
                                 }
-                            }
-                            Ok(Err(e)) => {
-                                tracing::debug!(error = %e, photo_id, "siglip embed failed")
-                            }
-                            Err(e) => {
-                                tracing::debug!(error = %e, photo_id, "siglip task join failed")
                             }
                         }
+                        let siglip_ms = siglip_start.elapsed().as_millis() as u64;
+
+                        tracing::debug!(
+                            photo_id,
+                            total_ms = ai_timer.elapsed().as_millis() as u64,
+                            nima_ms,
+                            siglip_ms,
+                            "import: stage-4 per-photo timing"
+                        );
+                    });
+
+                    handles.push(handle);
+                }
+
+                for h in handles {
+                    if let Err(e) = h.await {
+                        tracing::warn!(error = %e, "stage-4 task join error");
                     }
                 }
             }
         }
     }
 
+    tracing::info!(
+        import_id,
+        new_photo_count,
+        elapsed_ms = stage4_start.elapsed().as_millis() as u64,
+        per_photo_ms = if new_photo_count > 0 {
+            (stage4_start.elapsed().as_millis() as u64) / new_photo_count as u64
+        } else {
+            0
+        },
+        "import pipeline: stage 4 (NIMA + SigLIP) done"
+    );
+
     // ── Stage 5: face detection + embedding (model-optional) ───────────────
+    let stage5_start = Instant::now();
     //
     // Uses the process-wide `FacesSession` initialised once at app boot
     // (src-tauri/src/main.rs calls `init_global_faces_session`). When absent
@@ -505,67 +684,111 @@ async fn execute_pipeline(
     // Previously this block called `FacesSession::load(scrfd, arcface)` on
     // every pipeline invocation, committing ~190 MB of ONNX through ort
     // (~2 s per import batch). Memoising at boot eliminates the repeated init.
+    //
+    // Photos fan out to up to `MAX_CONCURRENT_AI_TASKS` parallel tasks. Face
+    // embeddings within a single photo stay serial (typically 0–3 faces, so
+    // per-face parallelism is not worth the coordination).
     if !new_photos.is_empty() {
         if let Some(session) = crate::ai::faces::global_faces_session() {
+            let face_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_AI_TASKS));
+            let mut handles = Vec::with_capacity(new_photos.len());
+
             for (path, photo_id) in &new_photos {
-                let path_c = path.clone();
-                let detect_result =
-                    tokio::task::spawn_blocking(move || session.detect_faces(&path_c)).await;
-                let faces = match detect_result {
-                    Ok(Ok(f)) => f,
-                    Ok(Err(e)) => {
-                        tracing::debug!(error = %e, photo_id, "scrfd detect failed");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, photo_id, "scrfd task join failed");
-                        continue;
-                    }
-                };
-                let now_ts = Utc::now().to_rfc3339();
-                for face in faces {
-                    let path_c = path.clone();
-                    let face_for_embed = face.clone();
-                    let embed_result = tokio::task::spawn_blocking(move || {
-                        session.embed_face(&path_c, &face_for_embed)
-                    })
-                    .await;
-                    let embedding = match embed_result {
-                        Ok(Ok(v)) => v,
-                        Ok(Err(e)) => {
-                            tracing::debug!(error = %e, photo_id, "arcface embed failed");
-                            continue;
-                        }
+                let path = path.clone();
+                let photo_id = *photo_id;
+                let pool = pool.clone();
+                let sem = Arc::clone(&face_sem);
+                let faces_session = session;
+
+                let handle = tokio::spawn(async move {
+                    let _permit = match sem.acquire_owned().await {
+                        Ok(p) => p,
                         Err(e) => {
-                            tracing::debug!(error = %e, photo_id, "arcface task join failed");
-                            continue;
+                            tracing::warn!(error = %e, photo_id, "face semaphore closed");
+                            return;
                         }
                     };
-                    let embedding_bytes: Vec<u8> =
-                        embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
-                    if let Err(e) = sqlx::query(
-                        "INSERT INTO faces \
-                         (photo_id, bbox_x, bbox_y, bbox_w, bbox_h, quality, \
-                          embedding, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    )
-                    .bind(photo_id)
-                    .bind(face.x as f64)
-                    .bind(face.y as f64)
-                    .bind(face.w as f64)
-                    .bind(face.h as f64)
-                    .bind(face.score as f64)
-                    .bind(&embedding_bytes)
-                    .bind(&now_ts)
-                    .execute(&pool)
-                    .await
-                    {
-                        tracing::warn!(error = %e, photo_id, "faces insert failed");
+
+                    let path_c = path.clone();
+                    let detect_result =
+                        tokio::task::spawn_blocking(move || faces_session.detect_faces(&path_c))
+                            .await;
+                    let faces = match detect_result {
+                        Ok(Ok(f)) => f,
+                        Ok(Err(e)) => {
+                            tracing::debug!(error = %e, photo_id, "scrfd detect failed");
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, photo_id, "scrfd task join failed");
+                            return;
+                        }
+                    };
+                    let now_ts = Utc::now().to_rfc3339();
+                    for face in faces {
+                        let path_c = path.clone();
+                        let face_for_embed = face.clone();
+                        let embed_result = tokio::task::spawn_blocking(move || {
+                            faces_session.embed_face(&path_c, &face_for_embed)
+                        })
+                        .await;
+                        let embedding = match embed_result {
+                            Ok(Ok(v)) => v,
+                            Ok(Err(e)) => {
+                                tracing::debug!(error = %e, photo_id, "arcface embed failed");
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, photo_id, "arcface task join failed");
+                                continue;
+                            }
+                        };
+                        let embedding_bytes: Vec<u8> =
+                            embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+                        if let Err(e) = sqlx::query(
+                            "INSERT INTO faces \
+                             (photo_id, bbox_x, bbox_y, bbox_w, bbox_h, quality, \
+                              embedding, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        )
+                        .bind(photo_id)
+                        .bind(face.x as f64)
+                        .bind(face.y as f64)
+                        .bind(face.w as f64)
+                        .bind(face.h as f64)
+                        .bind(face.score as f64)
+                        .bind(&embedding_bytes)
+                        .bind(&now_ts)
+                        .execute(&pool)
+                        .await
+                        {
+                            tracing::warn!(error = %e, photo_id, "faces insert failed");
+                        }
                     }
+                });
+
+                handles.push(handle);
+            }
+
+            for h in handles {
+                if let Err(e) = h.await {
+                    tracing::warn!(error = %e, "stage-5 task join error");
                 }
             }
         }
     }
+
+    tracing::info!(
+        import_id,
+        new_photo_count,
+        elapsed_ms = stage5_start.elapsed().as_millis() as u64,
+        per_photo_ms = if new_photo_count > 0 {
+            (stage5_start.elapsed().as_millis() as u64) / new_photo_count as u64
+        } else {
+            0
+        },
+        "import pipeline: stage 5 (faces) done"
+    );
 
     // ── Finalise the imports row ─────────────────────────────────────────────
     let imported_count = imported.load(Ordering::Relaxed);
@@ -599,6 +822,42 @@ async fn execute_pipeline(
     if let Err(e) = crate::commands::refresh_album_counts(&pool).await {
         tracing::warn!(error = %e, "smart album refresh failed after import");
     }
+
+    // Re-run face clustering over all faces now that Stage 5 has added new
+    // embeddings. Best-effort — log and continue on failure. The People
+    // screen depends on this; without it `faces.cluster_id` stays NULL and
+    // `face_clusters_list()` returns empty.
+    let recluster_start = Instant::now();
+    match crate::ai::cluster_persist::reeval_clusters(&pool).await {
+        Ok(receipt) => tracing::info!(
+            import_id,
+            total_faces = receipt.total_faces,
+            clustered_faces = receipt.clustered_faces,
+            cluster_count = receipt.cluster_count,
+            named_preserved = receipt.named_preserved,
+            new_clusters = receipt.new_clusters,
+            pruned_empty = receipt.pruned_empty,
+            elapsed_ms = recluster_start.elapsed().as_millis() as u64,
+            "reeval_clusters: done"
+        ),
+        Err(e) => tracing::warn!(error = %e, "reeval_clusters: failed"),
+    }
+
+    tracing::info!(
+        import_id,
+        total,
+        new_photo_count,
+        imported_count,
+        skipped_count,
+        error_count,
+        total_elapsed_ms = pipeline_start.elapsed().as_millis() as u64,
+        per_photo_ms = if total > 0 {
+            (pipeline_start.elapsed().as_millis() as u64) / total as u64
+        } else {
+            0
+        },
+        "import pipeline: done"
+    );
 
     Ok(ImportResult {
         import_id,
