@@ -199,6 +199,17 @@ export async function recycleSourceCopies(photoIds: number[]): Promise<RecycleRe
   return tauriInvoke<RecycleReceipt>('recycle_source_copies', { photoIds });
 }
 
+/**
+ * Post-copy auditable recycle: sends every file under `sourceId` to the
+ * OS trash, but only when another verified copy of the same photo exists
+ * on a different source (i.e. the lift-and-shift catalog write has
+ * completed + SHA-matched). Wired to the "Delete originals from source
+ * after copy" checkbox in `AddSourcePopover`'s confirmation dialog.
+ */
+export async function recycleSourceFilesAfterCopy(sourceId: number): Promise<RecycleReceipt> {
+  return tauriInvoke<RecycleReceipt>('recycle_source_files_after_copy', { sourceId });
+}
+
 // ── Import commands ─────────────────────────────────────────────────────────
 
 export interface StartImportResponse {

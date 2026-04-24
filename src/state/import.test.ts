@@ -11,7 +11,8 @@ describe('useImportStore', () => {
       importId: 1,
       sourceId: 10,
       sourceName: 'A',
-      mode: 'index_in_place',
+      mode: 'consolidate',
+      deleteAfterCopy: false,
     });
     const row = useImportStore.getState().active.get(1);
     expect(row).toBeDefined();
@@ -25,6 +26,7 @@ describe('useImportStore', () => {
       sourceId: 20,
       sourceName: 'B',
       mode: 'consolidate',
+      deleteAfterCopy: false,
     });
     useImportStore.getState().applyProgress({
       import_id: 2,
@@ -70,7 +72,8 @@ describe('useImportStore', () => {
       importId: 3,
       sourceId: 30,
       sourceName: 'C',
-      mode: 'index_in_place',
+      mode: 'consolidate',
+      deleteAfterCopy: false,
     });
     useImportStore.getState().dismiss(3);
     expect(useImportStore.getState().active.has(3)).toBe(false);

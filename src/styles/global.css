@@ -1834,8 +1834,12 @@ select {
   background: var(--bg);
   border: 1px solid var(--stroke);
   border-radius: 8px;
-  height: 140px;
+  aspect-ratio: 1 / 1;
   overflow: hidden;
+  /* Clamp the height so the panel doesn't balloon on very wide
+     inspectors — on narrow ones the square aspect wins. */
+  max-height: 240px;
+  margin: 0 auto;
 }
 .curves-box svg {
   width: 100%;

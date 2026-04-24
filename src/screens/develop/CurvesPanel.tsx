@@ -283,9 +283,21 @@ function curveIsIdentity(c: DevelopCurve): boolean {
 function buildCurvePath(curve: DevelopCurve): string {
   // Readonly helpers so TS's tuple-element narrowing doesn't fight the
   // indexing we do inside the sampling loop.
+  //
+  // Endpoint mirror trick: the Catmull-Rom spline wants a "before" and
+  // "after" point to shape tangents at the segment boundaries. We
+  // reflect the second point through the first (and the second-to-last
+  // through the last) so the tangent at the endpoint points straight
+  // at its neighbour. Formula: p_virt = 2*p_end - p_neighbour.
+  // Reflecting through the origin (old bug) left the virtual point on
+  // top of the endpoint for an identity curve, producing a kink.
   const pt = (i: number): readonly [number, number] => {
-    if (i === 0) return [-curve[0][0], -curve[0][1]];
-    if (i === 6) return [2 - curve[4][0], 2 - curve[4][1]];
+    if (i === 0) {
+      return [2 * curve[0][0] - curve[1][0], 2 * curve[0][1] - curve[1][1]];
+    }
+    if (i === 6) {
+      return [2 * curve[4][0] - curve[3][0], 2 * curve[4][1] - curve[3][1]];
+    }
     return curve[i - 1] as readonly [number, number];
   };
 

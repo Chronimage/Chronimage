@@ -18,11 +18,12 @@ describe('CatalogScreen', () => {
     expect(screen.getByPlaceholderText(/ask your library/i)).toBeInTheDocument();
   });
 
-  it('renders the empty state mode chooser when there are no sources + no photos', () => {
+  it('renders the empty-state source picker when there are no sources + no photos', () => {
     render(<CatalogScreen albumId="all" />, { wrapper });
-    // The mode chooser is the first thing a fresh user sees — no wizard, just
-    // the "pick a mode before you can add a source" panel.
-    expect(screen.getByText(/WHEN I IMPORT/i)).toBeInTheDocument();
+    // The source picker is the first thing a fresh user sees. The mode
+    // chooser was removed when copy-to-catalog became the only mode;
+    // now the picker leads with a policy banner + three action buttons.
+    expect(screen.getByText(/CHRONIMAGE ALWAYS COPIES/i)).toBeInTheDocument();
     expect(screen.getByText(/Add a folder/i)).toBeInTheDocument();
   });
 });

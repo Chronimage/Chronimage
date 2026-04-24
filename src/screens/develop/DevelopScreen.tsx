@@ -444,9 +444,10 @@ function DevelopStageSplit({
               onClick={() => setFocusedIdx(i)}
               title={p.filename}
             >
-              <Placeholder
+              <Thumbnail
+                photoId={p.id}
+                sizePx={160}
                 photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
-                showLabel={false}
               />
             </button>
           ))}

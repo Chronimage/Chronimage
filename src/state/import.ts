@@ -6,23 +6,40 @@
  * React root via `useImportProgressListener()` so every screen (catalog
  * sidebar, status bar, etc.) sees the same state.
  *
- * `mode` on each import is captured at start time from the user's current
- * `default_import_mode` setting — it determines whether the frontend
- * auto-fires a lift-and-shift after the import finishes.
+ * Every import copies into the catalog (there is no "index in place" mode).
+ * The `deleteAfterCopy` flag on each import is captured at start time and
+ * read by the post-import auto-chain: once the lift-and-shift finishes
+ * verifying + writing the catalog copies, the originals on the source
+ * disk are recycled if the flag is set.
  */
 
 import { listen } from '@tauri-apps/api/event';
 import { useEffect, useMemo } from 'react';
 import { create } from 'zustand';
-import { IMPORT_PROGRESS_EVENT, type ImportProgressEvent } from '../tauri/invoke';
+import {
+  IMPORT_PROGRESS_EVENT,
+  type ImportProgressEvent,
+  liftShiftDryRun,
+  liftShiftExecute,
+  recycleSourceFilesAfterCopy,
+} from '../tauri/invoke';
+import { debug, warn } from '../util/log';
 
-export type ImportMode = 'index_in_place' | 'consolidate';
+/**
+ * Legacy shape kept only so older persisted `default_import_mode`
+ * values deserialize cleanly — the app ignores the variant and always
+ * copies into the catalog now.
+ */
+export type ImportMode = 'consolidate';
 
 export interface ActiveImport {
   importId: number;
   sourceId: number;
   sourceName: string;
   mode: ImportMode;
+  /** When true, the source files are recycled after the post-import
+   *  lift-and-shift verifies the catalog copies. */
+  deleteAfterCopy: boolean;
   total: number;
   done: number;
   currentFile: string;
@@ -61,6 +78,14 @@ export const useImportStore = create<ImportState>((set) => ({
   applyProgress: (e) =>
     set((s) => {
       const existing = s.active.get(e.import_id);
+      const wasFinished = existing?.finished ?? false;
+      // Side-effect: once an import flips to finished, kick off the
+      // post-import auto-chain (lift-shift + optional source recycle).
+      // Done via setTimeout so we don't fire inside a Zustand set().
+      const nowFinished = e.done >= e.total && e.total > 0;
+      if (!wasFinished && nowFinished) {
+        schedulePostImportChain(existing?.sourceId ?? e.source_id, existing?.deleteAfterCopy ?? false);
+      }
       if (!existing) {
         // Progress for an import we never registered (e.g. app restart
         // mid-import) — create a minimal row so the UI still shows it.
@@ -69,7 +94,8 @@ export const useImportStore = create<ImportState>((set) => ({
           importId: e.import_id,
           sourceId: e.source_id,
           sourceName: `Source ${e.source_id}`,
-          mode: 'index_in_place',
+          mode: 'consolidate',
+          deleteAfterCopy: false,
           total: e.total,
           done: e.done,
           currentFile: e.current_file,
@@ -97,6 +123,55 @@ export const useImportStore = create<ImportState>((set) => ({
     }),
   reset: () => set({ active: new Map() }),
 }));
+
+/**
+ * Queue the post-import auto-chain: lift-and-shift the just-imported
+ * source's photos into the catalog, then (if `deleteAfterCopy`) recycle
+ * the original source files that now have a verified catalog copy.
+ *
+ * Scheduled via `setTimeout` so it fires outside the current Zustand
+ * `set()` transaction. Fire-and-forget — errors surface as tracing
+ * warnings, never as unhandled rejections.
+ */
+function schedulePostImportChain(sourceId: number, deleteAfterCopy: boolean): void {
+  setTimeout(() => {
+    runPostImportChain(sourceId, deleteAfterCopy).catch((err) => warn('post-import chain failed', err));
+  }, 0);
+}
+
+/**
+ * Run the catalog lift-and-shift for every unlifted source copy, then
+ * (optionally) recycle the original source files. Designed to be safe
+ * to run multiple times: `plan_lift` skips photos that already live
+ * under the catalog root, and `recycle_source_files_after_copy`
+ * requires a verified surviving copy before it recycles anything.
+ *
+ * The catalog root comes from the user's `default_catalog_path` via
+ * `lift_shift_dry_run` itself — we don't pass it explicitly so existing
+ * user-picked overrides in Settings are respected.
+ */
+async function runPostImportChain(sourceId: number, deleteAfterCopy: boolean): Promise<void> {
+  // Resolve the catalog root lazily so tests that mock the import store
+  // without booting Tauri don't need to stub this path.
+  const { useUi } = await import('./ui');
+  const catalogRoot =
+    useUi.getState().tweaks.cachePath ??
+    (await import('../tauri/invoke').then((m) => m.getDefaultCatalogPath()).catch(() => null));
+  if (!catalogRoot) {
+    warn('post-import chain: no catalog root resolved, skipping lift-shift');
+    return;
+  }
+  const plan = await liftShiftDryRun(catalogRoot);
+  if (plan.total_file_count === 0) {
+    debug('post-import chain: lift-shift plan empty (nothing to copy)');
+  } else {
+    await liftShiftExecute(plan.plan_id, plan.confirm_token);
+  }
+  if (deleteAfterCopy) {
+    const receipt = await recycleSourceFilesAfterCopy(sourceId);
+    debug('post-import chain: recycle', receipt);
+  }
+}
 
 /**
  * Convenience selector that returns active imports as a sorted array. Sort is

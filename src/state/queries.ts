@@ -24,6 +24,7 @@ import {
   getDiskInfo,
   getThumbnail,
   IMPORT_PROGRESS_EVENT,
+  importDryRun,
   importGoogleTakeout,
   type LiftPlan,
   type LiftReceipt,
@@ -124,6 +125,23 @@ export function useImports(sourceId?: number) {
   return useQuery({
     queryKey: ['imports', sourceId],
     queryFn: () => listImports(sourceId),
+  });
+}
+
+/**
+ * Dry-run a folder scan (no writes) and return the count / pairs / per-
+ * extension breakdown. Used by the copy-confirmation dialog to tell the
+ * user how many photos are about to be copied before they hit OK.
+ *
+ * `null` root disables the query so the dialog can mount/unmount without
+ * spurious scans.
+ */
+export function useScanPreview(root: string | null) {
+  return useQuery({
+    queryKey: ['scan_preview', root],
+    queryFn: () => importDryRun(root as string),
+    enabled: root !== null,
+    staleTime: 30_000,
   });
 }
 

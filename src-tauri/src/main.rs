@@ -171,6 +171,7 @@ fn main() {
             commands::remove_photos_preview,
             commands::remove_photos_from_catalog,
             commands::recycle_source_copies,
+            commands::recycle_source_files_after_copy,
             commands::recluster_faces,
             commands::rebuild_thumbnails,
             commands::cull_apply_verdict,

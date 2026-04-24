@@ -253,11 +253,20 @@ fn s_curve(x: f32, k: f32) -> f32 {
 fn bake_lut(curve: &Curve) -> [f32; 256] {
     let mut out = [0.0f32; 256];
     // Extend with virtual endpoints so the Catmull-Rom spline behaves
-    // at the boundaries. Virtual left = mirror of point 0 over x=0.
-    // Virtual right = mirror of point 4 over x=1. Both clamped to
-    // [-1, 2] — well outside the image's [0, 1] range.
-    let p0 = [-curve[0][0], -curve[0][1]];
-    let pn = [2.0 - curve[4][0], 2.0 - curve[4][1]];
+    // at the boundaries. Reflect the neighbour through the endpoint:
+    //   p_virt = 2 * p_end - p_neighbour
+    // This makes the tangent at the endpoint point straight toward
+    // the neighbour — an identity curve stays a straight diagonal.
+    // The earlier `[-p[0], -p[0]]` formula reflected through the
+    // origin and produced a kink on any curve touching (0, 0).
+    let p0 = [
+        2.0 * curve[0][0] - curve[1][0],
+        2.0 * curve[0][1] - curve[1][1],
+    ];
+    let pn = [
+        2.0 * curve[4][0] - curve[3][0],
+        2.0 * curve[4][1] - curve[3][1],
+    ];
     let pts: [[f32; 2]; 7] = [p0, curve[0], curve[1], curve[2], curve[3], curve[4], pn];
 
     for (i, out_slot) in out.iter_mut().enumerate() {
@@ -459,6 +468,22 @@ mod tests {
         assert!((lut[255] - 1.0).abs() < 1e-3);
         // Mid sample should be ~0.5.
         assert!((lut[128] - 128.0 / 255.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn identity_lut_is_straight_line_everywhere() {
+        // Regression: the old endpoint-mirror formula (`[-p[0], -p[0]]`)
+        // produced a kink at both endpoints on the identity curve.
+        // A straight-line identity must map lut[i] ≈ i / 255 across
+        // every sample, not just the endpoints + midpoint.
+        let lut = super::bake_lut(&super::identity_curve());
+        for (i, &actual) in lut.iter().enumerate() {
+            let expected = i as f32 / 255.0;
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "lut[{i}] was {actual} — expected {expected}"
+            );
+        }
     }
 
     #[test]
