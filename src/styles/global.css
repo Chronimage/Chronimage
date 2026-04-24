@@ -2309,6 +2309,42 @@ select {
   background: color-mix(in oklch, var(--danger, #d66) 10%, transparent);
   font-size: 11px;
 }
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.shortcuts-table thead th {
+  font-family: var(--mono-font);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  border-bottom: 1px solid var(--stroke);
+  font-weight: 400;
+}
+.shortcuts-table tbody tr {
+  border-bottom: 1px solid var(--stroke);
+}
+.shortcuts-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+.map-cluster-icon > div {
+  text-align: center;
+  color: #fff;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  font-weight: 600;
+  background: #2f7d64;
+  border: 2px solid #5ae3b6;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+.map-cluster-icon:hover > div {
+  background: #5ae3b6;
+  color: #0b1c17;
+}
 
 /* --- Phase 4 · Map · trip cards --- */
 .trip-card {

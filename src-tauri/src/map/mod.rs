@@ -15,6 +15,7 @@
 //!   mean of lat/lng), and `radius_km` = max distance of any photo
 //!   from the centroid.
 
+pub mod geocode;
 pub mod trips;
 
 pub use trips::{list_trips, photos_in_trip, recompute_trips, RecomputeReceipt, TripRow};

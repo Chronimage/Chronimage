@@ -11,11 +11,60 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import L from 'leaflet';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CircleMarker, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet';
+import { CircleMarker, MapContainer, Marker, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { Icon } from '../../primitives/Icon';
 import { Thumbnail } from '../../primitives/Thumbnail';
 import { mapListTrips, mapPhotosInTrip, mapRecomputeTrips, type TripRow } from '../../tauri/invoke';
+
+interface PinCluster {
+  center_lat: number;
+  center_lng: number;
+  trips: TripRow[];
+}
+
+/** Group trips into screen-space buckets using ~80 px cells at the
+ *  current zoom. When two or more trip centroids project into the same
+ *  cell they render as a single counted cluster pin. */
+function clusterTrips(trips: TripRow[], map: L.Map | null): PinCluster[] {
+  if (!map || trips.length === 0) {
+    return trips.map((t) => ({
+      center_lat: t.center_lat,
+      center_lng: t.center_lng,
+      trips: [t],
+    }));
+  }
+  const CELL_PX = 80;
+  const buckets = new Map<string, PinCluster>();
+  for (const t of trips) {
+    const pt = map.project([t.center_lat, t.center_lng], map.getZoom());
+    const cx = Math.floor(pt.x / CELL_PX);
+    const cy = Math.floor(pt.y / CELL_PX);
+    const key = `${cx}:${cy}`;
+    const existing = buckets.get(key);
+    if (existing) {
+      existing.trips.push(t);
+      existing.center_lat =
+        (existing.center_lat * (existing.trips.length - 1) + t.center_lat) / existing.trips.length;
+      existing.center_lng =
+        (existing.center_lng * (existing.trips.length - 1) + t.center_lng) / existing.trips.length;
+    } else {
+      buckets.set(key, { center_lat: t.center_lat, center_lng: t.center_lng, trips: [t] });
+    }
+  }
+  return [...buckets.values()];
+}
+
+/** DivIcon for a cluster pin — accent circle with count. */
+function clusterIcon(count: number): L.DivIcon {
+  const size = Math.min(48, 22 + Math.sqrt(count) * 4);
+  return L.divIcon({
+    className: 'map-cluster-icon',
+    html: `<div style="width:${size}px;height:${size}px;line-height:${size}px;">${count}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
 
 function fmtDate(iso: string): string {
   try {
@@ -48,6 +97,81 @@ function tripsBounds(trips: TripRow[]): L.LatLngBoundsExpression | null {
   return bounds.isValid() ? bounds : null;
 }
 
+/** Render filtered trips with zoom-aware screen-space clustering. Single
+ *  trips keep the CircleMarker look; shared cells collapse into a count
+ *  badge that zooms in on click. */
+function ClusteredMarkers({
+  trips,
+  focusedTripId,
+  setFocusedTripId,
+}: {
+  trips: TripRow[];
+  focusedTripId: number | null;
+  setFocusedTripId: (id: number) => void;
+}) {
+  const map = useMap();
+  const [zoom, setZoom] = useState<number>(map.getZoom());
+  useMapEvents({
+    zoomend: () => setZoom(map.getZoom()),
+    moveend: () => setZoom(map.getZoom()),
+  });
+  const clusters = useMemo(() => clusterTrips(trips, map), [trips, map, zoom]);
+
+  return (
+    <>
+      {clusters.map((c) => {
+        if (c.trips.length > 1) {
+          const totalPhotos = c.trips.reduce((s, t) => s + t.photo_count, 0);
+          return (
+            <Marker
+              key={`cluster-${c.center_lat.toFixed(3)}-${c.center_lng.toFixed(3)}-${c.trips.length}`}
+              position={[c.center_lat, c.center_lng]}
+              icon={clusterIcon(c.trips.length)}
+              eventHandlers={{
+                click: () => map.flyTo([c.center_lat, c.center_lng], Math.min(map.getZoom() + 2, 14)),
+              }}
+            >
+              <Popup>
+                <strong>
+                  {c.trips.length} trips · {totalPhotos} photos
+                </strong>
+                <br />
+                Click to zoom in.
+              </Popup>
+            </Marker>
+          );
+        }
+        const t = c.trips[0];
+        if (!t) return null;
+        const isFocused = focusedTripId === t.id;
+        return (
+          <CircleMarker
+            key={t.id}
+            center={[t.center_lat, t.center_lng]}
+            radius={radiusForCount(t.photo_count)}
+            pathOptions={{
+              color: isFocused ? '#5ae3b6' : '#2f7d64',
+              fillColor: isFocused ? '#5ae3b6' : '#4fb8a0',
+              fillOpacity: isFocused ? 0.9 : 0.7,
+              weight: isFocused ? 2 : 1,
+            }}
+            eventHandlers={{ click: () => setFocusedTripId(t.id) }}
+          >
+            <Popup>
+              <strong>{t.name ?? fmtCoords(t.center_lat, t.center_lng)}</strong>
+              <br />
+              {fmtDate(t.start_at)}
+              {t.start_at !== t.end_at ? ` → ${fmtDate(t.end_at)}` : ''}
+              <br />
+              {t.photo_count} photo{t.photo_count === 1 ? '' : 's'}
+            </Popup>
+          </CircleMarker>
+        );
+      })}
+    </>
+  );
+}
+
 /** Fits the map to the current trip bounds whenever they change. */
 function FitBoundsOnTrips({ trips }: { trips: TripRow[] }) {
   const map = useMap();
@@ -74,10 +198,22 @@ export function MapScreen() {
   });
 
   const [focusedTripId, setFocusedTripId] = useState<number | null>(null);
+  const [timeRange, setTimeRange] = useState<'7d' | '30d' | '1y' | 'all'>('all');
+
+  const filteredTrips = useMemo(() => {
+    if (timeRange === 'all') return trips;
+    const daysByRange = { '7d': 7, '30d': 30, '1y': 365 } as const;
+    const days = daysByRange[timeRange];
+    const cutoff = Date.now() - days * 86_400_000;
+    return trips.filter((t) => {
+      const ts = new Date(t.end_at).getTime();
+      return Number.isFinite(ts) && ts >= cutoff;
+    });
+  }, [trips, timeRange]);
 
   const focusedTrip = useMemo(
-    () => trips.find((t) => t.id === focusedTripId) ?? null,
-    [trips, focusedTripId],
+    () => filteredTrips.find((t) => t.id === focusedTripId) ?? null,
+    [filteredTrips, focusedTripId],
   );
 
   const { data: tripPhotos = [] } = useQuery({
@@ -106,10 +242,52 @@ export function MapScreen() {
             MAP · TRIPS
           </div>
           <div style={{ fontSize: 14, marginTop: 2 }}>
-            {trips.length} trip{trips.length === 1 ? '' : 's'} · GPS-tagged photos clustered
+            {filteredTrips.length} trip{filteredTrips.length === 1 ? '' : 's'} · GPS-tagged photos clustered
+            {timeRange !== 'all' && trips.length !== filteredTrips.length && (
+              <span className="mono" style={{ marginLeft: 8, color: 'var(--fg-mute)', fontSize: 11 }}>
+                (of {trips.length})
+              </span>
+            )}
           </div>
         </div>
         <div style={{ flex: 1 }} />
+        <div
+          className="mono"
+          role="tablist"
+          aria-label="Time range"
+          style={{
+            display: 'flex',
+            gap: 4,
+            fontSize: 11,
+            marginRight: 8,
+            padding: 3,
+            background: 'var(--bg-elev)',
+            border: '1px solid var(--stroke)',
+            borderRadius: 'var(--radius-sm)',
+          }}
+        >
+          {(['7d', '30d', '1y', 'all'] as const).map((r) => (
+            <button
+              key={r}
+              type="button"
+              role="tab"
+              aria-selected={timeRange === r}
+              onClick={() => setTimeRange(r)}
+              style={{
+                padding: '3px 10px',
+                borderRadius: 4,
+                border: 'none',
+                cursor: 'pointer',
+                background: timeRange === r ? 'var(--accent)' : 'transparent',
+                color: timeRange === r ? 'var(--bg)' : 'var(--fg-mute)',
+                fontFamily: 'var(--mono-font)',
+                fontSize: 11,
+              }}
+            >
+              {r === 'all' ? 'All' : r}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           className="btn"
@@ -121,7 +299,7 @@ export function MapScreen() {
         </button>
       </div>
 
-      {trips.length === 0 ? (
+      {filteredTrips.length === 0 ? (
         <div
           style={{
             flex: 1,
@@ -157,7 +335,7 @@ export function MapScreen() {
         >
           <div className="map-canvas" style={{ borderBottom: '1px solid var(--stroke)' }}>
             <MapContainer
-              center={[trips[0]?.center_lat ?? 0, trips[0]?.center_lng ?? 0]}
+              center={[filteredTrips[0]?.center_lat ?? 0, filteredTrips[0]?.center_lng ?? 0]}
               zoom={4}
               scrollWheelZoom={true}
               style={{ width: '100%', height: '100%', background: 'var(--bg-elev)' }}
@@ -166,35 +344,12 @@ export function MapScreen() {
                 attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                 url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
-              <FitBoundsOnTrips trips={trips} />
-              {trips.map((t) => {
-                const isFocused = focusedTripId === t.id;
-                return (
-                  <CircleMarker
-                    key={t.id}
-                    center={[t.center_lat, t.center_lng]}
-                    radius={radiusForCount(t.photo_count)}
-                    pathOptions={{
-                      // Leaflet SVG strokes don't resolve CSS vars — use
-                      // literal mint tones that track the design tokens.
-                      color: isFocused ? '#5ae3b6' : '#2f7d64',
-                      fillColor: isFocused ? '#5ae3b6' : '#4fb8a0',
-                      fillOpacity: isFocused ? 0.9 : 0.7,
-                      weight: isFocused ? 2 : 1,
-                    }}
-                    eventHandlers={{ click: () => setFocusedTripId(t.id) }}
-                  >
-                    <Popup>
-                      <strong>{t.name ?? fmtCoords(t.center_lat, t.center_lng)}</strong>
-                      <br />
-                      {fmtDate(t.start_at)}
-                      {t.start_at !== t.end_at ? ` → ${fmtDate(t.end_at)}` : ''}
-                      <br />
-                      {t.photo_count} photo{t.photo_count === 1 ? '' : 's'}
-                    </Popup>
-                  </CircleMarker>
-                );
-              })}
+              <FitBoundsOnTrips trips={filteredTrips} />
+              <ClusteredMarkers
+                trips={filteredTrips}
+                focusedTripId={focusedTripId}
+                setFocusedTripId={setFocusedTripId}
+              />
             </MapContainer>
           </div>
 
@@ -209,7 +364,7 @@ export function MapScreen() {
                 gap: 6,
               }}
             >
-              {trips.map((t: TripRow) => (
+              {filteredTrips.map((t: TripRow) => (
                 <button
                   key={t.id}
                   type="button"
