@@ -957,3 +957,31 @@ export async function removeUserTag(photoIds: number[], label: string): Promise<
 export async function renameUserTag(oldLabel: string, newLabel: string): Promise<number> {
   return tauriInvoke<number>('rename_user_tag', { oldLabel, newLabel });
 }
+
+// ── Phase 2 §6: Cloud upload adapters ─────────────────────────────────────────
+
+export interface UploadReceipt {
+  uploaded_count: number;
+  skipped_count: number;
+  errors: string[];
+}
+
+/** True iff the stored Google Photos token already carries the
+ * `photoslibrary.appendonly` scope. When false, the frontend should
+ * trigger a fresh OAuth flow before calling `gphotosUpload`. */
+export async function gphotosUploadScopeOk(): Promise<boolean> {
+  return tauriInvoke<boolean>('gphotos_upload_scope_ok');
+}
+
+export async function gphotosUpload(photoIds: number[]): Promise<UploadReceipt> {
+  return tauriInvoke<UploadReceipt>('gphotos_upload', { photoIds });
+}
+
+/** True iff OneDrive OAuth tokens are in keyring. */
+export async function onedriveAuthStatus(): Promise<boolean> {
+  return tauriInvoke<boolean>('onedrive_auth_status');
+}
+
+export async function onedriveUpload(photoIds: number[], remoteFolder: string): Promise<UploadReceipt> {
+  return tauriInvoke<UploadReceipt>('onedrive_upload', { photoIds, remoteFolder });
+}

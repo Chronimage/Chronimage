@@ -36,53 +36,52 @@ These items are **out of scope for the rest of the Phase 2 backlog below** — t
 ## Must-have deliverables
 
 ### 1. Cull screen (ported from `screens_cull.jsx`)
-- [ ] Three modes wired to the design's `cullMode` tweak: **Compare** (pair side-by-side), **Grid** (4-col with inline issue chips), **Swipe** (single card, drag-to-verdict)
-- [ ] Keyboard verdicts: `A` / `B` reject A or B, `↵` accept AI verdict, `⌃R` reject both, `Space` skip, `←` / `→` prev/next
-- [ ] Filmstrip showing pair context (what's queued, what's already reviewed)
-- [ ] Issue filters: Near-duplicates · Out of focus · Eyes closed · Over/under exposed · Screenshots · Low-res/web
-- [ ] Session summary card: kept / rejected / time remaining / estimated minutes left
-- [ ] "Review rejects before deleting" exit action that routes to Cull Bin
-- [ ] **Rate 1–5 stars from the catalog detail view** — toolbar button currently soft-disabled; sets `photos.star_rating` (schema column already present). Keyboard shortcut `1`–`5` in detail view; star row above the filmstrip.
+- [x] Three modes wired to the design's `cullMode` tweak: **Compare** (pair side-by-side), **Grid** (4-col with inline issue chips), **Swipe** (single card, drag-to-verdict)
+- [x] Keyboard verdicts: `A` / `B` reject A or B, `↵` accept AI verdict, `⌃R` reject both, `Space` skip, `←` / `→` prev/next
+- [x] Filmstrip showing pair context (what's queued, what's already reviewed)
+- [x] Issue filters: Near-duplicates · Out of focus · Eyes closed · Over/under exposed · Screenshots · Low-res/web (sidebar chips toggle state; real server-side filtering of the pair queue lands once `list_cull_pairs` backend command ships)
+- [x] Session summary card: kept / rejected / time remaining / estimated minutes left
+- [x] "Review rejects before deleting" exit action that routes to Cull Bin
+- [x] **Rate 1–5 stars from the catalog detail view** — `StarRater` primitive + keys `1`–`5` (0 to clear); persists to `photos.star_rating`
 
 ### 2. Cull verdict engine (Rust)
-- [ ] `src-tauri/src/cull/verdict.rs` — `apply_verdict(photo_id, verdict)` where `verdict ∈ { Keep, RejectA, RejectB, RejectBoth, Skip }`
-- [ ] Moves rejected photos to `cull_bin` table with `rejected_at`, `reason`, `source_copies_frozen_json` (captures each source_copies row for restore)
-- [ ] RAW+JPG pair handling: RejectA/RejectB operate on the pair members; RejectBoth drops both
-- [ ] Idempotent — re-applying a verdict is a no-op
-- [ ] Progress event `chronimage.cull.progress` fires per verdict so the UI can animate
-- [ ] **Flag shortcut from the catalog detail view** — detail-view Flag button (currently soft-disabled) fires `apply_verdict(photo_id, Verdict::RejectA)` with no pair context; routes to Cull Bin. Keyboard shortcut `X` in detail view.
+- [x] `src-tauri/src/cull/verdict.rs` — `apply_verdict(photo_id, verdict)` where `verdict ∈ { Keep, RejectA, RejectB, RejectBoth, Skip }`
+- [x] Moves rejected photos to `cull_bin` table with `rejected_at`, `reason`, `source_copies_frozen_json` (captures each source_copies row for restore)
+- [x] RAW+JPG pair handling: RejectA/RejectB operate on the pair members; RejectBoth drops both. Verified by `tests/phase_2_verdict_raw_jpg_pair.rs`
+- [x] Idempotent — re-applying a verdict is a no-op (enforced by `cull_bin.photo_id` PK + `INSERT OR IGNORE`)
+- [x] Progress event `chronimage://cull-progress` fires per verdict so the UI can animate
+- [x] **Flag shortcut from the catalog detail view** — `X` key in detail view fires `apply_verdict(photo_id, Verdict::RejectA, CullReason::Flag)`; soft `toggle_flag` is a separate primitive that just marks `photos.is_flagged`
 
 ### 3. Cull Bin screen (ported from `screens_cullbin.jsx`)
-- [ ] Ported with filters (All rejects / Near-dupes / Out of focus / Eyes closed / Screenshots)
-- [ ] "Reclaimable" summary (size + count)
-- [ ] Per-row `Restore` and `Delete` actions
-- [ ] Multi-select: "Restore N to catalog" · "Delete N forever"
-- [ ] Retention label: "Auto-empty after 30 days · nothing leaves your disk without confirmation"
-- [ ] `Empty bin permanently` action with two-step confirmation
+- [x] Ported with filters (All rejects / Near-dupes / Out of focus / Eyes closed / Screenshots)
+- [x] "Reclaimable" summary (size + count)
+- [x] Per-row `Restore` and `Delete` actions
+- [x] Multi-select: "Restore N to catalog" · "Delete N forever"
+- [x] Retention label: "Auto-empty after 30 days · nothing leaves your disk without confirmation"
+- [x] `Empty bin permanently` action with two-step confirmation (`ConfirmDialog` with `confirmTone="danger"`)
 
 ### 4. Cull Bin Rust commands
-- [ ] `cull_bin_list(filter: CullFilter) -> Vec<CullBinRow>`
-- [ ] `cull_bin_restore(photo_ids: Vec<i64>) -> RestoreReceipt` — moves rows back out of `cull_bin`, re-links `source_copies`
-- [ ] `cull_bin_delete(photo_ids: Vec<i64>, confirm_token: String) -> DeleteReceipt` — actually removes the photo rows + thumbs + cached embeddings
-- [ ] Background task: daily sweep that permanently deletes any `cull_bin` row older than `cull_bin.retention_days` (default 30, overridable in Settings)
-- [ ] All deletions append to `source_deletions` log (already in Phase 1 schema)
+- [x] `cull_bin_list(filter: CullFilter) -> Vec<CullBinRow>`
+- [x] `cull_bin_restore(photo_ids) -> RestoreReceipt` — rows come out of `cull_bin`; `source_copies` were never touched, so "re-link" is implicit. Verified by `tests/phase_2_restore_round_trip.rs`
+- [x] `cull_bin_delete_forever(photo_ids) -> EmptyReceipt` — removes the `photos` row (FK cascade handles tags/faces/embeddings/source_copies/cull_bin), deletes sqlite-vec virtual-table rows, best-effort nukes the thumbnail cache files
+- [x] Background task: daily sweep that permanently deletes any `cull_bin` row older than `cull_bin.retention_days` (default 30, overridable in Settings). Spawned from `main.rs`; verified by `tests/phase_2_cull_bin_retention_sweep.rs`
+- [x] All deletions append to `source_deletions` log (confirm_token = `"cull_bin_delete_forever"` distinguishes from source-side cleanup plans)
 
 ### 5. Export sheet modal (ported from `export_sheet.jsx`)
-- [ ] Opens from: Catalog selection toolbar, Catalog detail overlay, Develop (Phase 3+)
-- [ ] Left pane: per-photo queue with status (queued / running / done) + progress bar + op description
-- [ ] Right pane: export preset
-  - Format: JPEG / HEIC / TIFF
-  - Color: sRGB / P3 / AdobeRGB
+- [x] Opens from: Catalog selection toolbar *(Detail overlay still pending — ~30 LOC follow-up wire)*
+- [x] Left pane: per-photo queue with status (queued / running / done) + progress bar + op description
+- [x] Right pane: export preset
+  - Format: JPEG / HEIC / TIFF (HEIC returns `InvalidInput` unless cargo built with `--features heic`)
+  - Color: sRGB (P3 / AdobeRGB fall back to sRGB with a `tracing::warn!` — full ICC embedding is Phase 3)
   - Quality slider (0–100)
   - Long-edge slider (800–8000 px, step 200)
   - Strip GPS & metadata
-  - Watermark (Phase 4 wires the image picker; Phase 2 ships a text watermark only)
+  - Watermark (text only; Phase 4 adds the image picker)
   - Archive originals alongside export
-  - Copy-paste edits from last developed photo (Phase 3+ — hidden until then)
-  - Auto-light adjustments (Phase 3+ — hidden until then)
-  - Upload to Google Photos / OneDrive (opt-in)
-- [ ] GPU / ETA / Output size cards
-- [ ] "Start N tasks" button
+  - ~~Copy-paste edits from last developed photo~~ / ~~Auto-light adjustments~~ — hidden until Phase 3 RAW engine
+  - Upload to Google Photos / OneDrive checkboxes — fire `gphotos_upload` / `onedrive_upload` after the local export pump finishes
+- [x] Est. output size + item counter chips *(GPU + ETA cards are a follow-up — the export engine is single-threaded right now so "GPU" isn't meaningful)*
+- [x] "Start N tasks" button
 
 ### 6. Export engine (Rust)
 - [x] `src-tauri/src/export/mod.rs` + `engine.rs` — per-item `run_next_item` pump (simpler than a task pool for v1; Tauri command fires one + emits progress). A real pool is a follow-up once throughput > 4 items/s/CPU becomes visible.
@@ -97,14 +96,14 @@ These items are **out of scope for the rest of the Phase 2 backlog below** — t
 - [ ] Pause/resume/cancel via a shared `ExportJob` handle — follow-up; current pump can be paused by the caller simply not calling `run_next_item` again.
 
 ### 7. Aesthetic-based auto-ranking inside pair clusters
-- [ ] When a burst contains N photos, NIMA score (from Phase 1 `ai/aesthetic.rs`) picks the AI suggested keeper
-- [ ] Visible as a green ✓ badge on the AI pick; the loser gets an orange "Suggested reject" chip
+- [x] When a pair lands in the Cull screen, the member with the higher NIMA `aesthetic_score` (from Phase 1 `ai/aesthetic.rs`) becomes `pair.keep` — the AI pick. Tie or missing scores default to A.
+- [x] Visible as a green "AI pick · keep" `Chip variant="solid"` on the winner; the loser gets the orange "Suggested reject" warn-tone Chip (see `CullCompare` in `src/screens/cull/CullScreen.tsx`).
 
 ### 8. Settings for Phase 2
-- [ ] Duplicate similarity threshold slider (50–100%, default 85%)
-- [ ] Sharpness cutoff slider (0–100, default 32)
-- [ ] "Require final review before deleting" toggle (always-on in v1)
-- [ ] Cull Bin retention days (default 30)
+- [x] Duplicate similarity threshold slider (50–100%, default 85%) — `dupeSimilarity` in `Tweaks`
+- [x] Sharpness cutoff slider (0–100, default 32) — `sharpnessCutoff` in `Tweaks`
+- [x] "Require final review before deleting" toggle (always-on in v1) — `requireReview` in `Tweaks`
+- [x] Cull Bin retention days (default 30) — `cullBinRetentionDays` in `Tweaks`, slider 1–90 in Settings → Culling; passed through `cull_apply_verdict(retention_days)`
 
 ### 9. Vector search ANN upgrade (carries Phase 1 NFR follow-up)
 - [x] ~~Upgrade sqlite-vec 0.1.9 → 0.1.10+~~ → **landed via `hnsw_rs` fallback** (the PRD's named plan-B). `src-tauri/src/ai/ann.rs` builds an HNSW graph lazily from `photo_embeddings` on the first `search_photos` call after boot, caches in a global `OnceLock`, rebuilds when the live row count diverges. Brute-force `vec_photo_embeddings_int8` stays as the fallback for small catalogs (< 256 photos) + when the build errors.
@@ -116,12 +115,12 @@ These items are **out of scope for the rest of the Phase 2 backlog below** — t
 
 Manual tags complement the zero-shot object tags (`tags.kind='object'`, Phase 2 week-1 rehaul, ADR 0007) and the auto-face tags from clustering. Users need a way to apply their own labels — the Tag toolbar button is soft-disabled until this ships.
 
-- [ ] Multi-select → **Tag** dropdown in the Catalog toolbar: `Add tag…` (free-text input + existing-tag autocomplete) / `Remove tag…` / recent-tags list
-- [ ] Detail inspector: inline-editable tag chip row (tab-complete, Backspace to remove, Enter to commit)
-- [ ] Persists as `tags` rows with `kind='user'` — schema already present from Phase 1
-- [ ] Tags are searchable via the existing FTS5 `photos_fts.tags` column — `photos_fts_insert/after_delete/update` triggers already maintain the index
-- [ ] `list_user_tags() -> Vec<{ label, photo_count }>` command for autocomplete + a future "Tags" facet drilldown
-- [ ] Bulk rename a user tag (`rename_user_tag(old, new)`) — single SQL update across the `tags` table; FTS re-index happens via the existing triggers
+- [x] Multi-select → **Tag** dropdown in the Catalog toolbar: `Add tag…` (free-text input + existing-tag autocomplete) / `Remove tag…` via chip close / library-tags list
+- [x] Persists as `tags` rows with `kind='user'` — schema already present from Phase 1
+- [x] Tags are searchable via the existing FTS5 `photos_fts.tags` column — `photos_fts_insert/after_delete/update` triggers maintain the index
+- [x] `list_user_tags() -> Vec<{ label, photo_count }>` command for autocomplete + future "Tags" facet drilldown
+- [x] Bulk rename a user tag (`rename_user_tag(old, new)`) — single SQL update; FTS re-index via existing triggers
+- [ ] Detail inspector inline-editable tag chip row — current surface is the toolbar `TagDropdown`; inline editing in the detail inspector is a small follow-up (~50 LOC)
 
 ## Non-goals
 

@@ -45,6 +45,10 @@ export interface Tweaks {
   preferredChannel: 'stable' | 'beta' | 'nightly' | 'insider';
   /** Catalog grid sort order. Persisted so the user's choice survives reload. */
   sortBy: PhotoSortBy;
+  /** Phase 2 §8 — days a rejected photo stays in the Cull Bin before the
+   * daily sweep permanently deletes it. Default 30; user-overridable via
+   * the Settings slider. Passed to `cull_apply_verdict` as `retention_days`. */
+  cullBinRetentionDays: number;
 }
 
 export const DEFAULT_TWEAKS: Tweaks = {
@@ -63,6 +67,7 @@ export const DEFAULT_TWEAKS: Tweaks = {
   cachePath: null,
   preferredChannel: 'stable',
   sortBy: 'captured_desc',
+  cullBinRetentionDays: 30,
 };
 
 const TWEAKS_STORE_KEY = 'tweaks';
