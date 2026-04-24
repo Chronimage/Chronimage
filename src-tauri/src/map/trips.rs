@@ -157,9 +157,9 @@ pub async fn recompute_trips(pool: &SqlitePool) -> AppResult<RecomputeReceipt> {
         let start_at = b.photos.first().expect("non-empty").captured_at.clone();
         let end_at = b.photos.last().expect("non-empty").captured_at.clone();
 
-        let auto_name = crate::map::geocode::nearest_city(clat, clng)
-            .filter(|(_, d)| *d <= 250.0)
-            .map(|(c, _)| format!("{}, {}", c.name, c.country));
+        let auto_name = crate::map::geocode::nearest_any(clat, clng)
+            .filter(|c| c.distance_km <= 250.0)
+            .map(|c| format!("{}, {}", c.name, c.country));
 
         let trip_id: i64 = sqlx::query_scalar(
             "INSERT INTO trips \

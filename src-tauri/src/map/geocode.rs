@@ -156,9 +156,98 @@ pub const CITIES: &[City] = &[
     City { name: "Nairobi",      country: "KE", lat:  -1.2921, lng: 36.8219 },
 ];
 
-/// Return the closest city to the given coordinate along with the
-/// great-circle distance. `None` only when the table is empty (never in
-/// practice — the const array above is non-empty).
+/// An extended city entry loaded at runtime from GeoNames
+/// `cities15000.txt`. Uses owned `String`s because the data comes from
+/// disk, not a static TSV literal.
+#[derive(Debug, Clone)]
+pub struct ExtCity {
+    pub name: String,
+    pub country: String,
+    pub lat: f64,
+    pub lng: f64,
+}
+
+/// Process-wide cache of the extended list. Populated lazily on first
+/// geocoder call; absent when `cities15000.txt` isn't installed.
+static EXTENDED_CITIES: std::sync::OnceLock<Vec<ExtCity>> = std::sync::OnceLock::new();
+
+/// Resolve the GeoNames TSV path Chronimage looks at. Sibling of the
+/// data dir used by [`util::paths`]; the bundled scripts/fetch-geonames
+/// helpers write here.
+fn extended_cities_path() -> Option<std::path::PathBuf> {
+    let data = dirs::data_local_dir()?;
+    Some(
+        data.join(crate::APP_ID)
+            .join("geonames")
+            .join("cities15000.txt"),
+    )
+}
+
+/// Parse a TSV line from `cities15000.txt`. Columns (tab-separated):
+/// geonameid, name, asciiname, alternatenames, latitude, longitude,
+/// feature_class, feature_code, country_code, … (14 trailing fields).
+fn parse_geonames_row(line: &str) -> Option<ExtCity> {
+    let mut parts = line.split('\t');
+    let _geonameid = parts.next()?;
+    let name = parts.next()?;
+    let ascii = parts.next()?;
+    let _alt = parts.next()?;
+    let lat: f64 = parts.next()?.parse().ok()?;
+    let lng: f64 = parts.next()?.parse().ok()?;
+    let _feature_class = parts.next()?;
+    let _feature_code = parts.next()?;
+    let country = parts.next()?;
+    let display = if ascii.is_empty() { name } else { ascii };
+    Some(ExtCity {
+        name: display.to_string(),
+        country: country.to_string(),
+        lat,
+        lng,
+    })
+}
+
+fn load_extended_cities() -> Vec<ExtCity> {
+    let Some(path) = extended_cities_path() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(30_000);
+    for line in bytes.lines() {
+        if let Some(c) = parse_geonames_row(line) {
+            out.push(c);
+        }
+    }
+    tracing::info!(count = out.len(), path = %path.display(), "geonames: extended cities loaded");
+    out
+}
+
+fn extended_cities() -> &'static [ExtCity] {
+    EXTENDED_CITIES.get_or_init(load_extended_cities)
+}
+
+/// Return true when the runtime-loaded GeoNames table is available.
+pub fn extended_cities_available() -> bool {
+    !extended_cities().is_empty()
+}
+
+pub fn extended_cities_count() -> usize {
+    extended_cities().len()
+}
+
+/// Nearest-city result that can point into either the bundled const
+/// array or the runtime-loaded GeoNames table without forcing one type
+/// across both.
+pub struct NearestCity {
+    pub name: String,
+    pub country: String,
+    pub distance_km: f64,
+}
+
+/// Return the closest city to the given coordinate. Prefers the
+/// runtime-loaded GeoNames table when installed; falls back to the
+/// bundled 120-city const otherwise.
 pub fn nearest_city(lat: f64, lng: f64) -> Option<(&'static City, f64)> {
     let mut best: Option<(&'static City, f64)> = None;
     for c in CITIES {
@@ -170,14 +259,40 @@ pub fn nearest_city(lat: f64, lng: f64) -> Option<(&'static City, f64)> {
     best
 }
 
+/// Like [`nearest_city`] but searches the extended GeoNames table when
+/// available. Returns an owned [`NearestCity`] so callers don't need to
+/// branch on which table was used.
+pub fn nearest_any(lat: f64, lng: f64) -> Option<NearestCity> {
+    let ext = extended_cities();
+    if !ext.is_empty() {
+        let mut best: Option<(&ExtCity, f64)> = None;
+        for c in ext {
+            let d = haversine_km(lat, lng, c.lat, c.lng);
+            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((c, d));
+            }
+        }
+        return best.map(|(c, d)| NearestCity {
+            name: c.name.clone(),
+            country: c.country.clone(),
+            distance_km: d,
+        });
+    }
+    nearest_city(lat, lng).map(|(c, d)| NearestCity {
+        name: c.name.to_string(),
+        country: c.country.to_string(),
+        distance_km: d,
+    })
+}
+
 /// Human-readable label ("Bengaluru, IN") when the nearest bundled city
 /// is within `max_km`, otherwise a terse "lat,lng · XX" fallback.
 /// 250 km is a reasonable default — anything further risks a misleading
 /// label since the bundled table is coarse.
 pub fn label_for(lat: f64, lng: f64) -> String {
     const MAX_KM: f64 = 250.0;
-    match nearest_city(lat, lng) {
-        Some((c, d)) if d <= MAX_KM => format!("{}, {}", c.name, c.country),
+    match nearest_any(lat, lng) {
+        Some(c) if c.distance_km <= MAX_KM => format!("{}, {}", c.name, c.country),
         _ => format!("{lat:.3},{lng:.3}"),
     }
 }
@@ -288,6 +403,24 @@ mod tests {
     fn label_prefers_city_when_close() {
         let s = label_for(35.68, 139.65);
         assert_eq!(s, "Tokyo, JP");
+    }
+
+    #[test]
+    fn parse_geonames_row_extracts_name_country_coords() {
+        // Real-looking row — first 10 fields are what matter; trailing
+        // tabs are ignored.
+        let row = "1277333\tBengaluru\tBengaluru\tBangalore,Bengalooru,Bengaluru,Beñgalurû\t12.97194\t77.59369\tP\tPPLA\tIN\t\t19\t\t\t\t10178183\t920\t\t920\tAsia/Kolkata\t2019-09-05";
+        let c = parse_geonames_row(row).expect("parse");
+        assert_eq!(c.name, "Bengaluru");
+        assert_eq!(c.country, "IN");
+        assert!((c.lat - 12.97194).abs() < 1e-4);
+        assert!((c.lng - 77.59369).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parse_geonames_row_falls_through_on_garbage() {
+        assert!(parse_geonames_row("").is_none());
+        assert!(parse_geonames_row("bad\tdata").is_none());
     }
 
     #[tokio::test]
