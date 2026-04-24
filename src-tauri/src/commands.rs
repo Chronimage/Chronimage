@@ -4308,9 +4308,57 @@ pub async fn backfill_place_labels(
     crate::map::geocode::backfill_place_labels(&state.pool).await
 }
 
+#[derive(serde::Serialize)]
+pub struct GeonamesStatus {
+    pub extended_loaded: bool,
+    pub extended_count: usize,
+    pub bundled_count: usize,
+}
+
+#[tauri::command]
+pub async fn geonames_status() -> AppResult<GeonamesStatus> {
+    Ok(GeonamesStatus {
+        extended_loaded: crate::map::geocode::extended_cities_available(),
+        extended_count: crate::map::geocode::extended_cities_count(),
+        bundled_count: crate::map::geocode::CITIES.len(),
+    })
+}
+
 #[tauri::command]
 pub async fn map_tile(z: u32, x: u32, y: u32) -> AppResult<Vec<u8>> {
     crate::map::tile_cache::user_initiated_fetch_tile(z, x, y).await
+}
+
+// ── Sidecar process supervisor (Phase 4 §2) ──────────────────────────────
+
+#[tauri::command]
+pub async fn prompt_sidecar_command_get(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    crate::prompt::supervisor::get_sidecar_command(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_command_set(
+    state: State<'_, AppState>,
+    command: Option<String>,
+) -> AppResult<()> {
+    crate::prompt::supervisor::set_sidecar_command(&state.pool, command.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_proc_start(state: State<'_, AppState>) -> AppResult<u32> {
+    state.sidecar_proc.start(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_proc_stop(state: State<'_, AppState>) -> AppResult<()> {
+    state.sidecar_proc.stop().await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_proc_status(
+    state: State<'_, AppState>,
+) -> AppResult<crate::prompt::supervisor::SidecarProcStatus> {
+    state.sidecar_proc.status(&state.pool).await
 }
 
 // Shortcut registry — userland stores its bindings in the shortcuts

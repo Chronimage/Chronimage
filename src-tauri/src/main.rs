@@ -216,6 +216,12 @@ fn main() {
             commands::prompt_edit_reject,
             commands::backfill_place_labels,
             commands::map_tile,
+            commands::geonames_status,
+            commands::prompt_sidecar_command_get,
+            commands::prompt_sidecar_command_set,
+            commands::prompt_sidecar_proc_start,
+            commands::prompt_sidecar_proc_stop,
+            commands::prompt_sidecar_proc_status,
             commands::shortcuts_list,
             commands::shortcuts_set,
         ])
@@ -278,7 +284,10 @@ fn main() {
                 });
             }
 
-            app.manage(AppState { pool });
+            app.manage(AppState {
+                pool,
+                sidecar_proc: chronimage::prompt::supervisor::Supervisor::new(),
+            });
 
             // Memoise the SCRFD + ArcFace `FacesSession` for pipeline stage-5
             // (see docs/prds/phase-1.md §5). This runs in a background blocking

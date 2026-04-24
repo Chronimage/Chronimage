@@ -1273,6 +1273,45 @@ export async function mapTile(z: number, x: number, y: number): Promise<Uint8Arr
   return new Uint8Array(bytes);
 }
 
+export interface GeonamesStatus {
+  extended_loaded: boolean;
+  extended_count: number;
+  bundled_count: number;
+}
+
+export async function geonamesStatus(): Promise<GeonamesStatus> {
+  return tauriInvoke<GeonamesStatus>('geonames_status');
+}
+
+export interface SidecarProcStatus {
+  running: boolean;
+  pid: number | null;
+  command: string | null;
+  started_at: string | null;
+  last_exit_code: number | null;
+  configured: boolean;
+}
+
+export async function promptSidecarCommandGet(): Promise<string | null> {
+  return tauriInvoke<string | null>('prompt_sidecar_command_get');
+}
+
+export async function promptSidecarCommandSet(command: string | null): Promise<void> {
+  return tauriInvoke('prompt_sidecar_command_set', { command });
+}
+
+export async function promptSidecarProcStart(): Promise<number> {
+  return tauriInvoke<number>('prompt_sidecar_proc_start');
+}
+
+export async function promptSidecarProcStop(): Promise<void> {
+  return tauriInvoke('prompt_sidecar_proc_stop');
+}
+
+export async function promptSidecarProcStatus(): Promise<SidecarProcStatus> {
+  return tauriInvoke<SidecarProcStatus>('prompt_sidecar_proc_status');
+}
+
 export interface ShortcutRow {
   command_id: string;
   key_binding: string;

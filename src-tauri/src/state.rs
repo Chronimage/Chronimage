@@ -1,3 +1,4 @@
+use crate::prompt::supervisor::Supervisor;
 use sqlx::SqlitePool;
 
 /// Global application state managed by Tauri. Injected into commands via
@@ -10,4 +11,8 @@ use sqlx::SqlitePool;
 /// shows immediately on launch instead of waiting seconds for ONNX init.
 pub struct AppState {
     pub pool: SqlitePool,
+    /// Holds a child process handle for the user-configured generative
+    /// sidecar when the user has started it via Settings → Prompt sidecar.
+    /// Absent / idle otherwise. Phase 4 §2.
+    pub sidecar_proc: Supervisor,
 }
