@@ -1,49 +1,70 @@
 /**
- * CullBinScreen — Phase 2 recoverable-rejects list. Full UI stub over live
- * catalog photos pretending to be "recently rejected"; Restore / Delete are
- * phase-gated until the verdict engine lands (Phase 2 §3).
+ * CullBinScreen — Phase 2 §3 recoverable-rejects list. Rows come from the real
+ * `cull_bin` table (populated by `cull_apply_verdict`). Restore/Delete route
+ * through the Rust commands; a daily sweep background task handles the 30-day
+ * auto-empty.
  */
 
 import { useCallback, useMemo, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
+import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon } from '../../primitives/Icon';
 import { Thumbnail } from '../../primitives/Thumbnail';
-import { usePhotos } from '../../state/queries';
-import type { PhotoRow } from '../../tauri/invoke';
+import {
+  type CullBinFilter,
+  type CullBinRow,
+  useCullBin,
+  useCullBinDeleteForever,
+  useCullBinRestore,
+  useCullBinSummary,
+} from '../../state/queries';
 
-const MOCK_REASONS = [
-  'Near-duplicate of previous',
-  'Sharpness 0.18',
-  'Eyes closed',
-  'Burst 4/6',
-  'Screenshot',
-  'Low-res web export',
-  'Near-duplicate — same subject',
-];
-
-const MOCK_AGES = ['12m ago', '34m ago', '2h ago', '4h ago', 'yesterday', '2 days ago', '3 days ago'];
-
-interface BinRow {
-  photo: PhotoRow;
-  reason: string;
-  when: string;
-  sizeMb: string;
+function reasonLabel(reason: string): string {
+  switch (reason) {
+    case 'near_dup':
+      return 'Near-duplicate';
+    case 'blur':
+      return 'Out of focus';
+    case 'eyes_closed':
+      return 'Eyes closed';
+    case 'exposure':
+      return 'Over/under exposed';
+    case 'duplicate':
+      return 'Duplicate';
+    case 'flag':
+      return 'Flagged';
+    case 'user':
+      return 'Rejected by user';
+    default:
+      return 'Other';
+  }
 }
 
-function buildBinRows(photos: PhotoRow[]): BinRow[] {
-  return photos.slice(0, 14).map((p, i) => ({
-    photo: p,
-    reason: MOCK_REASONS[i % MOCK_REASONS.length] ?? 'Rejected',
-    when: MOCK_AGES[i % MOCK_AGES.length] ?? 'recently',
-    sizeMb: p.size_bytes ? (p.size_bytes / 1024 / 1024).toFixed(1) : '—',
-  }));
+function fmtAge(iso: string): string {
+  const now = Date.now();
+  const then = new Date(iso).getTime();
+  const diff = Math.max(0, now - then);
+  const mins = Math.round(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  return `${days}d ago`;
 }
 
-export function CullBinScreen() {
-  const { data: photos = [], isLoading } = usePhotos();
+export interface CullBinScreenProps {
+  filter?: CullBinFilter;
+}
+
+export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
+  const { data: rows = [], isLoading } = useCullBin(filter);
+  const { data: _summary } = useCullBinSummary();
+  const restore = useCullBinRestore();
+  const deleteForever = useCullBinDeleteForever();
+
   const [selected, setSelected] = useState<Set<number>>(new Set());
-
-  const rows = useMemo(() => buildBinRows(photos), [photos]);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
+  const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
 
   const toggleSelect = useCallback((id: number) => {
     setSelected((prev) => {
@@ -53,6 +74,35 @@ export function CullBinScreen() {
       return next;
     });
   }, []);
+
+  const selectedIds = useMemo(() => [...selected], [selected]);
+  const totalBytes = useMemo(() => rows.reduce((a, r) => a + (r.size_bytes ?? 0), 0), [rows]);
+  const totalGb = (totalBytes / 1024 ** 3).toFixed(1);
+
+  const onRestoreSelected = useCallback(() => {
+    restore.mutate(selectedIds, {
+      onSuccess: () => setSelected(new Set()),
+    });
+  }, [restore, selectedIds]);
+
+  const onDeleteSelected = useCallback(() => {
+    deleteForever.mutate(selectedIds, {
+      onSuccess: () => {
+        setSelected(new Set());
+        setConfirmDeleteSelected(false);
+      },
+    });
+  }, [deleteForever, selectedIds]);
+
+  const onEmptyBin = useCallback(() => {
+    const allIds = rows.map((r) => r.photo_id);
+    deleteForever.mutate(allIds, {
+      onSuccess: () => {
+        setSelected(new Set());
+        setConfirmEmpty(false);
+      },
+    });
+  }, [rows, deleteForever]);
 
   if (isLoading) {
     return (
@@ -85,8 +135,8 @@ export function CullBinScreen() {
             <em>.</em>
           </h1>
           <p style={{ maxWidth: 540, color: 'var(--fg-dim)', fontSize: 13, lineHeight: 1.5 }}>
-            When you reject a photo from the Cull screen, it lands here for 30 days before permanent deletion.
-            No data loss possible until you explicitly empty the bin.
+            When you reject a photo from the Cull screen or tap Flag in the detail view, it lands here for 30
+            days before permanent deletion. No data loss possible until you explicitly empty the bin.
           </p>
         </div>
       </div>
@@ -101,7 +151,7 @@ export function CullBinScreen() {
             CULL BIN · RECOVERABLE
           </div>
           <div style={{ fontSize: 14, marginTop: 2 }}>
-            {rows.length} items · 8.2 GB · kept until you confirm
+            {rows.length} items · {totalGb} GB · kept until you confirm
           </div>
         </div>
         <div style={{ flex: 1 }} />
@@ -112,19 +162,19 @@ export function CullBinScreen() {
             </span>
             <button
               type="button"
-              className="btn phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Coming in Phase 2 · Cull Bin restore"
+              className="btn"
+              onClick={onRestoreSelected}
+              disabled={restore.isPending}
+              title="Restore selected to catalog"
             >
               <Icon name="keep" size={13} /> Restore
             </button>
             <button
               type="button"
-              className="btn danger phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Coming in Phase 2 · Cull Bin delete"
+              className="btn danger"
+              onClick={() => setConfirmDeleteSelected(true)}
+              disabled={deleteForever.isPending}
+              title="Permanently delete selected"
             >
               <Icon name="reject" size={13} /> Delete forever
             </button>
@@ -133,43 +183,58 @@ export function CullBinScreen() {
         )}
         <button
           type="button"
-          className="btn primary phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · Cull Bin empty"
+          className="btn primary"
+          onClick={() => setConfirmEmpty(true)}
+          disabled={deleteForever.isPending}
         >
           <Icon name="reject" size={13} /> Empty bin
         </button>
       </div>
 
       <div
-        style={{ flex: 1, overflowY: 'auto', padding: 18, display: 'flex', flexDirection: 'column', gap: 8 }}
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: 18,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
       >
-        {rows.map((row) => {
-          const isSel = selected.has(row.photo.id);
+        {rows.map((row: CullBinRow) => {
+          const isSel = selected.has(row.photo_id);
+          const sizeMb = row.size_bytes != null ? (row.size_bytes / 1024 / 1024).toFixed(1) : '—';
           return (
             <button
-              key={row.photo.id}
+              key={row.photo_id}
               type="button"
               className="cullbin-row"
-              onClick={() => toggleSelect(row.photo.id)}
+              onClick={() => toggleSelect(row.photo_id)}
               aria-pressed={isSel}
               data-selected={isSel}
             >
               <div style={{ width: 80, height: 60, flexShrink: 0, position: 'relative' }}>
                 <Thumbnail
-                  photoId={row.photo.id}
+                  photoId={row.photo_id}
                   sizePx={320}
                   photo={{
-                    hue: (row.photo.id * 31) % 360,
-                    filename: row.photo.filename,
-                    id: String(row.photo.id),
+                    hue: (row.photo_id * 31) % 360,
+                    filename: row.filename,
+                    id: String(row.photo_id),
                   }}
                 />
               </div>
-              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                }}
+              >
                 <div className="mono" style={{ fontSize: 12, color: 'var(--fg)' }}>
-                  {row.photo.filename}
+                  {row.filename}
                 </div>
                 <div
                   style={{
@@ -180,8 +245,8 @@ export function CullBinScreen() {
                     alignItems: 'center',
                   }}
                 >
-                  <Chip tone="warn">{row.reason}</Chip>
-                  <span className="mono">Rejected {row.when}</span>
+                  <Chip tone="warn">{reasonLabel(row.reason)}</Chip>
+                  <span className="mono">Rejected {fmtAge(row.rejected_at)}</span>
                 </div>
               </div>
               <div
@@ -194,28 +259,30 @@ export function CullBinScreen() {
                   textAlign: 'right',
                 }}
               >
-                {row.sizeMb} MB
+                {sizeMb} MB
               </div>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                 <button
                   type="button"
-                  className="btn phase-gated"
-                  disabled
-                  aria-disabled="true"
-                  title="Coming in Phase 2 · Cull Bin restore"
-                  onClick={(e) => e.stopPropagation()}
+                  className="btn"
                   style={{ fontSize: 11.5 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    restore.mutate([row.photo_id]);
+                  }}
+                  disabled={restore.isPending}
                 >
                   Restore
                 </button>
                 <button
                   type="button"
-                  className="btn phase-gated"
-                  disabled
-                  aria-disabled="true"
-                  title="Coming in Phase 2 · Cull Bin delete"
-                  onClick={(e) => e.stopPropagation()}
-                  style={{ fontSize: 11.5, color: 'var(--warn)' }}
+                  className="btn danger"
+                  style={{ fontSize: 11.5 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteForever.mutate([row.photo_id]);
+                  }}
+                  disabled={deleteForever.isPending}
                 >
                   Delete
                 </button>
@@ -224,6 +291,26 @@ export function CullBinScreen() {
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={confirmEmpty}
+        title="Empty cull bin permanently?"
+        description={`This will permanently delete ${rows.length} photos from your catalog. Originals on disk are not touched (use "Move to Recycle Bin" in Catalog for that).`}
+        confirmLabel="Empty bin"
+        confirmTone="danger"
+        onConfirm={onEmptyBin}
+        onCancel={() => setConfirmEmpty(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmDeleteSelected}
+        title={`Delete ${selected.size} photo${selected.size === 1 ? '' : 's'} forever?`}
+        description="Permanently removes the selected rows from the catalog. Originals on disk are not touched."
+        confirmLabel="Delete forever"
+        confirmTone="danger"
+        onConfirm={onDeleteSelected}
+        onCancel={() => setConfirmDeleteSelected(false)}
+      />
     </div>
   );
 }

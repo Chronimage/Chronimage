@@ -164,6 +164,21 @@ fn main() {
             commands::recycle_source_copies,
             commands::recluster_faces,
             commands::rebuild_thumbnails,
+            commands::cull_apply_verdict,
+            commands::rate_photo,
+            commands::flag_photo,
+            commands::cull_bin_list,
+            commands::cull_bin_summary,
+            commands::cull_bin_restore,
+            commands::cull_bin_delete_forever,
+            commands::cull_bin_sweep,
+            commands::export_enqueue,
+            commands::export_run_next,
+            commands::export_list_jobs,
+            commands::list_user_tags,
+            commands::add_user_tag,
+            commands::remove_user_tag,
+            commands::rename_user_tag,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -190,6 +205,21 @@ fn main() {
                     tracing::warn!(error = %e, "smart album seed failed (non-fatal)");
                 }
             });
+
+            // Spawn the Cull Bin daily sweep (fires once at boot + every 24 h).
+            // Best-effort — failures log but don't crash the app.
+            #[cfg(not(test))]
+            {
+                let sweep_pool = pool.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        if let Err(e) = chronimage::cull::bin::sweep_expired(&sweep_pool).await {
+                            tracing::warn!(error = %e, "cull_bin sweep failed");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(60 * 60 * 24)).await;
+                    }
+                });
+            }
 
             // Spawn the background re-evaluator (10-minute cadence).
             // spawn_reevaluator calls tokio::spawn internally, which requires a

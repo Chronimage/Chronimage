@@ -1950,3 +1950,221 @@ select {
   padding: 1px 5px;
   background: color-mix(in oklch, var(--accent-ink) 20%, transparent);
 }
+
+/* --- Phase 2: Tag dropdown (manual tagging menu) --- */
+.tag-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 320px;
+  background: var(--bg-elev);
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  padding: 12px;
+  z-index: 30;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tag-dropdown-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.tag-input {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--stroke);
+  color: var(--fg);
+  font-size: 13px;
+  outline: none;
+}
+.tag-input:focus {
+  border-color: var(--accent);
+}
+.tag-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.tag-suggestion {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+}
+.tag-suggestion:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.tag-empty {
+  color: var(--fg-mute);
+  font-size: 12px;
+  padding: 10px 0;
+}
+.tag-applied {
+  border-top: 1px solid var(--stroke);
+  padding-top: 10px;
+}
+
+/* --- Phase 2: Export sheet modal --- */
+.export-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.export-sheet {
+  width: min(920px, 90vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--stroke);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+.export-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--stroke);
+}
+.export-head h2 {
+  margin: 0;
+  font-family: var(--display-font);
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+.export-head h2 em {
+  color: var(--accent);
+  font-style: italic;
+}
+.export-body {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  flex: 1;
+  min-height: 0;
+}
+.export-queue {
+  padding: 16px 20px;
+  border-right: 1px solid var(--stroke);
+  overflow-y: auto;
+  min-height: 0;
+}
+.export-queue .section-label {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--fg-mute);
+  margin-bottom: 8px;
+}
+.export-progress {
+  height: 4px;
+  background: var(--bg-elev);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.export-progress > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+.export-items {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.export-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+}
+.export-item.status-done {
+  color: var(--accent);
+}
+.export-item.status-error {
+  color: var(--warn);
+}
+.export-item.status-running {
+  background: color-mix(in oklch, var(--accent) 12%, var(--bg-elev));
+  color: var(--fg);
+}
+.export-item-status {
+  font-family: var(--mono-font);
+  font-size: 11px;
+}
+.export-preset {
+  padding: 16px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.export-preset .section-label {
+  font-family: var(--mono-font);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--fg-mute);
+  margin-top: 10px;
+  margin-bottom: 4px;
+}
+.export-preset .section-label:first-child {
+  margin-top: 0;
+}
+.export-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  padding: 4px 0;
+  cursor: pointer;
+}
+.export-input {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--stroke);
+  color: var(--fg);
+  font-size: 13px;
+  outline: none;
+}
+.export-input:focus {
+  border-color: var(--accent);
+}
+.export-stats {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.export-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--stroke);
+  background: var(--bg-chrome);
+}

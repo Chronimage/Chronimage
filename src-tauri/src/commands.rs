@@ -1335,6 +1335,12 @@ pub struct PhotoRow {
     /// Laplacian-variance sharpness score from Stage 2.6. Higher = sharper.
     /// Exposed so the detail inspector can surface it without a second read.
     pub sharpness_score: Option<f64>,
+    /// Phase 2 §1 — 0..=5 star rating set from the detail-view toolbar.
+    #[serde(default)]
+    pub star_rating: i64,
+    /// Phase 2 §2 — soft flag toggled via the detail-view `X` key.
+    #[serde(default)]
+    pub is_flagged: bool,
 }
 
 /// Translate a user-facing sort identifier to a SQL `ORDER BY` clause.
@@ -1401,7 +1407,7 @@ pub async fn list_photos(
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
          size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
          FROM photos {where_clause} {order_clause} LIMIT ?1 OFFSET ?2"
     );
     let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -2206,7 +2212,7 @@ pub async fn on_this_day(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
          size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
          FROM photos \
          WHERE captured_at IS NOT NULL \
            AND strftime('%m-%d', captured_at) = ?1 \
@@ -2659,7 +2665,7 @@ pub async fn unseen_photos(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
@@ -2694,7 +2700,7 @@ pub async fn first_time_on_new_camera(
          ) \
          SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
            p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
+           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
          FROM photos p \
          JOIN first_seen fs \
            ON fs.camera_make = p.camera_make \
@@ -2723,7 +2729,7 @@ pub async fn unflagged_favorites(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE p.aesthetic_score IS NOT NULL \
@@ -3251,7 +3257,7 @@ pub async fn search_photos(
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
          is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
-         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
          FROM photos WHERE id IN ({placeholders})"
     );
 
@@ -3311,7 +3317,7 @@ pub async fn list_photos_for_cluster(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
+         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
          FROM photos p \
          JOIN ( \
             SELECT photo_id, MAX(quality) AS top_quality \
@@ -3572,6 +3578,217 @@ async fn build_search_suggestions(pool: &sqlx::SqlitePool) -> Vec<String> {
     out
 }
 
+// ── Phase 2: Cull verdict + rating + flag ─────────────────────────────────────
+
+use crate::cull::bin::{CullBinRow, CullBinSummary, CullFilter, EmptyReceipt, RestoreReceipt};
+use crate::cull::verdict::{CullReason, Verdict, VerdictReceipt};
+use crate::export::engine::ExportProgress;
+use crate::export::{ExportJob, ExportPreset};
+use tauri::Emitter;
+
+/// Tauri event name emitted by `cull_apply_verdict`. Payload = `VerdictReceipt`.
+pub const CULL_PROGRESS_EVENT: &str = "chronimage://cull-progress";
+
+/// Tauri event name emitted per export item. Payload = `ExportProgress`.
+pub const EXPORT_PROGRESS_EVENT: &str = "chronimage://export-progress";
+
+#[tauri::command]
+pub async fn cull_apply_verdict(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    photo_id: i64,
+    verdict: Verdict,
+    reason: CullReason,
+    retention_days: Option<i64>,
+) -> AppResult<VerdictReceipt> {
+    let retention = retention_days.unwrap_or(30);
+    let receipt =
+        crate::cull::verdict::apply_verdict(&state.pool, photo_id, verdict, reason, retention)
+            .await?;
+    let _ = app.emit(CULL_PROGRESS_EVENT, &receipt);
+    Ok(receipt)
+}
+
+#[tauri::command]
+pub async fn rate_photo(state: State<'_, AppState>, photo_id: i64, rating: i64) -> AppResult<()> {
+    crate::cull::verdict::set_star_rating(&state.pool, photo_id, rating).await
+}
+
+#[tauri::command]
+pub async fn flag_photo(state: State<'_, AppState>, photo_id: i64) -> AppResult<bool> {
+    crate::cull::verdict::toggle_flag(&state.pool, photo_id).await
+}
+
+// ── Phase 2: Cull Bin ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn cull_bin_list(
+    state: State<'_, AppState>,
+    filter: Option<CullFilter>,
+) -> AppResult<Vec<CullBinRow>> {
+    crate::cull::bin::list(&state.pool, filter.unwrap_or(CullFilter::All)).await
+}
+
+#[tauri::command]
+pub async fn cull_bin_summary(state: State<'_, AppState>) -> AppResult<CullBinSummary> {
+    crate::cull::bin::summary(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn cull_bin_restore(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+) -> AppResult<RestoreReceipt> {
+    crate::cull::bin::restore(&state.pool, &photo_ids).await
+}
+
+#[tauri::command]
+pub async fn cull_bin_delete_forever(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+) -> AppResult<EmptyReceipt> {
+    crate::cull::bin::delete_forever(&state.pool, &photo_ids).await
+}
+
+#[tauri::command]
+pub async fn cull_bin_sweep(state: State<'_, AppState>) -> AppResult<EmptyReceipt> {
+    crate::cull::bin::sweep_expired(&state.pool).await
+}
+
+// ── Phase 2: Export ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn export_enqueue(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+    preset: ExportPreset,
+    output_dir: String,
+) -> AppResult<i64> {
+    let dir = PathBuf::from(output_dir);
+    crate::export::enqueue_job(&state.pool, &photo_ids, &preset, &dir).await
+}
+
+#[tauri::command]
+pub async fn export_run_next(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    job_id: i64,
+) -> AppResult<Option<ExportProgress>> {
+    let progress = crate::export::run_next_item(&state.pool, job_id).await?;
+    if let Some(ref p) = progress {
+        let _ = app.emit(EXPORT_PROGRESS_EVENT, p);
+    }
+    Ok(progress)
+}
+
+#[tauri::command]
+pub async fn export_list_jobs(state: State<'_, AppState>) -> AppResult<Vec<ExportJob>> {
+    crate::export::list_jobs(&state.pool).await
+}
+
+// ── Phase 2 §10: Manual tagging ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct UserTagSummary {
+    pub label: String,
+    pub photo_count: i64,
+}
+
+#[tauri::command]
+pub async fn list_user_tags(state: State<'_, AppState>) -> AppResult<Vec<UserTagSummary>> {
+    sqlx::query_as::<_, UserTagSummary>(
+        "SELECT label, COUNT(*) AS photo_count FROM tags \
+         WHERE kind = 'user' GROUP BY label ORDER BY photo_count DESC, label ASC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn add_user_tag(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+    label: String,
+) -> AppResult<usize> {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return Err(AppError::InvalidInput("tag label must not be empty".into()));
+    }
+    if label.len() > 64 {
+        return Err(AppError::InvalidInput(
+            "tag label must be 64 chars or fewer".into(),
+        ));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut added = 0usize;
+    let mut tx = state.pool.begin().await?;
+    for pid in &photo_ids {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO tags (photo_id, label, kind, confidence, created_at) \
+             VALUES (?1, ?2, 'user', 1.0, ?3)",
+        )
+        .bind(pid)
+        .bind(&label)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        added += res.rows_affected() as usize;
+    }
+    tx.commit().await?;
+    Ok(added)
+}
+
+#[tauri::command]
+pub async fn remove_user_tag(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+    label: String,
+) -> AppResult<usize> {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return Err(AppError::InvalidInput("tag label must not be empty".into()));
+    }
+    let mut removed = 0usize;
+    let mut tx = state.pool.begin().await?;
+    for pid in &photo_ids {
+        let res =
+            sqlx::query("DELETE FROM tags WHERE photo_id = ?1 AND kind = 'user' AND label = ?2")
+                .bind(pid)
+                .bind(&label)
+                .execute(&mut *tx)
+                .await?;
+        removed += res.rows_affected() as usize;
+    }
+    tx.commit().await?;
+    Ok(removed)
+}
+
+#[tauri::command]
+pub async fn rename_user_tag(
+    state: State<'_, AppState>,
+    old_label: String,
+    new_label: String,
+) -> AppResult<usize> {
+    let old_label = old_label.trim().to_string();
+    let new_label = new_label.trim().to_string();
+    if old_label.is_empty() || new_label.is_empty() {
+        return Err(AppError::InvalidInput("labels must not be empty".into()));
+    }
+    if new_label.len() > 64 {
+        return Err(AppError::InvalidInput(
+            "tag label must be 64 chars or fewer".into(),
+        ));
+    }
+    let affected = sqlx::query("UPDATE tags SET label = ?1 WHERE kind = 'user' AND label = ?2")
+        .bind(&new_label)
+        .bind(&old_label)
+        .execute(&state.pool)
+        .await?
+        .rows_affected() as usize;
+    Ok(affected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3733,7 +3950,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
              FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
         )
         .fetch_all(&pool)
@@ -3762,7 +3979,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
              FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
         )
         .fetch_all(&pool)
@@ -3817,7 +4034,7 @@ mod tests {
         let sql = format!(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
              FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
         );
         let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -4107,7 +4324,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score FROM photos \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -4156,7 +4373,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score FROM photos \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = ?1 \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -4196,7 +4413,7 @@ mod tests {
             "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
              p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
              p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
-             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
+             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -4239,7 +4456,7 @@ mod tests {
             "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
              p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
              p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
-             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score \
+             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
