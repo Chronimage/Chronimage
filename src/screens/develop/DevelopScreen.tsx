@@ -57,10 +57,17 @@ export function DevelopScreen() {
     setSharedFocus(focusedPhotoId);
   }, [focusedPhotoId, setSharedFocus]);
 
-  // Load the photo's current edit state + baseline preview when it changes.
+  // Load the photo's current edit state + baseline preview ONCE per photo.
+  // Re-fetching `opened` on every render would wipe unsaved slider
+  // positions because the backend's `current_edit_id` only moves on
+  // explicit Save. Keying off `focusedPhotoId` ensures we only seed
+  // slider state when the user opens a different photo.
   const { data: opened } = useDevelopOpen(focusedPhotoId);
+  const seededForPhotoRef = useRef<number | null>(null);
   useEffect(() => {
     if (!opened) return;
+    if (seededForPhotoRef.current === opened.photo_id) return;
+    seededForPhotoRef.current = opened.photo_id;
     setValues(operationsToValues(opened.operations));
     setPreview(opened.preview_data_url);
     setSharedPreview(opened.preview_data_url);
@@ -98,13 +105,21 @@ export function DevelopScreen() {
     [applyMut, focusedPhotoId],
   );
 
+  // Keep a ref on the latest values so `updateValue` can compute the
+  // next state without closing over a stale `values` snapshot — and so
+  // the side-effect (scheduleApply) happens outside `setValues`'s
+  // updater function (an anti-pattern that fires twice under React
+  // Strict Mode, clearing our debounce timer on the second run).
+  const valuesRef = useRef(values);
+  useEffect(() => {
+    valuesRef.current = values;
+  }, [values]);
+
   const updateValue = useCallback(
     (key: keyof DevelopValues, value: number) => {
-      setValues((prev) => {
-        const next = { ...prev, [key]: value };
-        scheduleApply(valuesToOperations(next));
-        return next;
-      });
+      const next = { ...valuesRef.current, [key]: value };
+      setValues(next);
+      scheduleApply(valuesToOperations(next));
     },
     [scheduleApply],
   );
