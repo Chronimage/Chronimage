@@ -479,15 +479,22 @@ function PromptStage({
 
   useEffect(() => {
     let cancelled = false;
-    promptSidecarPing()
-      .then((s) => {
-        if (!cancelled) setStatus(s);
-      })
-      .catch((e) => {
-        if (!cancelled) warn('prompt sidecar ping failed', e);
-      });
+    const ping = () => {
+      promptSidecarPing()
+        .then((s) => {
+          if (!cancelled) setStatus(s);
+        })
+        .catch((e) => {
+          if (!cancelled) warn('prompt sidecar ping failed', e);
+        });
+    };
+    ping();
+    // Keep the badge honest — if the sidecar crashes between generations
+    // the chip flips to "Unreachable" within 30 seconds.
+    const id = globalThis.setInterval(ping, 30_000);
     return () => {
       cancelled = true;
+      globalThis.clearInterval(id);
     };
   }, []);
 

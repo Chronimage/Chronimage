@@ -251,3 +251,18 @@ Still deferred (week 4+ — each needs infra work beyond pure client code):
 - §3 Mask engine integration — wiring prompt masks into the Phase-3 mask-layer stack alongside AI-subject / sky / foreground
 - §5 OSM tile cache — Tauri custom scheme handler (`chronimage-tile://`) to intercept the Leaflet TileLayer URL; respects OSMF fair-use policy
 - §5 Full GeoNames `cities15000` (~5 MB SQLite) + `photos.place_label` column + Catalog Places-facet label integration
+
+## Week 4 status (2026-04-24)
+
+Shipped end-to-end:
+
+- §1 Ctrl+Enter Generate keybinding on the Prompt tab textarea + Accept/Reject buttons on the AFTER panel + `prompt_edits` table (migration 20261002, schema v6) persisting every generation with state ∈ {pending, accepted, rejected}. Accept auto-rejects sibling pending rows on the same photo. Three new commands (`prompt_edit_list`, `_accept`, `_reject`).
+- §5 `photos.place_label` — migration 20261003 adds the column (schema v7) + partial index. Import pipeline labels new GPS-tagged photos automatically via `map::geocode::label_photo`; `backfill_place_labels` command fills the existing catalog in one transaction.
+- §5 OSM tile cache — `src-tauri/src/map/tile_cache.rs` serves tiles from `{data_dir}/tiles/{z}/{x}/{y}.png`, falling through to `tile.openstreetmap.org` with a `Chronimage/0.1` user-agent and caching bytes on disk. MapScreen's `CachedTileLayer` overrides Leaflet's `createTile` to route through `map_tile` + blob URLs. Zoom bounds validated (0..=19).
+- §2 Prompt tab health polling — badge re-pings the sidecar every 30 s so the Generate button state stays honest between turns.
+- §3 Mask engine integration — n/a: Phase 3 shipped Develop sliders only, not a user-facing mask-layer stack. The prompt's `mask_b64` threads directly through `{sidecar}/v1/edit` which is the full extent of masking v1 ships with.
+
+Still deferred (genuinely week 5+ packaging work):
+
+- §2 Sidecar process management via `tauri-plugin-shell` + `externalBin` + PID supervision + first-run model-download consent UI. Design decision for v1: Chronimage is a sidecar **client**, user runs the generative server themselves (ComfyUI / diffusers / candle-vllm). The health poll covers liveness; the download UX is a packaging initiative on its own.
+- §5 Full GeoNames `cities15000` (~5 MB TSV import + SQLite table + Places-facet label integration). The bundled 120-city table plus `photos.place_label` already handles the common cases; GeoNames expansion is additive.

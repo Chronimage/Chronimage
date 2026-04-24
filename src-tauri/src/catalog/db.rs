@@ -242,7 +242,7 @@ mod tests {
                 .await
                 .expect("schema_version row");
         assert!(
-            ["1", "2", "3", "4", "5"].contains(&row.0.as_str()),
+            ["1", "2", "3", "4", "5", "6", "7"].contains(&row.0.as_str()),
             "unexpected schema version: {}",
             row.0
         );
