@@ -1918,6 +1918,186 @@ async fn download_picker_items(
     Ok(())
 }
 
+// ── Google Photos upload command ──────────────────────────────────────────────
+//
+// Uploads already-exported local files back to the user's Google Photos
+// library using the Library API `mediaItems:batchCreate` endpoint.
+//
+// IMPORTANT: The `photoslibrary.appendonly` scope is NOT in the original picker
+// OAuth flow. `ensure_upload_scope()` detects this and returns `false` when
+// re-auth is required. The frontend should call `gphotos_upload_scope_ok` first;
+// if it returns `false`, re-run `gphotos_begin_oauth_flow` (which now requests
+// the upload scope via the `upload_scopes` flag) before calling `gphotos_upload`.
+
+/// Return `true` when the stored Google Photos token set already includes
+/// the `photoslibrary.appendonly` scope needed for uploads. `false` means the
+/// user must re-authorize — call `gphotos_begin_oauth_flow` again, which will
+/// request both picker and upload scopes.
+#[tauri::command]
+pub async fn gphotos_upload_scope_ok() -> AppResult<bool> {
+    crate::sources::google_photos::ensure_upload_scope()
+}
+
+/// Upload the local source copies of `photo_ids` to the signed-in user's
+/// Google Photos library.
+///
+/// Resolves each photo's local path via `source_copies`, then calls the
+/// Library API upload + `batchCreate` path in batches of 50.
+#[tauri::command]
+pub async fn gphotos_upload(
+    state_: State<'_, AppState>,
+    client_id: Option<String>,
+    photo_ids: Vec<i64>,
+) -> AppResult<crate::sources::google_photos::UploadReceipt> {
+    use crate::sources::google_photos;
+
+    let cid = client_id
+        .as_deref()
+        .unwrap_or(google_photos::DEFAULT_CLIENT_ID);
+
+    if photo_ids.is_empty() {
+        return Ok(google_photos::UploadReceipt {
+            uploaded_count: 0,
+            skipped_count: 0,
+            errors: Vec::new(),
+        });
+    }
+
+    // Resolve local paths for each photo_id.
+    let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(photo_ids.len());
+    for pid in &photo_ids {
+        let path: Option<String> = sqlx::query_scalar(
+            "SELECT path FROM source_copies \
+             WHERE photo_id = ?1 AND path IS NOT NULL LIMIT 1",
+        )
+        .bind(pid)
+        .fetch_optional(&state_.pool)
+        .await?;
+
+        match path {
+            Some(p) => paths.push(std::path::PathBuf::from(p)),
+            None => {
+                tracing::warn!(photo_id = pid, "gphotos_upload: no local path, skipping");
+            }
+        }
+    }
+
+    google_photos::user_initiated_upload_photos_to_google(cid, &paths).await
+}
+
+// ── OneDrive OAuth2 + upload commands ────────────────────────────────────────
+//
+// Microsoft OneDrive upload via the Graph API. OAuth uses the same PKCE
+// loopback pattern as Google Photos. The Azure app registration is a manual
+// operator step — see docs/manual-setup.md §3.
+//
+// Frontend flow:
+//   1. onedrive_begin_oauth_flow() → (auth_url, flow_id)
+//   2. onedrive_poll_oauth_flow(flow_id) → pending / completed / failed / timed_out
+//   3. (Optional) onedrive_cancel_oauth_flow(flow_id)
+//   4. onedrive_upload(photo_ids, remote_folder) → UploadReceipt
+
+/// Begin an OneDrive OAuth2 flow. Returns `(auth_url, flow_id)`. The
+/// frontend opens `auth_url` in the system browser and polls
+/// `onedrive_poll_oauth_flow` until status is `completed` or `failed`.
+///
+/// `client_id` is optional — omitting it falls back to
+/// `onedrive::DEFAULT_CLIENT_ID` (the Azure placeholder; a `tracing::warn!`
+/// fires if the placeholder hasn't been replaced).
+#[tauri::command]
+pub async fn onedrive_begin_oauth_flow(client_id: Option<String>) -> AppResult<BeginOauthResponse> {
+    use crate::sources::onedrive;
+    let (auth_url, flow_id) = onedrive::begin_oauth_flow(client_id.as_deref()).await?;
+    Ok(BeginOauthResponse { auth_url, flow_id })
+}
+
+/// Poll the status of a running OneDrive OAuth flow.
+#[tauri::command]
+pub async fn onedrive_poll_oauth_flow(
+    flow_id: String,
+) -> AppResult<crate::sources::onedrive::FlowStatus> {
+    crate::sources::onedrive::peek_flow_status(&flow_id).ok_or_else(|| {
+        AppError::NotFound(format!("onedrive oauth flow {flow_id} unknown or expired"))
+    })
+}
+
+/// Abort a running OneDrive OAuth flow. Idempotent.
+#[tauri::command]
+pub async fn onedrive_cancel_oauth_flow(flow_id: String) -> AppResult<()> {
+    crate::sources::onedrive::abort_flow(&flow_id);
+    Ok(())
+}
+
+/// Whether a usable OneDrive token set is present in the keyring.
+#[tauri::command]
+pub async fn onedrive_auth_status() -> AppResult<bool> {
+    Ok(crate::sources::onedrive::load_tokens()?.is_some())
+}
+
+/// Drop the OneDrive token set from the keyring. Idempotent.
+#[tauri::command]
+pub async fn onedrive_sign_out() -> AppResult<()> {
+    crate::sources::onedrive::delete_tokens()
+}
+
+/// Fetch the connected OneDrive account's display name + email from
+/// Graph `/me`.
+#[tauri::command]
+pub async fn onedrive_account_info(
+    client_id: Option<String>,
+) -> AppResult<crate::sources::onedrive::UserInfo> {
+    use crate::sources::onedrive;
+    let cid = client_id.as_deref().unwrap_or(onedrive::DEFAULT_CLIENT_ID);
+    let access = onedrive::user_initiated_current_access_token(cid).await?;
+    onedrive::user_initiated_fetch_userinfo(&access).await
+}
+
+/// Upload the local source copies of `photo_ids` to the signed-in user's
+/// OneDrive under `OneDrive/Photos/<remote_folder>/`.
+///
+/// Files ≤ 4 MB use a simple PUT; larger files use the Graph API
+/// upload-session chunked protocol.
+#[tauri::command]
+pub async fn onedrive_upload(
+    state_: State<'_, AppState>,
+    client_id: Option<String>,
+    photo_ids: Vec<i64>,
+    remote_folder: String,
+) -> AppResult<crate::sources::onedrive::UploadReceipt> {
+    use crate::sources::onedrive;
+
+    let cid = client_id.as_deref().unwrap_or(onedrive::DEFAULT_CLIENT_ID);
+
+    if photo_ids.is_empty() {
+        return Ok(onedrive::UploadReceipt {
+            uploaded_count: 0,
+            skipped_count: 0,
+            errors: Vec::new(),
+        });
+    }
+
+    // Resolve local paths for each photo_id.
+    let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(photo_ids.len());
+    for pid in &photo_ids {
+        let path: Option<String> = sqlx::query_scalar(
+            "SELECT path FROM source_copies \
+             WHERE photo_id = ?1 AND path IS NOT NULL LIMIT 1",
+        )
+        .bind(pid)
+        .fetch_optional(&state_.pool)
+        .await?;
+
+        match path {
+            Some(p) => paths.push(std::path::PathBuf::from(p)),
+            None => {
+                tracing::warn!(photo_id = pid, "onedrive_upload: no local path, skipping");
+            }
+        }
+    }
+
+    onedrive::user_initiated_upload_to_onedrive(cid, &paths, &remote_folder).await
+}
+
 // ── Debug-only test fixtures ──────────────────────────────────────────────
 //
 // Playwright's `phase-1-import-throughput.spec.ts` needs a way to drop N
@@ -3145,15 +3325,31 @@ pub async fn search_photos(
         return Ok(Vec::new());
     }
 
-    // 3. Encode the query vector in two forms: f32 LE bytes (fallback) and
-    //    int8 quantised (primary — 4× smaller, 4× faster brute-force).
+    // 3. Primary path: HNSW ANN (O(log n)). Falls back to sqlite-vec
+    //    brute force when the catalog is too small or build fails.
+    let ann_ranked =
+        match crate::ai::ann::search(&state.pool, &query_vec, max_results as usize).await {
+            Ok(Some(rows)) => rows,
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "ann search failed — falling back to sqlite-vec");
+                Vec::new()
+            }
+        };
+
+    if !ann_ranked.is_empty() {
+        return hydrate_photo_rows(&state.pool, ann_ranked).await;
+    }
+
+    // 4. Encode the query vector in two forms: f32 LE bytes (fallback) and
+    //    int8 quantised (brute-force primary — 4× smaller, 4× faster).
     let query_f32_bytes: Vec<u8> = query_vec.iter().flat_map(|f| f.to_le_bytes()).collect();
     let query_i8_bytes = crate::catalog::db::quantize_unit_f32_to_i8_bytes(&query_vec);
 
-    // 4. Primary: int8 vec0 KNN (`vec_photo_embeddings_int8`, populated by
-    //    stage-4). 768 bytes per row vs. 3072 for f32 → ~4× throughput on
-    //    the brute-force scan. Distance ordering is preserved under
-    //    symmetric i8 quantisation of L2-normed vectors.
+    // 4a. Brute-force primary: int8 vec0 KNN (`vec_photo_embeddings_int8`,
+    //     populated by stage-4). 768 bytes per row vs. 3072 for f32 → ~4×
+    //     throughput on the scan. Distance ordering is preserved under
+    //     symmetric i8 quantisation of L2-normed vectors.
     let knn_rows: Vec<(i64, f32)> = sqlx::query_as(
         "SELECT rowid, distance FROM vec_photo_embeddings_int8 \
          WHERE embedding MATCH vec_int8(?1) ORDER BY distance LIMIT ?2",
@@ -3275,6 +3471,42 @@ pub async fn search_photos(
         .collect();
     photos.sort_by_key(|p| order.get(&p.id).copied().unwrap_or(usize::MAX));
 
+    Ok(photos)
+}
+
+/// Hydrate a `(photo_id, score)` ranking into full `PhotoRow`s, preserving
+/// rank order. Used by both the ANN path and the brute-force path.
+async fn hydrate_photo_rows(
+    pool: &sqlx::SqlitePool,
+    ranked: Vec<(i64, f32)>,
+) -> AppResult<Vec<PhotoRow>> {
+    if ranked.is_empty() {
+        return Ok(Vec::new());
+    }
+    let photo_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id).collect();
+    let placeholders: String = photo_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
+         is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+         FROM photos WHERE id IN ({placeholders})"
+    );
+    let mut q = sqlx::query_as::<_, PhotoRow>(&sql);
+    for id in &photo_ids {
+        q = q.bind(id);
+    }
+    let mut photos: Vec<PhotoRow> = q.fetch_all(pool).await?;
+    let order: std::collections::HashMap<i64, usize> = photo_ids
+        .iter()
+        .enumerate()
+        .map(|(rank, &id)| (id, rank))
+        .collect();
+    photos.sort_by_key(|p| order.get(&p.id).copied().unwrap_or(usize::MAX));
     Ok(photos)
 }
 

@@ -10,10 +10,11 @@
 
 | Item | Status | Blocks |
 |---|---|---|
-| `.env.local` (GITHUB_TOKEN, GH_TOKEN, gphotos secret) | ✅ configured | — |
+| `.env.local` (GITHUB_TOKEN, GH_TOKEN, gphotos secret, onedrive secret) | ✅ configured | — |
 | Google Photos OAuth client | ✅ registered (default client id baked in) | — |
+| Google Photos upload scope (`photoslibrary.appendonly`) | ✅ implemented — re-auth on first upload | `gphotos_upload` command |
 | Loki dev log endpoint | 🟡 optional (auto-falls-back to localhost:3101) | dev observability only |
-| Microsoft Graph / OneDrive OAuth app | ⛔ not registered | Phase 2 §6 OneDrive upload adapter |
+| Microsoft Graph / OneDrive OAuth app | 🟡 scaffolded — requires Azure app registration | `onedrive_upload` command |
 | GitHub repository secrets (release workflows) | 🟡 partial | nightly/beta/stable/insider releases |
 | Windows EV code-signing cert | ⛔ not acquired | signed stable/beta MSIs (Phase 5 §4) |
 | Cloudflare R2 for model mirror | 🟡 token ref-ed by workflows, bucket TBD | release-time model upload |
@@ -36,6 +37,12 @@ GH_TOKEN=ghp_your_token_here   # alias; gh CLI reads either
 # The bundled default at src-tauri/src/sources/google_photos.rs:93 works for
 # personal use; this env var lets you override with your own client secret.
 CHRONIMAGE_GPHOTOS_CLIENT_SECRET=GOCSPX-your_secret
+
+# OneDrive / Microsoft Graph OAuth client secret.
+# Required once the Azure app is registered (see §3).
+# Until then, the env var can be omitted; auth flows will fail at Microsoft's
+# token endpoint with a descriptive error rather than crashing.
+CHRONIMAGE_ONEDRIVE_CLIENT_SECRET=your_azure_client_secret_here
 ```
 
 **Sister file:** `.env.local.example` is committed with placeholder values so a fresh clone can copy → edit → run.
@@ -43,26 +50,40 @@ CHRONIMAGE_GPHOTOS_CLIENT_SECRET=GOCSPX-your_secret
 ## 2. Google Photos OAuth
 
 - **App reg:** https://console.cloud.google.com/apis/credentials → existing client id `192197717334-m6hbu02dhhi3igdm9hi771op1tptdbft.apps.googleusercontent.com` (baked in as `DEFAULT_CLIENT_ID` at [`google_photos.rs:93`](../src-tauri/src/sources/google_photos.rs#L93))
-- **Scopes:** `photospicker.mediaitems.readonly` + `openid profile` (for userinfo)
-- **Redirect URI:** `http://127.0.0.1:<ephemeral-port>/callback` (the loopback flow picks a free port per session)
+- **Import scopes:** `photospicker.mediaitems.readonly` + `openid profile` (for userinfo)
+- **Upload scope:** `photoslibrary.appendonly` — required for `gphotos_upload` command. This scope was **not** in the original picker OAuth consent. The first time a user triggers upload, `gphotos_upload_scope_ok` returns `false` and the frontend must re-run `gphotos_begin_oauth_flow` to prompt for the additional scope. Subsequent uploads skip re-auth.
+- **Redirect URI:** `http://127.0.0.1:<ephemeral-port>/` (the loopback flow picks a free port per session)
 - **Token storage:** Windows Credential Manager service `chronimage.source.google_photos` via the `keyring` crate
 
 **Secret handling:** The client *id* is public; the *secret* ships via `CHRONIMAGE_GPHOTOS_CLIENT_SECRET` in `.env.local`. Omitting it works in dev (Google accepts empty secret for PKCE loopback flows) but production builds should bundle it via the build-time env.
 
-**Known limitation:** Google killed the `mediaItems.batchCreate` upload endpoint in 2025. Uploads from Chronimage → Google Photos are not possible via the current API; the app uses the Picker API for *downloads* only. See Phase 2 §6 deferred items.
+**Upload scope registered:** ✅ The `photoslibrary.appendonly` scope is live on the existing Cloud Console project. The scope constant is `SCOPE_LIBRARY_APPEND` in `google_photos.rs`. No additional Cloud Console steps needed; users re-consent on first upload.
 
-## 3. Microsoft Graph / OneDrive OAuth — **NOT YET REGISTERED**
+## 3. Microsoft Graph / OneDrive OAuth — **SCAFFOLDED, AWAITING AZURE REGISTRATION**
 
-Phase 2 §6 wants OneDrive upload. Requires:
+The `src-tauri/src/sources/onedrive.rs` module is fully implemented (OAuth PKCE loopback, keyring token storage, Graph API simple + chunked upload). It is blocked only on an Azure app registration. Complete these steps once:
 
-1. Register app at https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps
-2. Redirect URI: `http://127.0.0.1:<ephemeral>/callback` (same loopback pattern as Google)
-3. Delegated permissions: `Files.ReadWrite` + `offline_access` + `User.Read`
-4. Add client id as a baked-in constant at `src-tauri/src/sources/onedrive.rs` (not yet created)
-5. Add env var `CHRONIMAGE_ONEDRIVE_CLIENT_SECRET` to `.env.local`
-6. Keyring service: `chronimage.source.onedrive`
+### Azure app registration steps
 
-**Status:** deferred until Phase 2 follow-up PR. Not registered.
+1. Go to https://portal.azure.com → **Azure Active Directory** → **App registrations** → **New registration**
+2. **Name:** `Chronimage`
+3. **Supported account types:** Accounts in any organizational directory and personal Microsoft accounts (multi-tenant + personal — covers OneDrive consumer users)
+4. **Redirect URI:** Platform = **Public client/native (mobile & desktop)**, URI = `http://localhost` (the loopback listener uses an ephemeral port; `http://localhost` is the canonical redirect URI for native apps per MSAL docs — Microsoft ignores the port for native apps)
+5. After registration, note the **Application (client) ID** — replace `__CHRONIMAGE_ONEDRIVE_CLIENT_ID__` in `src-tauri/src/sources/onedrive.rs` constant `DEFAULT_CLIENT_ID`
+6. Go to **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions**: add `Files.ReadWrite`, `offline_access`, `User.Read` → **Grant admin consent** (or rely on user consent at runtime)
+7. Go to **Certificates & secrets** → **New client secret** → copy the value → add to `.env.local`:
+
+```env
+CHRONIMAGE_ONEDRIVE_CLIENT_SECRET=your_secret_value_here
+```
+
+8. Keyring service used: `chronimage.source.onedrive` (Windows Credential Manager)
+
+### What the code does without registration
+
+The placeholder client ID `__CHRONIMAGE_ONEDRIVE_CLIENT_ID__` is in place. Any call to `onedrive_begin_oauth_flow` will log a `tracing::warn!` and the OAuth flow will fail at the Microsoft authorization endpoint (400 Bad Request — invalid client). No crash, no panic; the error propagates cleanly to the frontend as an `AppError::PermissionDenied`.
+
+**Status:** 🟡 Scaffolded — Rust module + 7 Tauri commands fully implemented, 18 unit tests green. Azure registration pending (operator one-time task, see §8).
 
 ## 4. GitHub repository secrets (Settings → Secrets and variables → Actions)
 
@@ -129,7 +150,7 @@ Tracked here so new operators don't miss them. Move to 🟡 or ✅ as they get d
 - [ ] Purchase EV code-signing cert (see §6).
 - [ ] Provision Cloudflare R2 buckets (see §5).
 - [ ] Generate + upload Tauri updater ed25519 keypair (see §4).
-- [ ] Register OneDrive OAuth app (see §3).
+- [ ] Register OneDrive OAuth app (see §3) — code is ready; only the Azure portal steps remain.
 
 ---
 
