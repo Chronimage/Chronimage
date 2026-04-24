@@ -9,6 +9,8 @@ import {
   detectHardware,
   detectIcloudPath,
   embedImage,
+  gphotosUpload,
+  gphotosUploadScopeOk,
   importDryRun,
   importGoogleTakeout,
   listAlbums,
@@ -16,6 +18,8 @@ import {
   listIphoneDevices,
   listPhotos,
   listSources,
+  onedriveAuthStatus,
+  onedriveUpload,
   onThisDay,
   ping,
   refreshSmartAlbums,
@@ -224,6 +228,47 @@ describe('invoke wrappers', () => {
       sourceId: 9,
       recycleFiles: true,
       removeOrphanPhotos: false,
+    });
+  });
+
+  // ── Phase 2 §6: Cloud upload adapters ───────────────────────────────────────
+
+  it('gphotosUploadScopeOk calls gphotos_upload_scope_ok', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(true);
+    expect(await gphotosUploadScopeOk()).toBe(true);
+    expect(tauriInvoke).toHaveBeenCalledWith('gphotos_upload_scope_ok');
+  });
+
+  it('gphotosUpload forwards photoIds', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      uploaded_count: 2,
+      skipped_count: 0,
+      errors: [],
+    });
+    const r = await gphotosUpload([1, 2]);
+    expect(r.uploaded_count).toBe(2);
+    expect(tauriInvoke).toHaveBeenCalledWith('gphotos_upload', { photoIds: [1, 2] });
+  });
+
+  it('onedriveAuthStatus calls onedrive_auth_status', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(false);
+    expect(await onedriveAuthStatus()).toBe(false);
+    expect(tauriInvoke).toHaveBeenCalledWith('onedrive_auth_status');
+  });
+
+  it('onedriveUpload forwards photoIds + remoteFolder', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      uploaded_count: 3,
+      skipped_count: 1,
+      errors: ['dropped frame 42'],
+    });
+    const r = await onedriveUpload([1, 2, 3, 42], 'Chronimage');
+    expect(r.uploaded_count).toBe(3);
+    expect(r.skipped_count).toBe(1);
+    expect(r.errors).toEqual(['dropped frame 42']);
+    expect(tauriInvoke).toHaveBeenCalledWith('onedrive_upload', {
+      photoIds: [1, 2, 3, 42],
+      remoteFolder: 'Chronimage',
     });
   });
 });
