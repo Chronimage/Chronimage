@@ -75,15 +75,15 @@ describe('DevelopScreen', () => {
 
 describe('DevelopSidePanel', () => {
   it('switches preset category on click', () => {
-    render(<DevelopSidePanel />);
+    render(<DevelopSidePanel />, { wrapper });
     const sceneBtn = screen.getByRole('button', { name: 'Scene' });
     fireEvent.click(sceneBtn);
     expect(sceneBtn).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('shows the Save-current-edits prompt in the custom-presets tab', () => {
-    render(<DevelopSidePanel />);
+  it('shows the empty-state message in the custom-presets tab when none exist', () => {
+    render(<DevelopSidePanel />, { wrapper });
     fireEvent.click(screen.getByRole('button', { name: /my presets/i }));
-    expect(screen.getByRole('button', { name: /save current edits/i })).toBeInTheDocument();
+    expect(screen.getByText(/no custom presets yet/i)).toBeInTheDocument();
   });
 });

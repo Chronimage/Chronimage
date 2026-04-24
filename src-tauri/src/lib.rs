@@ -15,6 +15,7 @@ pub mod catalog;
 pub mod commands;
 pub mod cull;
 pub mod dedupe;
+pub mod develop;
 pub mod entitlements;
 pub mod error;
 pub mod export;

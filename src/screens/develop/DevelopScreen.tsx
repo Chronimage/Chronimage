@@ -1,54 +1,156 @@
 /**
- * DevelopScreen — Phase 3 RAW editor stub. Unified surface with Develop / Mask /
- * Prompt tabs, curves + sliders + presets + AI-prompt box. All sliders are
- * fully interactive locally (no RAW decode yet); Export / Save / Copy actions
- * are phase-gated until the wgpu develop pipeline lands (Phase 3).
+ * DevelopScreen — Phase 3 non-destructive RAW/JPEG editor. Slider drags
+ * post through `develop_apply` to the Rust CPU pipeline (rayon; wgpu is a
+ * follow-up); preview comes back as a base64 JPEG data URL. Save/Reset/
+ * CopyEdits hit the `edits` table via the develop commands.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { Seg } from '../../primitives/Seg';
 import { Thumbnail } from '../../primitives/Thumbnail';
-import { usePhotos } from '../../state/queries';
+import { useDevelopUi } from '../../state/develop';
+import {
+  type DevelopOperations,
+  useDevelopApply,
+  useDevelopCopyEdits,
+  useDevelopOpen,
+  useDevelopReset,
+  useDevelopSave,
+  usePhotos,
+} from '../../state/queries';
 import type { PhotoRow } from '../../tauri/invoke';
+import { warn } from '../../util/log';
 import { EditorInspector } from './EditorInspector';
-import { DEFAULT_DEVELOP_VALUES, type DevelopTab, type DevelopValues } from './types';
+import {
+  DEFAULT_DEVELOP_VALUES,
+  type DevelopTab,
+  type DevelopValues,
+  operationsToValues,
+  valuesToOperations,
+} from './types';
 
 export function DevelopScreen() {
   const { data: photos = [], isLoading } = usePhotos();
   const [focusedIdx, setFocusedIdx] = useState(0);
   const [tab, setTab] = useState<DevelopTab>('develop');
   const [values, setValues] = useState<DevelopValues>(DEFAULT_DEVELOP_VALUES);
+  const [preview, setPreview] = useState<string | null>(null);
   const [promptText, setPromptText] = useState(
     'Lift shadows slightly, keep skin tones natural, subtle dehaze on sky.',
   );
   const [promptStrength, setPromptStrength] = useState(65);
 
   const photo = photos[focusedIdx] ?? null;
+  const focusedPhotoId = photo?.id ?? null;
 
-  const updateValue = useCallback((key: keyof DevelopValues, value: number) => {
-    setValues((v) => ({ ...v, [key]: value }));
-  }, []);
+  // Publish focus + preview through the tiny Zustand store so the
+  // DevelopSidePanel (a sibling in the app shell) can drive
+  // `develop_preset_apply` against the right photo and push the
+  // returned preview back into the stage.
+  const setSharedFocus = useDevelopUi((s) => s.setFocusedPhotoId);
+  const setSharedPreview = useDevelopUi((s) => s.setPreview);
+  const sharedPreview = useDevelopUi((s) => s.preview);
+  useEffect(() => {
+    setSharedFocus(focusedPhotoId);
+  }, [focusedPhotoId, setSharedFocus]);
+
+  // Load the photo's current edit state + baseline preview when it changes.
+  const { data: opened } = useDevelopOpen(focusedPhotoId);
+  useEffect(() => {
+    if (!opened) return;
+    setValues(operationsToValues(opened.operations));
+    setPreview(opened.preview_data_url);
+    setSharedPreview(opened.preview_data_url);
+  }, [opened, setSharedPreview]);
+
+  // If the sidepanel pushed a new preview (preset apply), surface it.
+  useEffect(() => {
+    if (sharedPreview && sharedPreview !== preview) setPreview(sharedPreview);
+  }, [sharedPreview, preview]);
+
+  const applyMut = useDevelopApply();
+  const saveMut = useDevelopSave();
+  const resetMut = useDevelopReset();
+  const copyMut = useDevelopCopyEdits();
+
+  // Debounce slider input → backend render. 80 ms feels responsive; the
+  // rayon pipeline at 1280 long-edge runs ~30–60 ms on i5.
+  const debounceTimer = useRef<number | null>(null);
+  const scheduleApply = useCallback(
+    (ops: DevelopOperations) => {
+      if (focusedPhotoId == null) return;
+      if (debounceTimer.current !== null) {
+        window.clearTimeout(debounceTimer.current);
+      }
+      debounceTimer.current = window.setTimeout(() => {
+        applyMut.mutate(
+          { photoId: focusedPhotoId, operations: ops },
+          {
+            onSuccess: (r) => setPreview(r.preview_data_url),
+            onError: (e) => warn('develop_apply failed', e),
+          },
+        );
+      }, 80);
+    },
+    [applyMut, focusedPhotoId],
+  );
+
+  const updateValue = useCallback(
+    (key: keyof DevelopValues, value: number) => {
+      setValues((prev) => {
+        const next = { ...prev, [key]: value };
+        scheduleApply(valuesToOperations(next));
+        return next;
+      });
+    },
+    [scheduleApply],
+  );
 
   const autoLight = useCallback(() => {
-    // Local stub: compute sane defaults based on the photo's sharpness hint.
-    setValues({
+    const next: DevelopValues = {
       exp: 12,
       con: 8,
       hi: -24,
       sh: 32,
+      whites: 0,
+      blacks: 0,
       temp: 6,
       tint: -2,
       vib: 14,
       sat: 4,
       clarity: 8,
       dehaze: 10,
-    });
-  }, []);
+    };
+    setValues(next);
+    scheduleApply(valuesToOperations(next));
+  }, [scheduleApply]);
 
-  const resetEdits = useCallback(() => setValues(DEFAULT_DEVELOP_VALUES), []);
+  const resetEdits = useCallback(() => {
+    if (focusedPhotoId == null) return;
+    resetMut.mutate(focusedPhotoId, {
+      onSuccess: () => {
+        setValues(DEFAULT_DEVELOP_VALUES);
+        scheduleApply(valuesToOperations(DEFAULT_DEVELOP_VALUES));
+      },
+    });
+  }, [focusedPhotoId, resetMut, scheduleApply]);
+
+  const saveEdits = useCallback(() => {
+    if (focusedPhotoId == null) return;
+    saveMut.mutate({ photoId: focusedPhotoId, operations: valuesToOperations(values) });
+  }, [focusedPhotoId, saveMut, values]);
+
+  const copyEdits = useCallback(() => {
+    if (focusedPhotoId == null) return;
+    copyMut.mutate(focusedPhotoId, {
+      onSuccess: (ops) => {
+        setValues(operationsToValues(ops));
+      },
+    });
+  }, [focusedPhotoId, copyMut]);
 
   if (isLoading) {
     return (
@@ -98,7 +200,15 @@ export function DevelopScreen() {
 
   return (
     <div className="canvas">
-      <DevelopToolbar photo={photo} megapixels={megapixels} tab={tab} setTab={setTab} />
+      <DevelopToolbar
+        photo={photo}
+        megapixels={megapixels}
+        tab={tab}
+        setTab={setTab}
+        onSave={saveEdits}
+        onCopy={copyEdits}
+        saving={saveMut.isPending}
+      />
 
       {tab !== 'prompt' ? (
         <DevelopStageSplit
@@ -111,6 +221,7 @@ export function DevelopScreen() {
           onValueChange={updateValue}
           onAutoLight={autoLight}
           onReset={resetEdits}
+          preview={preview}
         />
       ) : (
         <PromptStage
@@ -130,9 +241,12 @@ interface DevelopToolbarProps {
   megapixels: string;
   tab: DevelopTab;
   setTab: (tab: DevelopTab) => void;
+  onSave: () => void;
+  onCopy: () => void;
+  saving: boolean;
 }
 
-function DevelopToolbar({ photo, megapixels, tab, setTab }: DevelopToolbarProps) {
+function DevelopToolbar({ photo, megapixels, tab, setTab, onSave, onCopy, saving }: DevelopToolbarProps) {
   return (
     <div className="toolbar">
       <button type="button" className="btn" style={{ padding: '5px 8px' }} title="Previous photo">
@@ -176,23 +290,17 @@ function DevelopToolbar({ photo, megapixels, tab, setTab }: DevelopToolbarProps)
         <Icon name="eye" size={13} /> Before/After
       </button>
       <div className="divider" />
-      <button
-        type="button"
-        className="btn phase-gated"
-        disabled
-        aria-disabled="true"
-        title="Coming in Phase 3 · edits clipboard"
-      >
+      <button type="button" className="btn" onClick={onCopy} title="Copy current edits to the clipboard">
         <Icon name="layers" size={13} /> Copy edits
       </button>
       <button
         type="button"
-        className="btn primary phase-gated"
-        disabled
-        aria-disabled="true"
-        title="Coming in Phase 2 · Export sheet"
+        className="btn primary"
+        onClick={onSave}
+        disabled={saving}
+        title="Save current edits as a new history entry"
       >
-        <Icon name="download" size={13} /> Export
+        <Icon name="download" size={13} /> {saving ? 'Saving…' : 'Save'}
       </button>
     </div>
   );
@@ -208,6 +316,7 @@ interface DevelopStageSplitProps {
   onValueChange: (key: keyof DevelopValues, value: number) => void;
   onAutoLight: () => void;
   onReset: () => void;
+  preview: string | null;
 }
 
 function DevelopStageSplit({
@@ -220,6 +329,7 @@ function DevelopStageSplit({
   onValueChange,
   onAutoLight,
   onReset,
+  preview,
 }: DevelopStageSplitProps) {
   return (
     <div className="editor-stage">
@@ -233,11 +343,36 @@ function DevelopStageSplit({
               position: 'relative',
             }}
           >
-            <Thumbnail
-              photoId={photo.id}
-              sizePx={1280}
-              photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
-            />
+            {preview ? (
+              <img
+                src={preview}
+                alt={photo.filename}
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  borderRadius: 4,
+                  background: 'var(--bg-chrome)',
+                }}
+              />
+            ) : (
+              <div
+                className="mono"
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'var(--fg-mute)',
+                  fontSize: 12,
+                }}
+              >
+                Rendering…
+              </div>
+            )}
             <div className="editor-histogram" aria-hidden="true">
               <svg viewBox="0 0 100 40" preserveAspectRatio="none">
                 <path

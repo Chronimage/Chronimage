@@ -742,3 +742,88 @@ export function useRenameUserTag() {
     },
   });
 }
+
+// ── Phase 3: Develop ──────────────────────────────────────────────────────────
+
+import {
+  type DevelopOpenResponse,
+  type DevelopOperations,
+  type DevelopPreset,
+  developApply,
+  developCopyEdits,
+  developOpen,
+  developPasteEdits,
+  developPresetApply,
+  developReset,
+  developSave,
+  type PastedReceipt,
+  presetsList,
+  type RenderReceipt,
+} from '../tauri/invoke';
+
+export type { DevelopOpenResponse, DevelopOperations, DevelopPreset, PastedReceipt, RenderReceipt };
+
+export function useDevelopOpen(photoId: number | null) {
+  return useQuery({
+    queryKey: ['develop_open', photoId],
+    queryFn: () => developOpen(photoId as number),
+    enabled: photoId != null,
+  });
+}
+
+export function useDevelopApply() {
+  return useMutation<RenderReceipt, Error, { photoId: number; operations: DevelopOperations }>({
+    mutationFn: ({ photoId, operations }) => developApply(photoId, operations),
+  });
+}
+
+export function useDevelopSave() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { photoId: number; operations: DevelopOperations; label?: string }>({
+    mutationFn: ({ photoId, operations, label }) => developSave(photoId, operations, label),
+    onSuccess: (_id, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['develop_open', photoId] });
+    },
+  });
+}
+
+export function useDevelopReset() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, number>({
+    mutationFn: (photoId) => developReset(photoId),
+    onSuccess: (_n, photoId) => {
+      qc.invalidateQueries({ queryKey: ['develop_open', photoId] });
+    },
+  });
+}
+
+export function useDevelopCopyEdits() {
+  return useMutation<DevelopOperations, Error, number>({
+    mutationFn: (photoId) => developCopyEdits(photoId),
+  });
+}
+
+export function useDevelopPasteEdits() {
+  const qc = useQueryClient();
+  return useMutation<PastedReceipt, Error, { photoIds: number[]; operations: DevelopOperations }>({
+    mutationFn: ({ photoIds, operations }) => developPasteEdits(photoIds, operations),
+    onSuccess: (_r, { photoIds }) => {
+      for (const id of photoIds) {
+        qc.invalidateQueries({ queryKey: ['develop_open', id] });
+      }
+    },
+  });
+}
+
+export function useDevelopPresetApply() {
+  return useMutation<RenderReceipt, Error, { photoId: number; presetId: number; strength: number }>({
+    mutationFn: ({ photoId, presetId, strength }) => developPresetApply(photoId, presetId, strength),
+  });
+}
+
+export function usePresets(group?: string) {
+  return useQuery({
+    queryKey: ['presets', group ?? 'all'],
+    queryFn: () => presetsList(group),
+  });
+}

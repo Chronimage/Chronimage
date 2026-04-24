@@ -1,7 +1,24 @@
-import { useCallback, useState } from 'react';
+/**
+ * DevelopSidePanel — Phase 3 preset library.
+ *
+ * Presets come from the `presets` table (seeded on boot by
+ * `develop::presets::seed_builtins`). The user clicks a card → we call
+ * `develop_preset_apply(photo_id, preset_id, strength)` which returns a
+ * RenderReceipt; we push the preview URL into `useDevelopUi` so the
+ * sibling DevelopScreen swaps its stage image.
+ *
+ * Strength is per-preset (Map<presetId, strength>) with a live slider for
+ * the most-recently-applied one. The old hardcoded PRESETS list was
+ * replaced with live query data.
+ */
+
+import { useCallback, useMemo, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
-import { PRESETS, type PresetCategory } from './types';
+import { useDevelopUi } from '../../state/develop';
+import { useDevelopPresetApply, usePresets } from '../../state/queries';
+import { warn } from '../../util/log';
+import type { PresetCategory } from './types';
 
 const CATEGORIES: { id: PresetCategory; label: string }[] = [
   { id: 'face', label: 'Face' },
@@ -11,7 +28,7 @@ const CATEGORIES: { id: PresetCategory; label: string }[] = [
   { id: 'custom', label: 'My presets' },
 ];
 
-const CAT_TO_GROUP: Record<Exclude<PresetCategory, 'custom'>, 'Face' | 'Scene' | 'Quality' | 'Style'> = {
+const CAT_TO_GROUP: Record<Exclude<PresetCategory, 'custom'>, string> = {
   face: 'Face',
   scene: 'Scene',
   quality: 'Quality',
@@ -20,63 +37,99 @@ const CAT_TO_GROUP: Record<Exclude<PresetCategory, 'custom'>, 'Face' | 'Scene' |
 
 export function DevelopSidePanel() {
   const [category, setCategory] = useState<PresetCategory>('face');
-  const [activePresets, setActivePresets] = useState<Map<string, number>>(() => new Map([['p-1', 55]]));
+  const [activePresets, setActivePresets] = useState<Map<number, number>>(() => new Map());
 
-  const onPresetToggle = useCallback((id: string) => {
-    setActivePresets((prev) => {
-      const next = new Map(prev);
-      if (next.has(id)) next.delete(id);
-      else next.set(id, 50);
-      return next;
-    });
-  }, []);
+  const focusedPhotoId = useDevelopUi((s) => s.focusedPhotoId);
+  const setPreview = useDevelopUi((s) => s.setPreview);
 
-  const onPresetStrength = useCallback((id: string, strength: number) => {
-    setActivePresets((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Map(prev);
-      next.set(id, strength);
-      return next;
-    });
-  }, []);
+  const { data: allPresets = [] } = usePresets();
+  const applyPreset = useDevelopPresetApply();
 
-  const filtered =
-    category === 'custom'
-      ? []
-      : PRESETS.filter((p) => p.group === CAT_TO_GROUP[category as Exclude<PresetCategory, 'custom'>]);
+  const filtered = useMemo(() => {
+    if (category === 'custom') {
+      return allPresets.filter((p) => !p.is_system);
+    }
+    const g = CAT_TO_GROUP[category];
+    return allPresets.filter((p) => p.group_name === g);
+  }, [allPresets, category]);
+
+  const pushApply = useCallback(
+    (presetId: number, strength: number) => {
+      if (focusedPhotoId == null) return;
+      applyPreset.mutate(
+        { photoId: focusedPhotoId, presetId, strength },
+        {
+          onSuccess: (r) => setPreview(r.preview_data_url),
+          onError: (e) => warn('develop_preset_apply failed', e),
+        },
+      );
+    },
+    [applyPreset, focusedPhotoId, setPreview],
+  );
+
+  const onPresetClick = useCallback(
+    (presetId: number) => {
+      setActivePresets((prev) => {
+        const next = new Map(prev);
+        if (next.has(presetId)) {
+          next.delete(presetId);
+          // Revert to identity/current-saved when un-applying.
+          pushApply(presetId, 0);
+        } else {
+          next.set(presetId, 75);
+          pushApply(presetId, 75);
+        }
+        return next;
+      });
+    },
+    [pushApply],
+  );
+
+  const onPresetStrength = useCallback(
+    (presetId: number, strength: number) => {
+      setActivePresets((prev) => {
+        if (!prev.has(presetId)) return prev;
+        const next = new Map(prev);
+        next.set(presetId, strength);
+        return next;
+      });
+      pushApply(presetId, strength);
+    },
+    [pushApply],
+  );
 
   const activeEntries = [...activePresets.entries()];
-  const primaryPreset = activeEntries[0];
-  const primaryPresetMeta = primaryPreset ? PRESETS.find((p) => p.id === primaryPreset[0]) : null;
+  const primaryEntry = activeEntries[0];
+  const primaryPreset = primaryEntry ? allPresets.find((p) => p.id === primaryEntry[0]) : null;
 
   return (
     <div className="sidepanel">
       <div className="head">
         <h3>Presets</h3>
-        <span className="count mono">gemma4</span>
+        <span className="count mono">{focusedPhotoId == null ? '—' : `photo ${focusedPhotoId}`}</span>
       </div>
 
-      {primaryPreset && primaryPresetMeta && (
+      {primaryEntry && primaryPreset && (
         <div className="preset-active-sticky">
-          <div className="lbl mono">Active · {primaryPresetMeta.name}</div>
+          <div className="lbl mono">Active · {primaryPreset.name}</div>
           <div className="main">
             <span>Strength</span>
-            <span className="val mono">{primaryPreset[1]}</span>
+            <span className="val mono">{primaryEntry[1]}</span>
           </div>
           <input
             type="range"
             min="0"
             max="100"
-            value={primaryPreset[1]}
-            onChange={(e) => onPresetStrength(primaryPreset[0], Number(e.target.value))}
-            aria-label={`${primaryPresetMeta.name} strength`}
+            value={primaryEntry[1]}
+            onChange={(e) => onPresetStrength(primaryEntry[0], Number(e.target.value))}
+            aria-label={`${primaryPreset.name} strength`}
           />
           <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
             {activeEntries.map(([id, strength], i) => {
-              const meta = PRESETS.find((p) => p.id === id);
+              const meta = allPresets.find((p) => p.id === id);
               if (!meta) return null;
               return (
-                <Chip key={id} variant={i === 0 ? 'solid' : undefined} onClose={() => onPresetToggle(id)}>
+                <Chip key={id} variant={i === 0 ? 'solid' : undefined} onClose={() => onPresetClick(id)}>
                   {meta.name} · {strength}
                 </Chip>
               );
@@ -109,7 +162,7 @@ export function DevelopSidePanel() {
           flex: 1,
         }}
       >
-        {category === 'custom' ? (
+        {category === 'custom' && filtered.length === 0 ? (
           <div
             style={{
               padding: 24,
@@ -123,17 +176,9 @@ export function DevelopSidePanel() {
             }}
           >
             <Icon name="sparkles" size={18} />
-            <div>Save any combination as a preset.</div>
-            <button
-              type="button"
-              className="btn phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Coming in Phase 3 · preset library"
-              style={{ marginTop: 12, justifyContent: 'center', width: '100%' }}
-            >
-              <Icon name="plus" size={13} /> Save current edits
-            </button>
+            <div>
+              No custom presets yet. Save any combination of slider values from the inspector as a preset.
+            </div>
           </div>
         ) : (
           filtered.map((p, i) => {
@@ -144,8 +189,10 @@ export function DevelopSidePanel() {
                 key={p.id}
                 type="button"
                 className={`preset-card ${active ? 'on' : ''}`}
-                onClick={() => onPresetToggle(p.id)}
+                onClick={() => onPresetClick(p.id)}
+                disabled={focusedPhotoId == null}
                 aria-pressed={active}
+                title={focusedPhotoId == null ? 'Open a photo first' : (p.description ?? p.name)}
               >
                 <div
                   className="pv"
@@ -155,44 +202,13 @@ export function DevelopSidePanel() {
                 />
                 <div className="preset-meta">
                   <div className="name">{p.name}</div>
-                  <div className="sub">{p.sub}</div>
+                  <div className="sub">{p.description ?? p.group_name}</div>
                 </div>
                 <div className="val mono">{active && strength !== undefined ? String(strength) : '—'}</div>
               </button>
             );
           })
         )}
-      </div>
-
-      <div
-        style={{
-          marginTop: 'auto',
-          padding: 10,
-          borderTop: '1px solid var(--stroke)',
-          display: 'flex',
-          gap: 6,
-        }}
-      >
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 3 · preset library"
-          style={{ flex: 1, justifyContent: 'center', fontSize: 12, padding: '7px' }}
-        >
-          <Icon name="plus" size={12} /> Save as preset
-        </button>
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 3 · import .xmp presets"
-          style={{ justifyContent: 'center', fontSize: 12, padding: '7px' }}
-        >
-          <Icon name="download" size={12} />
-        </button>
       </div>
     </div>
   );

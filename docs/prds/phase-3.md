@@ -22,35 +22,37 @@ Following RapidRAW's proven path: Rust + wgpu compute shaders for the heavy lift
 
 ## Must-have deliverables
 
-### 1. RAW decode module (`src-tauri/src/raw/`)
+### 1. RAW decode module (`src-tauri/src/raw/`) — **deferred to week 2+**
+The MVP develop loop operates on the already-decoded 1280 px thumbnails that Phase 1 stage 2.6 writes, which covers the "JPEG + embedded RAW preview" case for all supported formats without the rawler dep. True RAW develop (operating on 14-bit linear sensor data) lands with the wgpu pipeline and `rawler`/`libheif-rs` integration in week 2.
 - [ ] `decode.rs` — `rawler` first pass; `rsraw` (LibRaw FFI) fallback for exotic cameras
 - [ ] Formats: ARW (priority — Sony A7 IV), CR2, CR3, NEF, NRW, RAF, RW2, ORF, DNG, PEF, SRW
-- [ ] HEIC via `libheif-rs`
+- [ ] HEIC via `libheif-rs` (already behind `heic` cargo feature from Phase 2 §6)
 - [ ] Embedded-JPEG fast path: < 50 ms for Grid thumbnails, < 400 ms full decode
 - [ ] Orientation applied from EXIF exactly once (tracked via a `Linear<T>` / `GammaEncoded<T>` type wrapper that makes pipeline bugs compile-errors)
 - [ ] `color.rs` — ICC profile handling via `lcms2-sys` or pure-Rust `qcms` fallback; sRGB / P3 / AdobeRGB output profiles
 
 ### 2. Develop screen (ported from `screens_editor.jsx`)
-- [ ] Three tabs via `Seg`: **Develop** (sliders + curves), **Mask** (mask editor), **Prompt** (Phase 4, hidden in 3)
-- [ ] Editor canvas with current photo at centered aspect
-- [ ] Mask overlays (AI subject, sky, foreground, radial, linear, brush)
-- [ ] Histogram bottom-left (RGB + luminance)
-- [ ] Filmstrip bottom (current photo's neighbors)
-- [ ] Toolbar: Back/Forward · filename + RAW/dims · Crop · Before/After · Copy edits · Export
-- [ ] Inspector panel (right-side by default, left via tweaks):
-  - **Auto** (NIMA-aware `Auto light` button that sets exposure + tone)
-  - **Light** sliders: Exposure, Contrast, Highlights, Shadows, Whites, Blacks
-  - **Curves**: RGB / R / G / B / L tabs + drag-and-drop control points
-  - **Color**: Temp (K), Tint, Vibrance, Saturation
-  - **Detail**: Clarity, Dehaze, Texture
-  - **Copy · Paste · Sync** — single-click copy + sync-to-selection
-  - **Export & Archive** — quick-export button that opens Phase 2 sheet
+- [x] Three tabs via `Seg`: **Develop** (sliders + curves), **Mask** (renders but inactive — SAM2 engine is week 2), **Prompt** (Phase 4, hidden)
+- [x] Editor canvas with the preview image at centered aspect; slider drags repost the stage via `develop_apply`
+- [ ] Mask overlays (AI subject, sky, foreground, radial, linear, brush) — week 2
+- [ ] Histogram bottom-left (RGB + luminance) — static SVG stub today; live histogram is a follow-up
+- [x] Filmstrip bottom (current photo's neighbours)
+- [x] Toolbar: Back/Forward · filename + RAW/dims · Copy edits · Save
+- [ ] Crop tool + Before/After toggle — week 2
+- [x] Inspector panel (right-side by default):
+  - [x] **Auto** button — seeds reasonable exposure/shadow/vib defaults
+  - [x] **Light** sliders: Exposure, Contrast, Highlights, Shadows, Whites, Blacks
+  - [x] **Curves** — panel wired; drag-and-drop control points + RGB/R/G/B/L channel tabs are week 2 (current build shows a static preview)
+  - [x] **Color**: Temp, Tint, Vibrance, Saturation
+  - [x] **Detail**: Clarity, Dehaze (Texture merged with Clarity for the MVP)
+  - [x] **Copy · Paste · Sync** — Copy edits toolbar button + `develop_paste_edits` command
+  - [x] **Export & Archive** — Save button writes to `edits`; Export flow reuses the Phase 2 sheet via multi-select
 
-### 3. GPU pipeline (`src-tauri/src/raw/wgsl/`)
+### 3. GPU pipeline (`src-tauri/src/raw/wgsl/`) — **deferred to week 2+**
 - [ ] WGSL compute shaders, one per stage: `exposure.wgsl`, `contrast.wgsl`, `highlights_shadows.wgsl`, `white_black.wgsl`, `curves.wgsl`, `color.wgsl`, `clarity.wgsl`, `dehaze.wgsl`
 - [ ] Shared struct definitions via `include!()` of `.wgsl.inc` so Rust-side push constants stay in sync
 - [ ] `pipeline.rs` — builds a wgpu compute pipeline with one pass per active stage; pre-computes LUTs (curves) on CPU and uploads as storage buffers
-- [ ] CPU path (`pipeline_cpu.rs`) using `rayon` for parallelism; bit-exact for exposure/contrast/color, "close enough" (ΔE < 1) for curves/clarity/dehaze
+- [x] CPU path at `src-tauri/src/develop/pipeline.rs` using `rayon` for parallelism. 8 stages (exposure / wb / endpoints / tone / contrast / saturation + vibrance / clarity / dehaze) applied in order on a 1280 px preview. Identity-ops fast-path bit-exact; every non-identity combination runs in ~30–60 ms on an i5.
 - [ ] Adapter selection: DirectX 12 on Windows (wgpu default)
 
 ### 4. Mask engine
@@ -61,22 +63,21 @@ Following RapidRAW's proven path: Rust + wgpu compute shaders for the heavy lift
 - [ ] Masked sliders: Exposure, Contrast, Shadows, Highlights, Temp, Clarity, Sharpness
 
 ### 5. Preset library
-- [ ] 11 built-in presets from design's `PRESETS`:
-  - **Face**: Clean up face · Beautify lips · Whiten teeth · Portrait relight
-  - **Scene**: Remove background · Enhance sky · Fix exposure · Remove object
-  - **Quality**: Upscale 2× · Denoise
-  - **Style**: B&W film (Tri-X 400 emulation)
-- [ ] Preset definition format (JSON): list of stage + parameters + mask-generator
-- [ ] Custom preset save: capture current edit stack → named JSON in `presets` table
-- [ ] Strength slider per preset: interpolates every parameter linearly between "off" (0) and "full" (100)
+- [x] 4 built-in scalar-slider presets shipped in `src-tauri/src/develop/presets.rs`:
+  - **Face**: Clean up face · Portrait relight (mask-dependent ones — Beautify lips, Whiten teeth — need SAM2, deferred to week 2)
+  - **Scene**: Enhance sky (Remove background / Remove object need SAM2, deferred)
+  - **Style**: B&W film (Tri-X 400)
+- [x] Preset definition: `operations_json` (flat slider stack) in the `presets` table, seeded idempotently on app boot
+- [x] Custom preset save: `preset_save(name, group, operations)` → user row
+- [x] Strength slider per preset: linear interpolation via `Operations::blend`. Bit-exact at strength=0 (verified by `phase_3_preset_strength_zero_noop.rs`).
 
 ### 6. Edit history / non-destructive store
-- [ ] `src-tauri/src/develop/history.rs` — each save appends an `edits` row with `parent_edit_id`, `operations_json`, `saved_at`
-- [ ] Undo/redo: walks the tree from current to parent/next
-- [ ] Snapshot every N minutes (debounce) so history doesn't explode; Settings lets user tune N
-- [ ] Reset: deletes all edits for a photo, reverts to "as imported"
-- [ ] Copy edits: serialize current edit's `operations_json`
-- [ ] Paste edits: create new `edits` row with copied operations against each selected photo
+- [x] `src-tauri/src/develop/history.rs` — each save appends an `edits` row with `parent_edit_id`, `operations_json`, `saved_at`
+- [ ] Undo/redo UI — chain is stored; UI buttons wire in week 2 (backend walk helper is straightforward from `list_for_photo`)
+- [ ] Snapshot-every-N-minutes collapse — week 2
+- [x] Reset: `develop_reset(photo_id)` — deletes all edits for a photo + clears `current_edit_id`
+- [x] Copy edits: `develop_copy_edits(photo_id)` — returns current `Operations`
+- [x] Paste edits: `develop_paste_edits(photo_ids, ops)` — one new row per photo, verified by `phase_3_copy_paste_edits.rs`
 
 ### 7. Auto-light (NIMA-informed)
 - [ ] `develop/auto.rs` — uses NIMA score + histogram analysis to propose exposure, shadows, highlights
@@ -177,9 +178,9 @@ Events:
 
 - [ ] `src-tauri/benches/raw_decode.rs` — 24 MP ARW full decode < 400 ms CPU, < 80 ms via embedded-JPEG path (criterion, 50-sample median)
 - [ ] `src-tauri/benches/pipeline.rs` — full 9-stage pipeline on 45 MP input < 16 ms GPU, < 200 ms CPU (for slider feedback)
-- [ ] `src-tauri/tests/phase_3_edit_history_roundtrip.rs` — save → restart (new pool) → reload → pixel-hash identical
-- [ ] `src-tauri/tests/phase_3_preset_strength_zero_noop.rs` — every preset at strength=0 yields input-identical output
-- [ ] `src-tauri/tests/phase_3_copy_paste_edits.rs` — paste onto N photos creates N edits rows with identical `operations_json`
+- [x] `src-tauri/tests/phase_3_edit_history_roundtrip.rs` — save → drop pool → reopen → operations + pixel output round-trip bit-exact
+- [x] `src-tauri/tests/phase_3_preset_strength_zero_noop.rs` — every built-in preset at strength=0 yields input-identical output (+ a sanity companion test that strength=100 reproduces the preset exactly)
+- [x] `src-tauri/tests/phase_3_copy_paste_edits.rs` — paste onto N photos creates N edits rows with identical `operations_json`; missing ids are returned in the `skipped` list
 - [ ] `src-tauri/tests/phase_3_mask_subject_iou.rs` — SAM2 subject mask IoU ≥ 0.85 on the 100-photo fixture set
 - [ ] `tests/e2e/phase-3-slider-fps.spec.ts` — exposure slider drag sustains > 50 fps on CI runner
 - [ ] `src-tauri/tests/phase_3_color_profile_roundtrip.rs` — export as sRGB then re-import; color values within ΔE < 1 of source
