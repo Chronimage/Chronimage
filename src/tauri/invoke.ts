@@ -1166,6 +1166,70 @@ export async function xmpExportAll(): Promise<XmpExportReceipt> {
   return tauriInvoke<XmpExportReceipt>('xmp_export_all');
 }
 
+// ── Prompt sidecar (Phase 4 §1/§2) ────────────────────────────────────────
+
+export interface SidecarStatus {
+  configured: boolean;
+  url: string | null;
+  reachable: boolean;
+  model: string | null;
+  error: string | null;
+}
+
+export interface PromptEditRequest {
+  photo_id: number;
+  prompt: string;
+  strength: number;
+  constraints: string[];
+  mask_b64?: string | null;
+}
+
+export interface PromptEditResult {
+  image_b64: string;
+  latency_ms: number;
+  model_id: string;
+  seed: number;
+}
+
+export async function promptSidecarGet(): Promise<string | null> {
+  return tauriInvoke<string | null>('prompt_sidecar_get');
+}
+
+export async function promptSidecarSet(url: string | null): Promise<void> {
+  return tauriInvoke('prompt_sidecar_set', { url });
+}
+
+export async function promptSidecarModelGet(): Promise<string | null> {
+  return tauriInvoke<string | null>('prompt_sidecar_model_get');
+}
+
+export async function promptSidecarModelSet(model: string | null): Promise<void> {
+  return tauriInvoke('prompt_sidecar_model_set', { model });
+}
+
+export async function promptSidecarPing(): Promise<SidecarStatus> {
+  return tauriInvoke<SidecarStatus>('prompt_sidecar_ping');
+}
+
+export async function promptEdit(req: PromptEditRequest): Promise<PromptEditResult> {
+  return tauriInvoke<PromptEditResult>('prompt_edit', { req });
+}
+
+export interface MaskFromPromptRequest {
+  photo_id: number;
+  prompt: string;
+}
+
+export interface MaskFromPromptResult {
+  mask_b64: string;
+  confidence: number;
+  latency_ms: number;
+}
+
+export async function maskFromPrompt(req: MaskFromPromptRequest): Promise<MaskFromPromptResult> {
+  return tauriInvoke<MaskFromPromptResult>('mask_from_prompt', { req });
+}
+
 export interface ShortcutRow {
   command_id: string;
   key_binding: string;

@@ -255,26 +255,40 @@ async fn execute_pipeline(
                 .await?;
                 imported.fetch_add(1, Ordering::Relaxed);
 
-                // Phase 4 §7 — XMP sidecar import. Best-effort; a malformed
-                // sidecar logs a warn but never fails the import.
-                if let Some(sidecar) = crate::xmp::sidecar_for(&path) {
-                    match crate::xmp::read_sidecar(&sidecar) {
-                        Ok(Some(data)) if !data.is_empty() => {
-                            if let Err(e) = crate::xmp::apply_to_photo(&pool, photo_id, &data).await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    sidecar = %sidecar.display(),
-                                    "xmp: apply_to_photo failed"
-                                );
-                            }
+                // Phase 4 §7 — XMP metadata import. Sidecar first (Lightroom
+                // convention), falling back to the embedded XMP packet in
+                // the photo itself (JPEG APP1 / TIFF-ARW tag 700). Best-
+                // effort; malformed data logs a warn but never fails the
+                // import.
+                let xmp_data = match crate::xmp::sidecar_for(&path) {
+                    Some(sidecar) => match crate::xmp::read_sidecar(&sidecar) {
+                        Ok(Some(data)) if !data.is_empty() => Some(data),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                sidecar = %sidecar.display(),
+                                "xmp: read_sidecar failed"
+                            );
+                            None
                         }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!(
+                        _ => None,
+                    },
+                    None => match crate::xmp::read_embedded(&path) {
+                        Ok(Some(data)) if !data.is_empty() => Some(data),
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %path.display(), "xmp: read_embedded failed");
+                            None
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(data) = xmp_data {
+                    if let Err(e) = crate::xmp::apply_to_photo(&pool, photo_id, &data).await {
+                        tracing::warn!(
                             error = %e,
-                            sidecar = %sidecar.display(),
-                            "xmp: read_sidecar failed"
-                        ),
+                            path = %path.display(),
+                            "xmp: apply_to_photo failed"
+                        );
                     }
                 }
 

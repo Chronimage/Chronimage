@@ -24,6 +24,7 @@ import { useUi } from '../state/ui';
 import { DOWNLOAD_PROGRESS_EVENT, type DownloadProgressEvent } from '../tauri/invoke';
 import { debug } from '../util/log';
 import { GooglePhotosPanel } from './GooglePhotosPanel';
+import { PromptSidecarSection } from './settings/PromptSidecarSection';
 import { ShortcutsSection } from './settings/ShortcutsSection';
 
 /**
@@ -1359,7 +1360,10 @@ export function SettingsScreen() {
             </div>
           </div>
 
-          {/* ── 5. Keyboard shortcuts ── */}
+          {/* ── 5. Prompt sidecar ── */}
+          <PromptSidecarSection />
+
+          {/* ── 6. Keyboard shortcuts ── */}
           <ShortcutsSection />
         </div>
       </div>

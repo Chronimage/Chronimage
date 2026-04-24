@@ -65,6 +65,55 @@ pub fn read_sidecar(path: &Path) -> AppResult<Option<XmpData>> {
     Ok(Some(parse_str(&text)))
 }
 
+/// Read XMP metadata from a photo file itself (JPEG APP1 segment,
+/// TIFF/ARW tag 700). Both formats wrap the XMP packet in the standard
+/// `<?xpacket begin=…?> … <x:xmpmeta …> … </x:xmpmeta> … <?xpacket
+/// end=…?>` envelope. We scan the first few MB of bytes for the
+/// `<x:xmpmeta` / `</x:xmpmeta>` brackets — simpler than a full TIFF
+/// IFD walk and works across JPEG + ARW + DNG + most other wrappers.
+///
+/// Returns `Ok(None)` when the file has no embedded XMP. Bounded to
+/// the first 4 MB to keep the scan cheap on 60+ MB RAWs; camera vendors
+/// put the XMP packet near the file head.
+pub fn read_embedded(path: &Path) -> AppResult<Option<XmpData>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    const SCAN_LIMIT: usize = 4 * 1024 * 1024;
+    let bytes = {
+        let f = std::fs::File::open(path)?;
+        use std::io::Read;
+        let metadata = f.metadata()?;
+        let want = std::cmp::min(metadata.len() as usize, SCAN_LIMIT);
+        let mut buf = Vec::with_capacity(want);
+        f.take(want as u64).read_to_end(&mut buf)?;
+        buf
+    };
+
+    let open = b"<x:xmpmeta";
+    let close = b"</x:xmpmeta>";
+    let Some(start) = find_subslice(&bytes, open) else {
+        return Ok(None);
+    };
+    let Some(end_rel) = find_subslice(&bytes[start..], close) else {
+        return Ok(None);
+    };
+    let end = start + end_rel + close.len();
+    let slice = &bytes[start..end];
+    let text = std::str::from_utf8(slice)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| String::from_utf8_lossy(slice).into_owned());
+    Ok(Some(parse_str(&text)))
+}
+
+/// First occurrence of `needle` in `haystack`, or `None`.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 /// Probe `<photo_path>.xmp`, `<photo_path>.XMP`, and `<photo_path_sans_ext>.xmp`
 /// — Lightroom writes the bare-stem variant for RAWs (`IMG_0001.xmp` next
 /// to `IMG_0001.ARW`). Returns the first hit.
@@ -645,6 +694,37 @@ mod tests {
         let photo = tmp.path().join("IMG_0003.jpg");
         std::fs::write(&photo, b"jpg").unwrap();
         assert!(sidecar_for(&photo).is_none());
+    }
+
+    #[test]
+    fn read_embedded_extracts_xmp_packet_from_raw_bytes() {
+        // Simulate a JPEG/ARW: random leading bytes, then an XMP packet
+        // (wrapped in xpacket markers like real cameras write), then
+        // more random tail bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("IMG_5555.ARW");
+        let mut buf: Vec<u8> = vec![0x00; 2048];
+        buf.extend_from_slice(b"<?xpacket begin='\xef\xbb\xbf' id='W5M0MpCehiHzreSzNTczkc9d'?>\n");
+        buf.extend_from_slice(SAMPLE.as_bytes());
+        buf.extend_from_slice(b"\n<?xpacket end='w'?>");
+        buf.extend(std::iter::repeat_n(0xFFu8, 512));
+        std::fs::write(&path, buf).unwrap();
+
+        let data = read_embedded(&path).unwrap().expect("some xmp");
+        assert_eq!(data.rating, Some(4));
+        assert_eq!(data.color_label.as_deref(), Some("green"));
+        assert_eq!(
+            data.subjects,
+            vec!["portrait".to_string(), "golden-hour".into()]
+        );
+    }
+
+    #[test]
+    fn read_embedded_returns_none_when_no_packet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("no_xmp.jpg");
+        std::fs::write(&path, vec![0u8; 16_384]).unwrap();
+        assert!(read_embedded(&path).unwrap().is_none());
     }
 
     #[test]

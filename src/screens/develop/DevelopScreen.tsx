@@ -21,7 +21,13 @@ import {
   useDevelopSave,
   usePhotos,
 } from '../../state/queries';
-import type { PhotoRow } from '../../tauri/invoke';
+import {
+  maskFromPrompt,
+  type PhotoRow,
+  promptEdit,
+  promptSidecarPing,
+  type SidecarStatus,
+} from '../../tauri/invoke';
 import { warn } from '../../util/log';
 import { EditorInspector } from './EditorInspector';
 import {
@@ -460,6 +466,27 @@ function PromptStage({
   setConstraints,
 }: PromptStageProps) {
   const [newConstraint, setNewConstraint] = useState('');
+  const [status, setStatus] = useState<SidecarStatus | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [renderedB64, setRenderedB64] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const [maskB64, setMaskB64] = useState<string | null>(null);
+  const [masking, setMasking] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    promptSidecarPing()
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .catch((e) => {
+        if (!cancelled) warn('prompt sidecar ping failed', e);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const addConstraint = () => {
     const v = newConstraint.trim();
     if (!v || constraints.includes(v)) return;
@@ -468,6 +495,52 @@ function PromptStage({
   };
   const removeConstraint = (s: string) => {
     setConstraints(constraints.filter((c) => c !== s));
+  };
+
+  const canGenerate = !!status?.configured && status?.reachable && !generating;
+  const sidecarBadge = !status
+    ? 'Checking sidecar…'
+    : status.configured && status.reachable
+      ? `Connected · ${status.model ?? 'flux-dev'}`
+      : status.configured
+        ? `Unreachable${status.error ? ` · ${status.error}` : ''}`
+        : 'No sidecar configured';
+
+  const onGenerate = async () => {
+    setGenerating(true);
+    setRenderError(null);
+    try {
+      const result = await promptEdit({
+        photo_id: photo.id,
+        prompt: promptText,
+        strength: promptStrength,
+        constraints,
+        mask_b64: maskB64,
+      });
+      setRenderedB64(result.image_b64);
+    } catch (e) {
+      setRenderError(String(e));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const onMask = async () => {
+    const rawPrompt = globalThis.prompt('What should be masked? (e.g. "the sky", "the subject")');
+    if (!rawPrompt) return;
+    setMasking(true);
+    setRenderError(null);
+    try {
+      const result = await maskFromPrompt({
+        photo_id: photo.id,
+        prompt: rawPrompt.trim(),
+      });
+      setMaskB64(result.mask_b64);
+    } catch (e) {
+      setRenderError(String(e));
+    } finally {
+      setMasking(false);
+    }
   };
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -513,17 +586,54 @@ function PromptStage({
             position: 'relative',
           }}
         >
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--accent)', letterSpacing: '0.08em' }}>
-            AFTER · awaiting Flux/SDXL sidecar (Phase 4 week 3+)
+          <div
+            className="mono"
+            style={{
+              fontSize: 10.5,
+              color: status?.reachable ? 'var(--accent)' : 'var(--fg-mute)',
+              letterSpacing: '0.08em',
+            }}
+          >
+            AFTER · {sidecarBadge}
           </div>
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-            <Placeholder
-              photo={{ hue: 220, filename: photo.filename, id: String(photo.id) }}
-              showLabel={false}
-            />
+            {renderedB64 ? (
+              <img
+                src={`data:image/png;base64,${renderedB64}`}
+                alt="Generated result"
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
+            ) : (
+              <Placeholder
+                photo={{ hue: 220, filename: photo.filename, id: String(photo.id) }}
+                showLabel={false}
+              />
+            )}
             <div style={{ position: 'absolute', top: 10, right: 10 }}>
-              <Chip variant="solid">AI · Flux/SDXL pending</Chip>
+              {status?.reachable ? (
+                <Chip variant="solid">AI · {status.model ?? 'flux-dev'}</Chip>
+              ) : (
+                <Chip>AI · offline</Chip>
+              )}
             </div>
+            {renderError && (
+              <div
+                className="mono"
+                style={{
+                  position: 'absolute',
+                  left: 10,
+                  bottom: 10,
+                  right: 10,
+                  padding: '6px 10px',
+                  fontSize: 11,
+                  color: 'var(--danger, #d66)',
+                  background: 'color-mix(in oklch, var(--danger, #d66) 15%, var(--bg-elev))',
+                  borderRadius: 4,
+                }}
+              >
+                {renderError}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -551,13 +661,18 @@ function PromptStage({
           <div className="prompt-row">
             <button
               type="button"
-              className="btn phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Masked prompt edits need SAM2 — Phase 4 week 3+"
+              className={status?.reachable ? 'btn' : 'btn phase-gated'}
+              disabled={!status?.reachable || masking}
+              aria-disabled={!status?.reachable || masking}
+              onClick={status?.reachable ? onMask : undefined}
+              title={
+                status?.reachable
+                  ? 'Ask the sidecar to mask a region by prompt'
+                  : 'Needs a reachable Flux/SDXL sidecar'
+              }
               style={{ padding: '5px 9px', fontSize: 11.5 }}
             >
-              <Icon name="brush" size={12} /> Mask
+              <Icon name="brush" size={12} /> {masking ? 'Masking…' : maskB64 ? 'Mask ✓' : 'Mask'}
             </button>
             {constraints.map((c) => (
               <Chip key={c} onClose={() => removeConstraint(c)}>
@@ -601,13 +716,21 @@ function PromptStage({
             />
             <button
               type="button"
-              className="btn primary phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Needs Flux/SDXL sidecar — Phase 4 week 3+"
+              className={canGenerate ? 'btn primary' : 'btn primary phase-gated'}
+              disabled={!canGenerate}
+              aria-disabled={!canGenerate}
+              onClick={canGenerate ? onGenerate : undefined}
+              title={
+                canGenerate
+                  ? 'Submit to the configured sidecar'
+                  : status?.configured
+                    ? 'Sidecar unreachable — check Settings → AI models'
+                    : 'Set a Flux/SDXL sidecar URL in Settings → AI models'
+              }
               style={{ padding: '6px 12px', fontSize: 12 }}
             >
-              <Icon name="sparkles" size={12} /> Generate <span className="kbd">⌘↵</span>
+              <Icon name="sparkles" size={12} /> {generating ? 'Generating…' : 'Generate'}{' '}
+              <span className="kbd">⌘↵</span>
             </button>
           </div>
         </div>

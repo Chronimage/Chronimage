@@ -204,6 +204,13 @@ fn main() {
             commands::xmp_write_on_change_get,
             commands::xmp_write_on_change_set,
             commands::xmp_export_all,
+            commands::prompt_sidecar_get,
+            commands::prompt_sidecar_set,
+            commands::prompt_sidecar_model_get,
+            commands::prompt_sidecar_model_set,
+            commands::prompt_sidecar_ping,
+            commands::prompt_edit,
+            commands::mask_from_prompt,
             commands::shortcuts_list,
             commands::shortcuts_set,
         ])

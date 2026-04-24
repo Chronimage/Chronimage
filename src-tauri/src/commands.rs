@@ -4235,6 +4235,54 @@ pub async fn xmp_export_all(state: State<'_, AppState>) -> AppResult<ExportRecei
     crate::xmp::export_all(&state.pool).await
 }
 
+// ── Prompt sidecar (Phase 4 §1/§2) ────────────────────────────────────────
+
+#[tauri::command]
+pub async fn prompt_sidecar_get(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    crate::prompt::get_sidecar_url(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_set(state: State<'_, AppState>, url: Option<String>) -> AppResult<()> {
+    crate::prompt::set_sidecar_url(&state.pool, url.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_model_get(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    crate::prompt::get_preferred_model(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_model_set(
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> AppResult<()> {
+    crate::prompt::set_preferred_model(&state.pool, model.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_ping(
+    state: State<'_, AppState>,
+) -> AppResult<crate::prompt::SidecarStatus> {
+    crate::prompt::user_initiated_ping_sidecar(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit(
+    state: State<'_, AppState>,
+    req: crate::prompt::PromptEditRequest,
+) -> AppResult<crate::prompt::PromptEditResult> {
+    crate::prompt::user_initiated_prompt_edit(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn mask_from_prompt(
+    state: State<'_, AppState>,
+    req: crate::prompt::MaskFromPromptRequest,
+) -> AppResult<crate::prompt::MaskFromPromptResult> {
+    crate::prompt::user_initiated_mask_from_prompt(&state.pool, req).await
+}
+
 // Shortcut registry — userland stores its bindings in the shortcuts
 // table. Phase 4 §6 scope: list + set. A discovery modal reads the list;
 // a future rebinding UI calls set. Conflict detection is client-side.
