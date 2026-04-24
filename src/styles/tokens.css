@@ -1,6 +1,5 @@
 /*
  * Chronimage design tokens.
- * Ported from design-handoff/chronimage/project/styles.css (:root + themes).
  * This file should be the ONLY place where raw oklch() / color values appear.
  * Screens reference the CSS vars exclusively.
  */

@@ -1,6 +1,6 @@
 /**
- * Icon set ported from design-handoff/chronimage/project/src/placeholders.jsx.
- * Line icons only — no emoji, no hand-drawn. Use `name` union for type safety.
+ * Icon set — line icons only, no emoji, no hand-drawn. Use the `name` union
+ * for type safety.
  *
  * All icons are treated as decorative (aria-hidden). Parent elements
  * (buttons, links) must provide their own aria-label.

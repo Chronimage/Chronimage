@@ -40,7 +40,6 @@ Full rationale: `docs/prds/phase-0.md` § Tech stack. Plan document: `.claude/pl
 ```
 .claude/        agents, commands, hooks, settings for Claude Code
 .github/        CI/CD workflows (ci, nightly, release-*, security, release-please)
-design-handoff/ READ-ONLY reference — original design bundle from claude.ai/design
 docs/
   prds/         one PRD per phase (phase-0.md … phase-5.md) — authoritative
   adr/          architecture decision records
@@ -104,11 +103,9 @@ Don't rely on the pre-commit / pre-push hook alone — it skips `cargo deny` and
 
 ---
 
-## Design handoff (read-only)
+## Design tokens
 
-The design bundle at `design-handoff/chronimage/` is the source of truth for visual and interaction specs. **Do not edit files there.** Port JSX → TSX into `src/screens/` using the `/port-screen` command, preserving visual parity against `design-handoff/chronimage/project/Chronimage.html` and `styles.css`.
-
-Layout tokens are in `src/styles/tokens.css` (ported from the design's `styles.css`). If a new token is needed, add it here first, not inline.
+Layout tokens live in `src/styles/tokens.css` — CSS variables for colors, fonts, radii, spacing. It should be the only place where raw `oklch()` / color values appear; screens reference the vars exclusively. If a new token is needed, add it here first, not inline.
 
 ---
 
@@ -174,7 +171,6 @@ Use `/context-dump` whenever you're about to pause work and expect to resume in 
 
 - **Broad codebase exploration or "where does X live"** → spawn `Explore` (or the `general-purpose` agent if multi-step). Don't burn the main context on sequential greps.
 - **Schema changes** → spawn `catalog-architect` (`.claude/agents/catalog-architect.md`).
-- **Porting a design screen to TSX** → spawn `ux-porter`.
 - **ONNX model choice or llama.cpp sidecar tuning** → spawn `ai-wrangler`.
 - **RAW pipeline / wgpu shaders** → spawn `raw-pipeline-expert`.
 - **Perf regression investigation** → spawn `perf-cop`.
