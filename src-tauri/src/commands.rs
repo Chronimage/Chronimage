@@ -4181,6 +4181,87 @@ async fn render_preview(
     Ok(format!("data:image/jpeg;base64,{}", B64.encode(&out)))
 }
 
+// ── Phase 4 §5 §6 §7 — map trips + shortcuts + xmp rescan ────────────────────
+
+use crate::map::trips::{RecomputeReceipt, TripRow};
+use crate::xmp::RescanReceipt;
+
+#[tauri::command]
+pub async fn map_recompute_trips(state: State<'_, AppState>) -> AppResult<RecomputeReceipt> {
+    crate::map::trips::recompute_trips(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn map_list_trips(state: State<'_, AppState>) -> AppResult<Vec<TripRow>> {
+    crate::map::trips::list_trips(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn map_photos_in_trip(state: State<'_, AppState>, trip_id: i64) -> AppResult<Vec<i64>> {
+    crate::map::trips::photos_in_trip(&state.pool, trip_id).await
+}
+
+#[tauri::command]
+pub async fn xmp_rescan(state: State<'_, AppState>) -> AppResult<RescanReceipt> {
+    crate::xmp::rescan_all(&state.pool).await
+}
+
+// Shortcut registry — userland stores its bindings in the shortcuts
+// table. Phase 4 §6 scope: list + set. A discovery modal reads the list;
+// a future rebinding UI calls set. Conflict detection is client-side.
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ShortcutRow {
+    pub command_id: String,
+    pub key_binding: String,
+    pub context: String,
+    pub updated_at: String,
+}
+
+#[tauri::command]
+pub async fn shortcuts_list(state: State<'_, AppState>) -> AppResult<Vec<ShortcutRow>> {
+    sqlx::query_as::<_, ShortcutRow>(
+        "SELECT command_id, key_binding, context, updated_at \
+         FROM shortcuts ORDER BY context ASC, command_id ASC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn shortcuts_set(
+    state: State<'_, AppState>,
+    command_id: String,
+    key_binding: String,
+    context: Option<String>,
+) -> AppResult<()> {
+    let command_id = command_id.trim();
+    let key_binding = key_binding.trim();
+    if command_id.is_empty() || key_binding.is_empty() {
+        return Err(AppError::InvalidInput(
+            "command_id + key_binding required".into(),
+        ));
+    }
+    let ctx = context.unwrap_or_else(|| "global".into());
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO shortcuts (command_id, key_binding, context, updated_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(command_id) DO UPDATE SET \
+           key_binding = excluded.key_binding, \
+           context = excluded.context, \
+           updated_at = excluded.updated_at",
+    )
+    .bind(command_id)
+    .bind(key_binding)
+    .bind(&ctx)
+    .bind(&now)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

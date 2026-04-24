@@ -3,10 +3,12 @@ import { useEffect, useState } from 'react';
 import { Rail } from './chrome/Rail';
 import { StatusBar } from './chrome/StatusBar';
 import { Titlebar } from './chrome/Titlebar';
+import { ShortcutOverlay, useShortcutOverlay } from './primitives/ShortcutOverlay';
 import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
 import { CullScreen, CullSidePanel } from './screens/cull';
 import { CullBinScreen, CullBinSidePanel } from './screens/cullbin';
 import { DevelopScreen, DevelopSidePanel } from './screens/develop';
+import { MapScreen } from './screens/map/MapScreen';
 import { PeopleScreen } from './screens/PeopleScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { useImportProgressListener } from './state/import';
@@ -27,6 +29,9 @@ export function App() {
   // Subscribe once at the root to IMPORT_PROGRESS_EVENT so every screen can
   // read the global import store without re-mounting the listener.
   useImportProgressListener();
+
+  // Phase 4 §6 — `?` anywhere opens the keyboard shortcut overlay.
+  const [shortcutOpen, , closeShortcutOverlay] = useShortcutOverlay();
 
   useEffect(() => {
     // Restore persisted Settings tweaks from plugin-store exactly once at boot.
@@ -72,6 +77,9 @@ export function App() {
       sidePanel = <DevelopSidePanel />;
       mainPanel = <DevelopScreen />;
       break;
+    case 'map':
+      mainPanel = <MapScreen />;
+      break;
     case 'people':
       mainPanel = <PeopleScreen />;
       break;
@@ -103,6 +111,7 @@ export function App() {
         </div>
         <StatusBar screen={screen} version={version} channel={channel} />
       </div>
+      <ShortcutOverlay open={shortcutOpen} onClose={closeShortcutOverlay} />
     </QueryClientProvider>
   );
 }

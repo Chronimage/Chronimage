@@ -1,13 +1,19 @@
 //! Filesystem scanner. Walks a root directory, yields per-file metadata
 //! (path, size, modified time, extension). Designed to be driven by an async
 //! task; backpressure is handled by the caller via a channel.
+//!
+//! Phase 4 §8: honours `.chronimage-ignore` files at any directory level
+//! (gitignore-style syntax) via the `ignore` crate's `WalkBuilder`. A set
+//! of always-ignored defaults (`Thumbs.db`, `.DS_Store`, `@eaDir`,
+//! `.thumbnails`, `cache/`) is applied on top so every install skips the
+//! garbage every install should skip.
 
 use crate::{AppError, AppResult};
+use ignore::WalkBuilder;
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
-use walkdir::WalkDir;
 
 const DEFAULT_EXTENSIONS: &[&str] = &[
     // raster
@@ -64,16 +70,38 @@ pub fn scan_dir(opts: &ScanOptions) -> AppResult<Vec<ScanEntry>> {
         )));
     }
 
-    let mut walker = WalkDir::new(&opts.root).follow_links(opts.follow_links);
+    let mut builder = WalkBuilder::new(&opts.root);
+    builder
+        .follow_links(opts.follow_links)
+        .hidden(false) // show dotfiles — otherwise `.DS_Store` et al wouldn't even be considered
+        .parents(false) // don't walk upward looking for parent ignores
+        .git_ignore(false) // don't honour .gitignore; users manage photos, not source trees
+        .git_exclude(false)
+        .git_global(false)
+        // Phase 4 §8 — custom ignore-file name applied at every dir level.
+        .add_custom_ignore_filename(".chronimage-ignore");
     if let Some(d) = opts.max_depth {
-        walker = walker.max_depth(d);
+        builder.max_depth(Some(d));
+    }
+
+    // Defaults: exclude well-known garbage that ships in every photo tree.
+    // Applied as a synthetic gitignore-style override whose rules beat
+    // any user `.chronimage-ignore` (they can't re-include these).
+    const DEFAULT_IGNORES: &[&str] = &["Thumbs.db", ".DS_Store", "@eaDir", ".thumbnails", "cache"];
+    let mut overrides = ignore::overrides::OverrideBuilder::new(&opts.root);
+    for pat in DEFAULT_IGNORES {
+        // `!<pattern>` means "exclude" in the overrides API (negated re-include).
+        let _ = overrides.add(&format!("!{pat}"));
+    }
+    if let Ok(ov) = overrides.build() {
+        builder.overrides(ov);
     }
 
     let ext_set: std::collections::HashSet<&str> =
         opts.extensions.iter().map(String::as_str).collect();
 
     let mut entries = Vec::new();
-    for res in walker.into_iter() {
+    for res in builder.build() {
         let entry = match res {
             Ok(e) => e,
             Err(err) => {
@@ -81,7 +109,10 @@ pub fn scan_dir(opts: &ScanOptions) -> AppResult<Vec<ScanEntry>> {
                 continue;
             }
         };
-        if !entry.file_type().is_file() {
+        let Some(ft) = entry.file_type() else {
+            continue;
+        };
+        if !ft.is_file() {
             continue;
         }
         let Some(ext) = entry.path().extension().and_then(|s| s.to_str()) else {

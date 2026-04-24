@@ -1102,3 +1102,66 @@ export async function presetSave(
 export async function onedriveUpload(photoIds: number[], remoteFolder: string): Promise<UploadReceipt> {
   return tauriInvoke<UploadReceipt>('onedrive_upload', { photoIds, remoteFolder });
 }
+
+// ── Phase 4: Map · Shortcuts · XMP rescan ─────────────────────────────────────
+
+export interface TripRow {
+  id: number;
+  name: string | null;
+  start_at: string;
+  end_at: string;
+  center_lat: number;
+  center_lng: number;
+  radius_km: number;
+  photo_count: number;
+  auto_generated: boolean;
+  updated_at: string;
+}
+
+export interface TripRecomputeReceipt {
+  trip_count: number;
+  photo_count: number;
+  elapsed_ms: number;
+}
+
+export async function mapRecomputeTrips(): Promise<TripRecomputeReceipt> {
+  return tauriInvoke<TripRecomputeReceipt>('map_recompute_trips');
+}
+
+export async function mapListTrips(): Promise<TripRow[]> {
+  return tauriInvoke<TripRow[]>('map_list_trips');
+}
+
+export async function mapPhotosInTrip(tripId: number): Promise<number[]> {
+  return tauriInvoke<number[]>('map_photos_in_trip', { tripId });
+}
+
+export interface XmpRescanReceipt {
+  scanned: number;
+  applied: number;
+  error_count: number;
+  errors: string[];
+}
+
+export async function xmpRescan(): Promise<XmpRescanReceipt> {
+  return tauriInvoke<XmpRescanReceipt>('xmp_rescan');
+}
+
+export interface ShortcutRow {
+  command_id: string;
+  key_binding: string;
+  context: string;
+  updated_at: string;
+}
+
+export async function shortcutsList(): Promise<ShortcutRow[]> {
+  return tauriInvoke<ShortcutRow[]>('shortcuts_list');
+}
+
+export async function shortcutsSet(commandId: string, keyBinding: string, context?: string): Promise<void> {
+  return tauriInvoke('shortcuts_set', {
+    commandId,
+    keyBinding,
+    context: context ?? null,
+  });
+}

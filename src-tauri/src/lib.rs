@@ -21,10 +21,12 @@ pub mod error;
 pub mod export;
 pub mod import;
 pub mod lift_and_shift;
+pub mod map;
 pub mod sources;
 pub mod state;
 pub mod telemetry;
 pub mod util;
+pub mod xmp;
 
 pub use error::{AppError, AppResult};
 

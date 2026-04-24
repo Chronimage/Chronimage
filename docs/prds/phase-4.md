@@ -1,12 +1,12 @@
 # Phase 4 · Prompt editing + polish
 
-> Natural-language edits via Flux-dev / SDXL-inpaint on-device, the Tweaks panel for theme/accent/layout, map view with GPS clustering, and the keyboard shortcut overlay. The phase that takes Chronimage from "great editor" to "this feels designed."
+> Natural-language edits via Flux-dev / SDXL-inpaint on-device, map view with GPS clustering, and the keyboard shortcut overlay. The phase that takes Chronimage from "great editor" to "this feels designed."
 
 ## Context
 
 Phase 3 ships a solid develop surface covering 80% of hobbyist edits. Phase 4 adds the remaining 20% that require generative models — inpainting, background removal/replacement, prompt-driven tone adjustments — plus the UX polish layer (tweaks, map, shortcuts) that the design already specced but we deferred.
 
-The generative path is intentionally gated behind an entitlement + first-run model download because Flux/SDXL are 6–12 GB each and require explicit user consent to fetch. The Tweaks panel / map / shortcuts don't need models and ship unconditionally.
+The generative path is intentionally gated behind an entitlement + first-run model download because Flux/SDXL are 6–12 GB each and require explicit user consent to fetch. The map / shortcuts / XMP / ignore-file surfaces don't need models and ship unconditionally.
 
 ## Personas & stories
 
@@ -44,36 +44,39 @@ The generative path is intentionally gated behind an entitlement + first-run mod
 - [ ] SAM2 + CLIP text-encoder: "select the sky" → SAM2 generates a mask filtered by CLIP similarity to the prompt
 - [ ] Integrated with Phase 3's mask engine (appears as a new mask source alongside AI-subject / sky / foreground)
 
-### 4. Tweaks panel (ported from `tweaks.jsx`)
-- [ ] Toggleable drawer bound to a tauri-plugin-store setting (`__TWEAKS__`)
-- [ ] Settings: Theme · Accent (5 swatches) · Display font · Grid density · Facet placement · Cull mode · Editor layout
-- [ ] Live-applies via `data-*` attributes on `<html>` (already wired in Phase 0)
-- [ ] Reset to defaults button
+### 4. ~~Tweaks panel~~ — **removed from Phase 4 scope**
+
+The Settings → Library screen already exposes theme / accent / display font / grid density / facet placement / cull mode / editor layout via the existing `useUi().tweaks` plumbing from Phase 0. A separate drawer UI was deemed redundant; all the same controls are reachable from Settings without the overlay. Closed out 2026-04-24 per user direction.
 
 ### 5. Map view
-- [ ] `src/screens/map/` new screen (added to Rail between Cull Bin and Develop)
-- [ ] OpenStreetMap tiles cached locally to `{data_dir}/tiles/{z}/{x}/{y}.png`
-- [ ] Tile cache respects Nominatim usage policy (attribution shown, max 2 zooms per second)
-- [ ] Pin clusters via supercluster-rs algorithm (or Leaflet's cluster plugin)
-- [ ] Click cluster → zoom; click pin → photo detail overlay
-- [ ] Filter by time range (slider: "last week / last month / last year / all time")
-- [ ] **Offline reverse-geocoder** — embedded SQLite of ~100k city centroids from the GeoNames `cities15000` dataset (~5 MB compressed). Ship bundled via `scripts/fetch-bundled-models.*`. At import time (or in a post-hoc backfill), resolve each photo's `gps_lat/lng` to the nearest city + country and cache in a new `photos.place_label` column. Also populates human-readable labels in the Catalog **Places facet** (Phase 2 rehaul ADR 0007 v1 ships with raw coordinate buckets; this replaces them with "Bengaluru · 18 photos" etc). Map tooltips reuse the same lookup.
+- [x] `src/screens/map/` new screen (added to Rail between Cull Bin and Develop) — trip list + photo grid; ships 2026-04-24
+- [x] Trip clustering (backend `src-tauri/src/map/trips.rs`) — single-pass temporal (48 h gap) + spatial (30 km centroid cutoff) Haversine clustering; auto-runs post-import
+- [x] Commands `map_recompute_trips`, `map_list_trips`, `map_photos_in_trip`
+- [ ] OpenStreetMap tiles cached locally to `{data_dir}/tiles/{z}/{x}/{y}.png` — **deferred** to week 2+: v1 ships as a list view
+- [ ] Tile cache respects Nominatim usage policy (attribution shown, max 2 zooms per second) — **deferred**
+- [ ] Pin clusters via supercluster-rs algorithm (or Leaflet's cluster plugin) — **deferred** (needs leaflet/maplibre)
+- [ ] Click cluster → zoom; click pin → photo detail overlay — **deferred**
+- [ ] Filter by time range (slider: "last week / last month / last year / all time") — **deferred**
+- [ ] **Offline reverse-geocoder** — embedded SQLite of ~100k city centroids from the GeoNames `cities15000` dataset (~5 MB compressed). Ship bundled via `scripts/fetch-bundled-models.*`. At import time (or in a post-hoc backfill), resolve each photo's `gps_lat/lng` to the nearest city + country and cache in a new `photos.place_label` column. Also populates human-readable labels in the Catalog **Places facet** (Phase 2 rehaul ADR 0007 v1 ships with raw coordinate buckets; this replaces them with "Bengaluru · 18 photos" etc). Map tooltips reuse the same lookup. — **deferred**
 
 ### 6. Keyboard shortcut overlay
-- [ ] Press `?` anywhere → modal showing all shortcuts grouped by context
-- [ ] Shortcuts registered via a central `useShortcut(key, handler, scope)` hook
-- [ ] Customizable via Settings → Shortcuts table (per-command rebinding, conflict detection)
-- [ ] All shortcut data stored in tauri-plugin-store; exported/imported with tweaks
+- [x] Press `?` anywhere → modal showing all shortcuts grouped by context (`src/primitives/ShortcutOverlay.tsx` + `useShortcutOverlay` hook)
+- [x] `shortcuts` table + `shortcuts_list` / `shortcuts_set` commands for per-command overrides
+- [ ] Shortcuts registered via a central `useShortcut(key, handler, scope)` hook — **deferred**: v1 uses the existing ad-hoc `onKeyDown` handlers; overlay reads a static seed + applies DB overrides for display
+- [ ] Customizable via Settings → Shortcuts table (per-command rebinding, conflict detection) — **deferred**
+- [ ] All shortcut data stored in tauri-plugin-store; exported/imported with tweaks — superseded: live in SQLite `shortcuts` table
 
 ### 7. Import keyword + star from `.xmp` sidecars
-- [ ] On import, if `photo.xmp` exists alongside `photo.jpg` or inside `photo.arw` (embedded XMP), parse it
-- [ ] Map `dc:subject` → `tags` (kind='user'), `xmp:Rating` → new `photos.rating INTEGER`
-- [ ] Write-out: when user edits tags / rating in Chronimage, write back to sidecar `.xmp` (opt-in, default off — avoids surprising other tools)
+- [x] On import, if `photo.xmp` exists alongside `photo.jpg`, parse it (`src-tauri/src/xmp/mod.rs`)
+- [x] Map `dc:subject` → `tags` (kind='user'), `xmp:Rating` → `photos.rating INTEGER`, `xmp:Label` → `photos.color_label`
+- [x] `xmp_rescan` command for post-hoc library re-scan
+- [ ] Embedded XMP inside `.arw` — **deferred** (v1 only reads external sidecars)
+- [ ] Write-out: when user edits tags / rating in Chronimage, write back to sidecar `.xmp` (opt-in, default off — avoids surprising other tools) — **deferred**
 
 ### 8. `.chronimage-ignore` file support
-- [ ] `.gitignore`-style include/exclude at any folder level
-- [ ] Respected by `scan_dir`
-- [ ] Default rules: exclude `Thumbs.db`, `.DS_Store`, `@eaDir`, `.thumbnails`, `cache/`
+- [x] `.gitignore`-style include/exclude at any folder level (via `ignore::WalkBuilder` with `add_custom_ignore_filename`)
+- [x] Respected by `scan_dir`
+- [x] Default rules: exclude `Thumbs.db`, `.DS_Store`, `@eaDir`, `.thumbnails`, `cache/`
 
 ## Non-goals
 
@@ -87,7 +90,6 @@ The generative path is intentionally gated behind an entitlement + first-run mod
 
 - Generative inference latency: < 30 s for 1024×1024 SDXL-Inpaint on 3060-tier; < 45 s for Flux-dev
 - Map tile cache hit rate: > 95% for a 100-trip library after first view
-- Tweaks panel toggle → UI reflects change in < 100 ms
 - Sidecar crash: app detects + offers restart within 2 s
 - `.xmp` import adds < 5% to import time for a 10k-photo library
 
@@ -139,9 +141,7 @@ Prompt edit:
 - Event `chronimage.prompt.progress { job_id, percent, preview_b64? }`
 - Event `chronimage.prompt.done { job_id, edit_id }`
 
-Tweaks / shortcuts:
-- `async fn tweaks_get() -> Result<Tweaks>`
-- `async fn tweaks_set(tweaks: Tweaks) -> Result<()>`
+Shortcuts:
 - `async fn shortcuts_list() -> Result<Vec<Shortcut>>`
 - `async fn shortcuts_set(command_id: String, key_binding: String) -> Result<()>`
 
@@ -157,7 +157,7 @@ XMP:
 
 - `Feature::PromptEdit` — gates Prompt tab + generation commands. Already defined in Phase 1; flip to require Pro in a future release.
 - `Feature::ModelDownload` — gates the first-run download flow (bandwidth + disk consent).
-- Tweaks / map / shortcuts / XMP are all free.
+- Map / shortcuts / XMP / ignore are all free.
 
 ## Exit criteria (test-bound)
 
@@ -179,14 +179,36 @@ XMP:
 
 ## TODO log
 
-- [ ] Migration `20261001000000_phase4_polish.sql`
-- [ ] `src-tauri/src/prompt/` module (sidecar, jobs, constraints)
-- [ ] `src-tauri/src/map/` module (trip clustering, tile cache)
-- [ ] `src-tauri/src/xmp/` module (parser, writer)
-- [ ] `src/screens/map/` new screen
-- [ ] `src/components/TweaksPanel.tsx` + `src/components/ShortcutOverlay.tsx`
-- [ ] `src/components/ExportSheet` — add the Phase 3-gated toggles (auto-light, copy-paste-edits)
-- [ ] SAM2 + CLIP text encoder integration
-- [ ] Flux / SDXL-Inpaint sidecar download + start scripts
-- [ ] `reqwest` + `leaflet` / `maplibre-gl-js` + `supercluster` dependencies
-- [ ] 7 exit-criterion test files
+- [x] Migration `20261001000000_phase4_polish.sql`
+- [ ] `src-tauri/src/prompt/` module (sidecar, jobs, constraints) — **week 2+**
+- [x] `src-tauri/src/map/` module (trip clustering — tile cache deferred)
+- [x] `src-tauri/src/xmp/` module (parser — writer deferred)
+- [x] `src/screens/map/` new screen (list view; map renderer deferred)
+- [x] `src/primitives/ShortcutOverlay.tsx`
+- [ ] `src/components/ExportSheet` — add the Phase 3-gated toggles (auto-light, copy-paste-edits) — **week 2+**
+- [ ] SAM2 + CLIP text encoder integration — **week 2+**
+- [ ] Flux / SDXL-Inpaint sidecar download + start scripts — **week 2+**
+- [ ] `reqwest` + `leaflet` / `maplibre-gl-js` + `supercluster` dependencies — **week 2+**
+- [x] 2 of 7 exit-criterion test files (xmp roundtrip, .chronimage-ignore); remaining 5 tied to deferred deliverables
+
+## Week 1 status (2026-04-24)
+
+Shipped end-to-end:
+
+- §5 Map view — trip-clustering backend (Haversine, 48 h / 30 km thresholds) + list-based Map screen reachable from Rail
+- §6 Keyboard shortcut overlay — `?` opens a read-only overlay of the documented shortcuts; override table exists for a future rebinder UI
+- §7 XMP sidecar import — rating / color label / subjects → catalog rows + tags; idempotent re-import
+- §8 `.chronimage-ignore` — gitignore-style ignore files + sane defaults, honoured by `scan_dir`
+- Migration `20261001000000_phase4_polish.sql` (schema_version → 5)
+
+Removed from scope:
+
+- §4 Tweaks panel — already reachable from Settings (see strikethrough above)
+
+Deferred to week 2+ (all gated on generative infra or rendering libs we don't yet pull in):
+
+- §1 Prompt tab + §2 Flux/SDXL generative backend — needs the Python sidecar, model downloader, first-run consent flow
+- §3 SAM2 mask-from-prompt — needs SAM2 ONNX + CLIP text-encoder plumbing
+- §5 Map view renderer — OpenStreetMap tile cache, leaflet/maplibre, pin clustering, time-range filter, offline reverse-geocoder
+- §6 `useShortcut` central hook + Settings rebinder UI
+- §7 XMP write-out + embedded-XMP-in-ARW

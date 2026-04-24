@@ -255,6 +255,29 @@ async fn execute_pipeline(
                 .await?;
                 imported.fetch_add(1, Ordering::Relaxed);
 
+                // Phase 4 §7 — XMP sidecar import. Best-effort; a malformed
+                // sidecar logs a warn but never fails the import.
+                if let Some(sidecar) = crate::xmp::sidecar_for(&path) {
+                    match crate::xmp::read_sidecar(&sidecar) {
+                        Ok(Some(data)) if !data.is_empty() => {
+                            if let Err(e) = crate::xmp::apply_to_photo(&pool, photo_id, &data).await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    sidecar = %sidecar.display(),
+                                    "xmp: apply_to_photo failed"
+                                );
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            sidecar = %sidecar.display(),
+                            "xmp: read_sidecar failed"
+                        ),
+                    }
+                }
+
                 // Stage 2.5: extract EXIF + pHash for this photo.
                 let meta_start = Instant::now();
                 let meta_path = path.clone();
@@ -841,6 +864,19 @@ async fn execute_pipeline(
             "reeval_clusters: done"
         ),
         Err(e) => tracing::warn!(error = %e, "reeval_clusters: failed"),
+    }
+
+    // Phase 4 §5 — recompute trips whenever new GPS-tagged photos land.
+    // Best-effort; trips are a derived view.
+    match crate::map::trips::recompute_trips(&pool).await {
+        Ok(r) => tracing::info!(
+            import_id,
+            trip_count = r.trip_count,
+            photo_count = r.photo_count,
+            elapsed_ms = r.elapsed_ms,
+            "recompute_trips: done"
+        ),
+        Err(e) => tracing::warn!(error = %e, "recompute_trips: failed"),
     }
 
     tracing::info!(

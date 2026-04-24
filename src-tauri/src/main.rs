@@ -197,6 +197,12 @@ fn main() {
             commands::develop_preset_apply,
             commands::presets_list,
             commands::preset_save,
+            commands::map_recompute_trips,
+            commands::map_list_trips,
+            commands::map_photos_in_trip,
+            commands::xmp_rescan,
+            commands::shortcuts_list,
+            commands::shortcuts_set,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
