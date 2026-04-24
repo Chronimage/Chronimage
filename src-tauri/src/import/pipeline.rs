@@ -327,8 +327,8 @@ async fn execute_pipeline(
                     let cache_path = thumbs_dir.join(format!("{thumb_sha}_320.jpg"));
                     // Always decode + compute sharpness; skip re-writing the
                     // thumb file if it already exists.
-                    let img = image::open(&thumb_path)
-                        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+                    let img = crate::ai::image_util::open_any(&thumb_path)
+                        .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
                     // Apply EXIF orientation BEFORE resizing so the cached
                     // thumb lands in display-correct orientation.
                     let img = crate::ai::image_util::apply_exif_orientation(img, thumb_orientation);

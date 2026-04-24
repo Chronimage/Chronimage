@@ -188,6 +188,15 @@ fn main() {
             commands::add_user_tag,
             commands::remove_user_tag,
             commands::rename_user_tag,
+            commands::develop_open,
+            commands::develop_apply,
+            commands::develop_save,
+            commands::develop_reset,
+            commands::develop_copy_edits,
+            commands::develop_paste_edits,
+            commands::develop_preset_apply,
+            commands::presets_list,
+            commands::preset_save,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -212,6 +221,9 @@ fn main() {
             tauri::async_runtime::block_on(async {
                 if let Err(e) = seed_default_smart_albums(&pool).await {
                     tracing::warn!(error = %e, "smart album seed failed (non-fatal)");
+                }
+                if let Err(e) = chronimage::develop::presets::seed_builtins(&pool).await {
+                    tracing::warn!(error = %e, "develop preset seed failed (non-fatal)");
                 }
             });
 

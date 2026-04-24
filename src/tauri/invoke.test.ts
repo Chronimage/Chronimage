@@ -8,9 +8,17 @@ import {
   deleteSource,
   detectHardware,
   detectIcloudPath,
+  developApply,
+  developCopyEdits,
+  developOpen,
+  developPasteEdits,
+  developPresetApply,
+  developReset,
+  developSave,
   embedImage,
   gphotosUpload,
   gphotosUploadScopeOk,
+  identityOperations,
   importDryRun,
   importGoogleTakeout,
   listAlbums,
@@ -22,6 +30,8 @@ import {
   onedriveUpload,
   onThisDay,
   ping,
+  presetSave,
+  presetsList,
   refreshSmartAlbums,
   scoreAesthetic,
   startImport,
@@ -269,6 +279,125 @@ describe('invoke wrappers', () => {
     expect(tauriInvoke).toHaveBeenCalledWith('onedrive_upload', {
       photoIds: [1, 2, 3, 42],
       remoteFolder: 'Chronimage',
+    });
+  });
+
+  // ── Phase 3: Develop ────────────────────────────────────────────────────
+
+  it('identityOperations returns all-zero slider values', () => {
+    const ops = identityOperations();
+    expect(ops.exposure).toBe(0);
+    expect(ops.saturation).toBe(0);
+    expect(ops.dehaze).toBe(0);
+  });
+
+  it('developOpen forwards photoId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      photo_id: 7,
+      operations: identityOperations(),
+      preview_data_url: 'data:image/jpeg;base64,AAAA',
+    });
+    const r = await developOpen(7);
+    expect(r.photo_id).toBe(7);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_open', { photoId: 7 });
+  });
+
+  it('developApply forwards photoId + operations', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      photo_id: 3,
+      preview_data_url: 'data:image/jpeg;base64,BBBB',
+      elapsed_ms: 42,
+    });
+    const ops = { ...identityOperations(), exposure: 1.2 };
+    await developApply(3, ops);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_apply', {
+      photoId: 3,
+      operations: ops,
+    });
+  });
+
+  it('developSave passes null label by default', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(42);
+    const id = await developSave(1, identityOperations());
+    expect(id).toBe(42);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_save', {
+      photoId: 1,
+      operations: identityOperations(),
+      label: null,
+    });
+  });
+
+  it('developSave forwards label when provided', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(99);
+    await developSave(1, identityOperations(), 'sky fix');
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_save', {
+      photoId: 1,
+      operations: identityOperations(),
+      label: 'sky fix',
+    });
+  });
+
+  it('developReset forwards photoId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(3);
+    const n = await developReset(5);
+    expect(n).toBe(3);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_reset', { photoId: 5 });
+  });
+
+  it('developCopyEdits forwards photoId', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(identityOperations());
+    await developCopyEdits(11);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_copy_edits', { photoId: 11 });
+  });
+
+  it('developPasteEdits forwards photoIds + operations', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      pasted_photo_count: 3,
+      skipped: [],
+    });
+    const ops = { ...identityOperations(), saturation: 30 };
+    await developPasteEdits([1, 2, 3], ops);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_paste_edits', {
+      photoIds: [1, 2, 3],
+      operations: ops,
+    });
+  });
+
+  it('developPresetApply forwards photoId + presetId + strength', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      photo_id: 4,
+      preview_data_url: 'data:image/jpeg;base64,CCCC',
+      elapsed_ms: 55,
+    });
+    await developPresetApply(4, 2, 75);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_preset_apply', {
+      photoId: 4,
+      presetId: 2,
+      strength: 75,
+    });
+  });
+
+  it('presetsList passes null group by default', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await presetsList();
+    expect(tauriInvoke).toHaveBeenCalledWith('presets_list', { group: null });
+  });
+
+  it('presetsList forwards group when provided', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await presetsList('Face');
+    expect(tauriInvoke).toHaveBeenCalledWith('presets_list', { group: 'Face' });
+  });
+
+  it('presetSave forwards name + group + operations', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(7);
+    const ops = { ...identityOperations(), vibrance: 20 };
+    const id = await presetSave('My look', 'Style', ops);
+    expect(id).toBe(7);
+    expect(tauriInvoke).toHaveBeenCalledWith('preset_save', {
+      name: 'My look',
+      group: 'Style',
+      operations: ops,
     });
   });
 });

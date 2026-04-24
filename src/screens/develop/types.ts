@@ -14,6 +14,8 @@ export interface DevelopValues {
   con: number;
   hi: number;
   sh: number;
+  whites: number;
+  blacks: number;
   temp: number;
   tint: number;
   vib: number;
@@ -27,6 +29,8 @@ export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
   con: 0,
   hi: 0,
   sh: 0,
+  whites: 0,
+  blacks: 0,
   temp: 0,
   tint: 0,
   vib: 0,
@@ -34,6 +38,43 @@ export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
   clarity: 0,
   dehaze: 0,
 };
+
+/** Convert UI slider shorthand → backend Operations shape. The UI caps
+ * `exposure` at -100..=100; backend expects EV stops (roughly -4..=4).
+ * Empirical map: UI slider × 0.04 = EV. Everything else passes through. */
+export function valuesToOperations(v: DevelopValues): import('../../tauri/invoke').DevelopOperations {
+  return {
+    exposure: v.exp * 0.04,
+    contrast: v.con,
+    highlights: v.hi,
+    shadows: v.sh,
+    whites: v.whites,
+    blacks: v.blacks,
+    temp: v.temp,
+    tint: v.tint,
+    vibrance: v.vib,
+    saturation: v.sat,
+    clarity: v.clarity,
+    dehaze: v.dehaze,
+  };
+}
+
+export function operationsToValues(ops: import('../../tauri/invoke').DevelopOperations): DevelopValues {
+  return {
+    exp: ops.exposure / 0.04,
+    con: ops.contrast,
+    hi: ops.highlights,
+    sh: ops.shadows,
+    whites: ops.whites,
+    blacks: ops.blacks,
+    temp: ops.temp,
+    tint: ops.tint,
+    vib: ops.vibrance,
+    sat: ops.saturation,
+    clarity: ops.clarity,
+    dehaze: ops.dehaze,
+  };
+}
 
 export const PRESETS: Preset[] = [
   { id: 'p-1', name: 'Clean up face', sub: 'Smooth skin · keep detail', group: 'Face' },

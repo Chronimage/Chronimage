@@ -3712,8 +3712,8 @@ async fn generate_thumbnail_bytes(
     let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
 
     let bytes = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
-        let img = image::open(&path_buf)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let img = crate::ai::image_util::open_any(&path_buf)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
         let resized = img.thumbnail(size, size);
         let mut buf = Vec::with_capacity(64 * 1024);
@@ -4019,6 +4019,166 @@ pub async fn rename_user_tag(
         .await?
         .rows_affected() as usize;
     Ok(affected)
+}
+
+// ── Phase 3: Develop (non-destructive edit pipeline) ──────────────────────────
+//
+// Workflow:
+//   1. Frontend calls `develop_open(photo_id)` → returns the current
+//      `Operations` + a base64 JPEG preview rendered at 1280 long-edge.
+//   2. As the user drags sliders, frontend calls `develop_apply` with the
+//      new ops → backend re-renders a preview + returns data URL.
+//   3. When satisfied, frontend calls `develop_save` → new row in `edits`.
+//   4. `develop_reset` wipes history back to "as imported".
+//   5. Copy/paste via `develop_copy_edits` + `develop_paste_edits`.
+//   6. Presets via `develop_preset_apply` + `presets_list`.
+
+use crate::develop::ops::{Operations, PastedReceipt, RenderReceipt};
+use crate::develop::presets::Preset as DevelopPreset;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use image::{codecs::jpeg::JpegEncoder, ImageEncoder};
+
+/// Open a develop session: load current ops + render a baseline preview
+/// from the photo's thumbnail. Returns the ops + a `data:image/jpeg;...`
+/// preview URL.
+#[tauri::command]
+pub async fn develop_open(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<DevelopOpenResponse> {
+    let ops = crate::develop::history::load_current(&state.pool, photo_id).await?;
+    let preview = render_preview(&state.pool, photo_id, &ops).await?;
+    Ok(DevelopOpenResponse {
+        photo_id,
+        operations: ops,
+        preview_data_url: preview,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct DevelopOpenResponse {
+    pub photo_id: i64,
+    pub operations: Operations,
+    pub preview_data_url: String,
+}
+
+/// Re-render the preview under the given ops. Does NOT persist — callers
+/// drive `develop_save` when they want history. Used during slider drags.
+#[tauri::command]
+pub async fn develop_apply(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    operations: Operations,
+) -> AppResult<RenderReceipt> {
+    let start = std::time::Instant::now();
+    let preview_data_url = render_preview(&state.pool, photo_id, &operations).await?;
+    Ok(RenderReceipt {
+        photo_id,
+        preview_data_url,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+/// Save the current slider state as a new `edits` row, chaining off the
+/// photo's `current_edit_id`. Returns the new edit id.
+#[tauri::command]
+pub async fn develop_save(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    operations: Operations,
+    label: Option<String>,
+) -> AppResult<i64> {
+    crate::develop::history::save(&state.pool, photo_id, &operations, label).await
+}
+
+#[tauri::command]
+pub async fn develop_reset(state: State<'_, AppState>, photo_id: i64) -> AppResult<usize> {
+    crate::develop::history::reset(&state.pool, photo_id).await
+}
+
+#[tauri::command]
+pub async fn develop_copy_edits(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Operations> {
+    crate::develop::history::copy_edits(&state.pool, photo_id).await
+}
+
+#[tauri::command]
+pub async fn develop_paste_edits(
+    state: State<'_, AppState>,
+    photo_ids: Vec<i64>,
+    operations: Operations,
+) -> AppResult<PastedReceipt> {
+    crate::develop::history::paste_edits(&state.pool, &photo_ids, &operations).await
+}
+
+/// Apply a preset at `strength ∈ [0, 100]`. strength=0 is a no-op
+/// (preview = baseline); strength=100 applies the preset in full.
+#[tauri::command]
+pub async fn develop_preset_apply(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    preset_id: i64,
+    strength: u8,
+) -> AppResult<RenderReceipt> {
+    let preset = crate::develop::presets::load(&state.pool, preset_id).await?;
+    let preset_ops = preset.operations()?;
+    let base = crate::develop::history::load_current(&state.pool, photo_id).await?;
+    let blended = base.blend(preset_ops, strength);
+    let start = std::time::Instant::now();
+    let preview_data_url = render_preview(&state.pool, photo_id, &blended).await?;
+    Ok(RenderReceipt {
+        photo_id,
+        preview_data_url,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+#[tauri::command]
+pub async fn presets_list(
+    state: State<'_, AppState>,
+    group: Option<String>,
+) -> AppResult<Vec<DevelopPreset>> {
+    crate::develop::presets::list(&state.pool, group.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn preset_save(
+    state: State<'_, AppState>,
+    name: String,
+    group: String,
+    operations: Operations,
+) -> AppResult<i64> {
+    crate::develop::presets::save_user(&state.pool, &name, &group, &operations).await
+}
+
+/// Generate a preview JPEG for `photo_id` under `ops`. Renders at 1280
+/// long-edge — big enough to look good on-screen, small enough to keep
+/// slider drags at > 10 fps on CPU.
+async fn render_preview(
+    pool: &sqlx::SqlitePool,
+    photo_id: i64,
+    ops: &Operations,
+) -> AppResult<String> {
+    // Reuse the generate_thumbnail_bytes path for the baseline JPEG.
+    let thumb_bytes = generate_thumbnail_bytes(photo_id, Some(1280), pool).await?;
+    // Decode → apply ops → re-encode.
+    let decoded = image::load_from_memory(&thumb_bytes)
+        .map_err(|e| AppError::Internal(format!("decode thumb for photo {photo_id}: {e}")))?;
+    let rgb = decoded.to_rgb8();
+    let processed = if ops.is_identity() {
+        rgb
+    } else {
+        crate::develop::pipeline::apply(&rgb, ops)
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(200 * 1024);
+    let (w, h) = processed.dimensions();
+    let encoder = JpegEncoder::new_with_quality(&mut out, 85);
+    encoder
+        .write_image(processed.as_raw(), w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| AppError::Internal(format!("encode preview: {e}")))?;
+    Ok(format!("data:image/jpeg;base64,{}", B64.encode(&out)))
 }
 
 #[cfg(test)]

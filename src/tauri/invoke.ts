@@ -982,6 +982,123 @@ export async function onedriveAuthStatus(): Promise<boolean> {
   return tauriInvoke<boolean>('onedrive_auth_status');
 }
 
+// ── Phase 3: Develop (non-destructive edits) ──────────────────────────────────
+
+export interface DevelopOperations {
+  exposure: number;
+  contrast: number;
+  highlights: number;
+  shadows: number;
+  whites: number;
+  blacks: number;
+  temp: number;
+  tint: number;
+  vibrance: number;
+  saturation: number;
+  clarity: number;
+  dehaze: number;
+}
+
+export function identityOperations(): DevelopOperations {
+  return {
+    exposure: 0,
+    contrast: 0,
+    highlights: 0,
+    shadows: 0,
+    whites: 0,
+    blacks: 0,
+    temp: 0,
+    tint: 0,
+    vibrance: 0,
+    saturation: 0,
+    clarity: 0,
+    dehaze: 0,
+  };
+}
+
+export interface RenderReceipt {
+  photo_id: number;
+  preview_data_url: string;
+  elapsed_ms: number;
+}
+
+export interface DevelopOpenResponse {
+  photo_id: number;
+  operations: DevelopOperations;
+  preview_data_url: string;
+}
+
+export interface PastedReceipt {
+  pasted_photo_count: number;
+  skipped: number[];
+}
+
+export interface DevelopPreset {
+  id: number;
+  name: string;
+  group_name: string;
+  description: string | null;
+  operations_json: string;
+  is_system: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function developOpen(photoId: number): Promise<DevelopOpenResponse> {
+  return tauriInvoke<DevelopOpenResponse>('develop_open', { photoId });
+}
+
+export async function developApply(photoId: number, operations: DevelopOperations): Promise<RenderReceipt> {
+  return tauriInvoke<RenderReceipt>('develop_apply', { photoId, operations });
+}
+
+export async function developSave(
+  photoId: number,
+  operations: DevelopOperations,
+  label?: string,
+): Promise<number> {
+  return tauriInvoke<number>('develop_save', {
+    photoId,
+    operations,
+    label: label ?? null,
+  });
+}
+
+export async function developReset(photoId: number): Promise<number> {
+  return tauriInvoke<number>('develop_reset', { photoId });
+}
+
+export async function developCopyEdits(photoId: number): Promise<DevelopOperations> {
+  return tauriInvoke<DevelopOperations>('develop_copy_edits', { photoId });
+}
+
+export async function developPasteEdits(
+  photoIds: number[],
+  operations: DevelopOperations,
+): Promise<PastedReceipt> {
+  return tauriInvoke<PastedReceipt>('develop_paste_edits', { photoIds, operations });
+}
+
+export async function developPresetApply(
+  photoId: number,
+  presetId: number,
+  strength: number,
+): Promise<RenderReceipt> {
+  return tauriInvoke<RenderReceipt>('develop_preset_apply', { photoId, presetId, strength });
+}
+
+export async function presetsList(group?: string): Promise<DevelopPreset[]> {
+  return tauriInvoke<DevelopPreset[]>('presets_list', { group: group ?? null });
+}
+
+export async function presetSave(
+  name: string,
+  group: string,
+  operations: DevelopOperations,
+): Promise<number> {
+  return tauriInvoke<number>('preset_save', { name, group, operations });
+}
+
 export async function onedriveUpload(photoIds: number[], remoteFolder: string): Promise<UploadReceipt> {
   return tauriInvoke<UploadReceipt>('onedrive_upload', { photoIds, remoteFolder });
 }
