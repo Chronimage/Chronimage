@@ -140,8 +140,19 @@ export function DevelopScreen() {
     [scheduleApply],
   );
 
+  const updateCurves = useCallback(
+    (curves: DevelopValues['curves']) => {
+      const next: DevelopValues = { ...valuesRef.current, curves };
+      valuesRef.current = next;
+      setValues(next);
+      scheduleApply(valuesToOperations(next));
+    },
+    [scheduleApply],
+  );
+
   const autoLight = useCallback(() => {
     const next: DevelopValues = {
+      ...valuesRef.current,
       exp: 12,
       con: 8,
       hi: -24,
@@ -155,6 +166,7 @@ export function DevelopScreen() {
       clarity: 8,
       dehaze: 10,
     };
+    valuesRef.current = next;
     setValues(next);
     scheduleApply(valuesToOperations(next));
   }, [scheduleApply]);
@@ -250,6 +262,7 @@ export function DevelopScreen() {
           stageAspect={stageAspect}
           values={values}
           onValueChange={updateValue}
+          onCurvesChange={updateCurves}
           onAutoLight={autoLight}
           onReset={resetEdits}
           preview={preview}
@@ -347,6 +360,7 @@ interface DevelopStageSplitProps {
   stageAspect: string;
   values: DevelopValues;
   onValueChange: (key: keyof DevelopValues, value: number) => void;
+  onCurvesChange: (curves: DevelopValues['curves']) => void;
   onAutoLight: () => void;
   onReset: () => void;
   preview: string | null;
@@ -360,6 +374,7 @@ function DevelopStageSplit({
   stageAspect,
   values,
   onValueChange,
+  onCurvesChange,
   onAutoLight,
   onReset,
   preview,
@@ -441,6 +456,7 @@ function DevelopStageSplit({
         photo={photo}
         values={values}
         onChange={onValueChange}
+        onCurvesChange={onCurvesChange}
         onAutoLight={onAutoLight}
         onReset={onReset}
       />

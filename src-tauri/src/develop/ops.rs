@@ -1,12 +1,20 @@
-//! The edit operations value object — a flat struct of slider values + a
-//! blended curve. Serde-serialises to JSON that lives in
-//! `edits.operations_json`. Every field is a plain scalar so interpolation
-//! between presets (strength 0 → 100) is a linear lerp per field.
+//! The edit operations value object — a flat struct of slider values +
+//! tone curves. Serde-serialises to JSON that lives in
+//! `edits.operations_json`. Every field is a plain scalar (or a fixed-size
+//! array for curves) so interpolation between presets (strength 0 → 100)
+//! is a linear lerp per field / per control point.
 //!
 //! Sliders are all in `-100..=100` except:
 //! - `exposure` — EV, -4..=4 (UI maps via × 25 scaler)
 //! - `temp` — Kelvin delta, -50..=50 (UI cue only; pipeline interprets as
 //!   a warm/cool RGB channel shift)
+//!
+//! Curves are fixed at 5 control points per channel (blacks / shadows /
+//! mids / highlights / whites). Each point is `[x, y]` in `[0, 1]`.
+//! Identity = the diagonal `y = x`; the pipeline runs a Catmull-Rom
+//! spline through the 5 points to build a 256-entry LUT. Five channels
+//! are stored — `rgb` (the composite master curve) + `r`/`g`/`b` per-
+//! channel + `l` (luma).
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +47,84 @@ pub struct Operations {
     pub clarity: f32,
     #[serde(default)]
     pub dehaze: f32,
+    /// Tone curves — master RGB + per-channel R/G/B + luma. Default is
+    /// identity on every channel (no-op). See module doc.
+    #[serde(default)]
+    pub curves: Curves,
+}
+
+/// Fixed-size curve for one channel: 5 control points in `[0,1]^2`.
+/// Order is left-to-right on the x axis. Serialised as a `[[f32; 2]; 5]`
+/// for compact storage + obvious JSON shape.
+pub type Curve = [[f32; 2]; 5];
+
+/// Identity curve — the diagonal `y = x` at five evenly spaced x points.
+pub const fn identity_curve() -> Curve {
+    [
+        [0.0, 0.0],
+        [0.25, 0.25],
+        [0.5, 0.5],
+        [0.75, 0.75],
+        [1.0, 1.0],
+    ]
+}
+
+/// Per-channel tone curves. Each field is a 5-point curve.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Curves {
+    #[serde(default = "identity_curve")]
+    pub rgb: Curve,
+    #[serde(default = "identity_curve")]
+    pub r: Curve,
+    #[serde(default = "identity_curve")]
+    pub g: Curve,
+    #[serde(default = "identity_curve")]
+    pub b: Curve,
+    #[serde(default = "identity_curve")]
+    pub l: Curve,
+}
+
+impl Curves {
+    pub const fn identity() -> Self {
+        Self {
+            rgb: identity_curve(),
+            r: identity_curve(),
+            g: identity_curve(),
+            b: identity_curve(),
+            l: identity_curve(),
+        }
+    }
+
+    /// True iff every channel is the identity (y = x) curve. The pipeline
+    /// skips the whole curves stage when this is true.
+    pub fn is_identity(&self) -> bool {
+        *self == Self::identity()
+    }
+
+    fn blend_channel(a: &Curve, b: &Curve, t: f32) -> Curve {
+        let mut out = identity_curve();
+        for i in 0..5 {
+            out[i][0] = a[i][0] + (b[i][0] - a[i][0]) * t;
+            out[i][1] = a[i][1] + (b[i][1] - a[i][1]) * t;
+        }
+        out
+    }
+
+    pub fn blend(&self, other: &Self, t: f32) -> Self {
+        Self {
+            rgb: Self::blend_channel(&self.rgb, &other.rgb, t),
+            r: Self::blend_channel(&self.r, &other.r, t),
+            g: Self::blend_channel(&self.g, &other.g, t),
+            b: Self::blend_channel(&self.b, &other.b, t),
+            l: Self::blend_channel(&self.l, &other.l, t),
+        }
+    }
+}
+
+impl Default for Curves {
+    fn default() -> Self {
+        Self::identity()
+    }
 }
 
 impl Default for Operations {
@@ -48,8 +134,8 @@ impl Default for Operations {
 }
 
 impl Operations {
-    /// "As imported" — no edits applied. Every field is 0; the pipeline
-    /// returns its input untouched.
+    /// "As imported" — no edits applied. Every field is 0; curves are
+    /// the diagonal; the pipeline returns its input untouched.
     pub const fn identity() -> Self {
         Self {
             exposure: 0.0,
@@ -64,6 +150,7 @@ impl Operations {
             saturation: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            curves: Curves::identity(),
         }
     }
 
@@ -91,6 +178,7 @@ impl Operations {
             saturation: lerp(self.saturation, target.saturation),
             clarity: lerp(self.clarity, target.clarity),
             dehaze: lerp(self.dehaze, target.dehaze),
+            curves: self.curves.blend(&target.curves, t),
         }
     }
 }

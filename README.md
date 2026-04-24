@@ -2,9 +2,9 @@
 
 > Windows-first, on-device AI photo organizer for hobbyist photographers.
 >
-> **Consolidate** your fragmented library (Google Photos / iCloud / iPhone / local). **Reclaim** cloud storage. **Rediscover** forgotten photos. **Cull** duplicates. All on your machine, no subscription.
+> **Consolidate** your fragmented library (Google Photos / iCloud / iPhone / local). **Reclaim** cloud storage. **Rediscover** forgotten photos. **Cull** duplicates. **Develop** RAWs with non-destructive edits. All on your machine, no subscription.
 
-Status: **Phase 0 — foundation & quality backbone** (pre-alpha; not yet runnable).
+Status: **Phase 6 — launch infrastructure + distribution** (Phases 1–5 closed; pre-release, running daily on dev machines).
 
 ---
 
@@ -12,54 +12,93 @@ Status: **Phase 0 — foundation & quality backbone** (pre-alpha; not yet runnab
 
 Photographers with scattered libraries pay monthly for cloud storage they don't trust, hesitate to consolidate because every tool locks them in, and never cull the 50% of shots that are duplicates. Darktable is too complex; Lightroom is too expensive and subscription-bound.
 
-Chronimage is the middle ground: on-device AI that organizes, deduplicates (including RAW+JPG pairs from a Sony A7 IV), surfaces for rediscovery ("on this day", "unseen in 2 years"), and **safely frees up the source cloud/device after verifying a local copy**.
+Chronimage is the middle ground: on-device AI that organizes, deduplicates (including RAW+JPG pairs from a Sony A7 IV), surfaces for rediscovery ("on this day", "unseen in 2 years"), develops RAWs non-destructively, and **safely frees up the source cloud/device after verifying a local copy**.
 
 ## Roadmap
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Foundation, quality backbone, 4 release channels wired | ⏳ in progress |
-| 1 | Deep AI catalog: import, tag, face-cluster, dedupe, search, source-side cleanup, rediscovery | ⏸ pending |
-| 2 | Cull + Cull Bin + Export | ⏸ |
-| 3 | RAW Develop (GPU pipeline, curves, masks, presets) | ⏸ |
-| 4 | Prompt editing + tweaks + map view | ⏸ |
-| 5 | Release hardening, signing, store, website | ⏸ |
+| 0 | Foundation, quality backbone, 4 release channels wired | ✅ shipped |
+| 1 | Deep AI catalog: import, tag, face-cluster, dedupe, search, source-side cleanup, rediscovery | ✅ shipped |
+| 2 | Cull + Cull Bin + Export | ✅ shipped |
+| 3 | RAW Develop — non-destructive edits, 9-stage CPU pipeline, tone curves, presets, copy-paste sync | ✅ shipped |
+| 4 | Prompt editing + map view + shortcut overlay + XMP sidecar import/write-out | ✅ shipped |
+| 5 | Release hardening (in-code) — license + telemetry opt-in + governance docs | ✅ shipped |
+| 6 | Launch infrastructure — EV cert, Cloudflare Pages, Sentry, Insider signup, Microsoft Store | ⏳ in progress |
 
-Each phase has an authoritative PRD at `docs/prds/phase-N.md`.
+Each phase has an authoritative PRD at [`docs/prds/phase-N.md`](./docs/prds/).
 
 ## Tech stack
 
-Tauri v2 · React 19 · TypeScript · Tailwind v4 · Radix UI · Zustand · TanStack Router/Query · Rust · SQLite (+ sqlite-vec, FTS5) · rawler · libheif-rs · wgpu · ort (ONNX Runtime) · llama.cpp sidecar · SigLIP-B · ArcFace · RetinaFace · HDBSCAN · NIMA.
+Tauri v2 · React 19 · TypeScript · Tailwind v4 · Radix UI · Zustand · TanStack Router/Query · Leaflet · Rust · SQLite (+ sqlite-vec, FTS5) · rawler · libheif-rs · wgpu · ort (ONNX Runtime) · llama.cpp sidecar · SigLIP-B · ArcFace · RetinaFace · HDBSCAN · NIMA · Ed25519.
 
 ## Build
 
 ```bash
+# Node ≥ 20.11, pnpm ≥ 9, Rust stable.
 pnpm install
 cargo fetch --manifest-path src-tauri/Cargo.toml
+
+# Populate bundled AI models (Windows):
+pwsh scripts/fetch-bundled-models.ps1
+# Linux / macOS:
+# bash scripts/fetch-bundled-models.sh
+
+# Run dev:
 pnpm tauri dev
 ```
 
 Full onboarding: [`CLAUDE.md`](./CLAUDE.md) (agent-readable) — humans can read it too.
+
+### Local observability (optional)
+
+A Loki + Grafana stack under `docker/` captures tracing events from both the Rust backend and the React frontend during `pnpm tauri dev`. Start it with:
+
+```bash
+docker compose up -d
+# Grafana: http://localhost:3001  (anonymous admin, explore → Loki)
+# Loki:    http://localhost:3101
+```
+
+`src-tauri/src/main.rs::install_tracing` ships log lines to Loki only in debug builds; production installs never touch this stack. Stop it with `docker compose down` when you don't need it.
 
 ## Release channels
 
 - **Stable** (`v1.2.3`) — monthly, signed with EV cert.
 - **Beta** (`v1.2.3-beta.N`) — weekly, signed.
 - **Nightly** (`v1.2.3-nightly.YYYYMMDD`) — daily from `develop`, test-signed.
-- **Insider** — private invite list, license-gated.
+- **Insider** — private invite list, Ed25519-licence-gated ([`src-tauri/src/license/`](./src-tauri/src/license/mod.rs)).
 
 Choose channel in Settings → Updates.
 
+## CLI
+
+A `chronimage` CLI ships alongside the app for power users + ops:
+
+```bash
+chronimage doctor              # env + catalog + model inventory
+chronimage scan <path>         # dry-run scan report
+chronimage import <path> --source "My NAS"
+chronimage ai audit            # all models + install state
+chronimage catalog stats       # photos / tags / faces / trips / edits
+chronimage license show
+chronimage trips recompute
+chronimage xmp rescan
+```
+
+See [`src-tauri/src/bin/chronimage-cli.rs`](./src-tauri/src/bin/chronimage-cli.rs) for the full surface.
+
 ## Quality
 
-- Pre-commit: lefthook runs biome + cargo fmt + clippy + typecheck + forbidden-patterns.
-- PR CI: 7 workflows. Coverage, visual regression, accessibility (axe), security audit, bundle-size diff, license check, mutation tests (nightly).
-- No subscription telemetry. Crash reports opt-in only, Phase 5+.
+- **Pre-commit** (lefthook): biome + cargo fmt + clippy + typecheck + forbidden-patterns + detect-secrets.
+- **PR CI**: 7 workflows — coverage, visual regression, accessibility (axe-core), security audit (cargo-deny + cargo-audit), bundle-size diff, license check, mutation tests (nightly).
+- **No subscription telemetry.** Crash reports are opt-in and PII-scrubbed (Phase 6 Sentry wire-up).
+- **No `unwrap()` / `expect()` / `panic!()`** in production Rust. Enforced by `scripts/forbidden-patterns.cjs` + pre-commit.
 
 ## License
 
-TBD. See [LICENSE](./LICENSE).
+Dual [MIT](./LICENSE-MIT) / [Apache-2.0](./LICENSE-APACHE) at your option. `SPDX-License-Identifier: MIT OR Apache-2.0`. See [LICENSE](./LICENSE).
 
 ## Contributing
 
-This is currently a solo build. Public contribution guidelines land in Phase 5.
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Security issues: [SECURITY.md](./SECURITY.md) (please **do not** open a public issue).

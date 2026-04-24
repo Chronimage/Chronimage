@@ -52,6 +52,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 dehaze: 0.0,
                 whites: 0.0,
                 blacks: 0.0,
+                curves: crate::develop::ops::Curves::identity(),
             },
         ),
         (
@@ -71,6 +72,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 saturation: 8.0,
                 clarity: 20.0,
                 dehaze: 25.0,
+                curves: crate::develop::ops::Curves::identity(),
             },
         ),
         (
@@ -90,6 +92,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 saturation: 0.0,
                 clarity: 5.0,
                 dehaze: 0.0,
+                curves: crate::develop::ops::Curves::identity(),
             },
         ),
         (
@@ -109,6 +112,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 saturation: -100.0, // full desaturate
                 clarity: 25.0,
                 dehaze: 10.0,
+                curves: crate::develop::ops::Curves::identity(),
             },
         ),
     ]
