@@ -164,13 +164,12 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
     // prompts, runs on CPU at ~1s/image. Community GGUF quantization.
     //
     // NOTE: Moondream2 is a vision-language model (unlike Gemma which is text-only).
-    // The llama.cpp sidecar protocol will need to accept an image path (or base64)
-    // argument in addition to the text prompt.
-    // TODO(cc): update CaptionSession::load to pass image_path to the sidecar
-    // via the LLaVA-style image_url content block once Phase-1b wires the HTTP call.
+    // CaptionSession::caption_image handles the LLaVA-style image_url content
+    // block; the sidecar picks up the sibling mmproj file when present.
     // Official GGUF at moondream/moondream2-gguf (moondream org, not vikhyatk user).
     // vikhyatk/moondream2 ships safetensors only; the GGUF quant lives in the
-    // sibling -gguf repo. Phase-1b also needs the mmproj companion for vision.
+    // sibling -gguf repo. The mmproj companion is optional but required for
+    // real vision — without it captioning degrades to language-only.
     ModelSpec {
         name: "moondream2-q4",
         kind: "caption-gguf",

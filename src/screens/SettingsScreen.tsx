@@ -2,10 +2,10 @@
  * SettingsScreen — tweaks + AI-model status surface.
  *
  * Four sections:
- *   1. Identity          — app name (in-memory; TODO persist)
+ *   1. Identity          — app name (persisted via useUi tweaks store)
  *   2. AI Models         — live status from ai_models_status()
- *   3. Culling thresholds — in-memory sliders/toggles
- *   4. Storage & indexing — in-memory toggles
+ *   3. Culling thresholds — persisted via useUi tweaks store
+ *   4. Storage & indexing — persisted via useUi tweaks store
  */
 
 import { listen } from '@tauri-apps/api/event';

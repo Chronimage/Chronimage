@@ -22,8 +22,8 @@
 //! 5. Lift does NOT delete source copies — that is source-side cleanup's job.
 //!    The original `source_copies` row is left intact.
 //!
-//! TODO(phase-1 frontend): wire `liftShiftDryRun()` + `liftShiftExecute()`
-//! in src/tauri/invoke.ts.
+//! Frontend wiring lives in `src/tauri/invoke.ts` (`liftShiftDryRun` /
+//! `liftShiftExecute`) with React Query hooks in `src/state/queries.ts`.
 
 use crate::{import, AppError, AppResult};
 use chrono::Utc;
@@ -70,8 +70,16 @@ pub struct LiftPlan {
     /// Number of files to copy.
     pub total_file_count: usize,
     pub items: Vec<LiftItem>,
-    /// `true` when target drive has ≥ 1.5× `total_bytes` free at plan time.
+    /// `true` when target drive has ≥ 1.5× `total_bytes` free at plan time,
+    /// **or** when we couldn't probe the drive (in which case
+    /// `free_space_probe_error` is set so the caller can warn the user).
     pub free_space_ok: bool,
+    /// OS-level error text from the free-space probe. `None` on a clean
+    /// probe (success or failure); `Some` when the probe itself errored
+    /// (unmounted volume, permissions, etc.). The UI should surface this
+    /// as a non-blocking warning so the user knows the 1.5× gate was
+    /// effectively skipped.
+    pub free_space_probe_error: Option<String>,
 }
 
 /// Result of a successful (or partially-successful) `execute_lift`.
@@ -217,19 +225,18 @@ pub async fn plan_lift(pool: &sqlx::SqlitePool, target_root: PathBuf) -> AppResu
     // ≥ 1.5× free-space gate.
     // If target_root does not yet exist, check its nearest existing ancestor.
     let probe_path = nearest_existing_ancestor(&target_root);
-    let free_space_ok = match free_bytes_for_path(&probe_path) {
+    let (free_space_ok, free_space_probe_error) = match free_bytes_for_path(&probe_path) {
         Ok(free) => {
             let required = total_bytes.saturating_add(total_bytes / 2); // 1.5×
-            free >= required
+            (free >= required, None)
         }
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 "lift-and-shift: could not check free space on target volume; \
-                 proceeding with free_space_ok = true"
+                 proceeding with free_space_ok = true + warning surfaced to UI"
             );
-            // TODO(phase-1b): surface this warning to the caller.
-            true
+            (true, Some(e.to_string()))
         }
     };
 
@@ -244,6 +251,7 @@ pub async fn plan_lift(pool: &sqlx::SqlitePool, target_root: PathBuf) -> AppResu
         total_file_count: items.len(),
         items,
         free_space_ok,
+        free_space_probe_error,
     };
 
     let mut guard = PENDING_LIFT_PLANS
