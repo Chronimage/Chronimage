@@ -25,6 +25,8 @@ import {
   maskFromPrompt,
   type PhotoRow,
   promptEdit,
+  promptEditAccept,
+  promptEditReject,
   promptSidecarPing,
   type SidecarStatus,
 } from '../../tauri/invoke';
@@ -472,6 +474,8 @@ function PromptStage({
   const [renderError, setRenderError] = useState<string | null>(null);
   const [maskB64, setMaskB64] = useState<string | null>(null);
   const [masking, setMasking] = useState(false);
+  const [currentEditId, setCurrentEditId] = useState<number | null>(null);
+  const [acceptedB64, setAcceptedB64] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -507,6 +511,7 @@ function PromptStage({
         : 'No sidecar configured';
 
   const onGenerate = async () => {
+    if (!canGenerate) return;
     setGenerating(true);
     setRenderError(null);
     try {
@@ -518,10 +523,48 @@ function PromptStage({
         mask_b64: maskB64,
       });
       setRenderedB64(result.image_b64);
+      // The sidecar writes a prompt_edits row server-side. The UI tracks
+      // the freshest id so Accept/Reject can target it. We fetch the
+      // latest pending row rather than threading the id back through the
+      // command payload.
+      try {
+        const { promptEditList } = await import('../../tauri/invoke');
+        const rows = await promptEditList(photo.id);
+        const pending = rows.find((r) => r.state === 'pending');
+        if (pending) setCurrentEditId(pending.id);
+      } catch (e) {
+        warn('prompt history list failed', e);
+      }
     } catch (e) {
       setRenderError(String(e));
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const onAccept = async () => {
+    if (currentEditId == null) return;
+    try {
+      await promptEditAccept(currentEditId);
+      setAcceptedB64(renderedB64);
+      setRenderedB64(null);
+      setCurrentEditId(null);
+    } catch (e) {
+      setRenderError(String(e));
+    }
+  };
+
+  const onReject = async () => {
+    if (currentEditId == null) {
+      setRenderedB64(null);
+      return;
+    }
+    try {
+      await promptEditReject(currentEditId);
+      setRenderedB64(null);
+      setCurrentEditId(null);
+    } catch (e) {
+      setRenderError(String(e));
     }
   };
 
@@ -603,11 +646,47 @@ function PromptStage({
                 alt="Generated result"
                 style={{ width: '100%', height: '100%', objectFit: 'contain' }}
               />
+            ) : acceptedB64 ? (
+              <img
+                src={`data:image/png;base64,${acceptedB64}`}
+                alt="Accepted generation"
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
             ) : (
               <Placeholder
                 photo={{ hue: 220, filename: photo.filename, id: String(photo.id) }}
                 showLabel={false}
               />
+            )}
+            {renderedB64 && (
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 10,
+                  bottom: 10,
+                  display: 'flex',
+                  gap: 6,
+                }}
+              >
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={onAccept}
+                  style={{ padding: '5px 11px', fontSize: 11.5 }}
+                  title="Save this generation and close it"
+                >
+                  Accept
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={onReject}
+                  style={{ padding: '5px 11px', fontSize: 11.5 }}
+                  title="Discard this generation"
+                >
+                  Reject
+                </button>
+              </div>
             )}
             <div style={{ position: 'absolute', top: 10, right: 10 }}>
               {status?.reachable ? (
@@ -655,6 +734,12 @@ function PromptStage({
           <textarea
             value={promptText}
             onChange={(e) => setPromptText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                onGenerate();
+              }
+            }}
             aria-label="Prompt describing the edit"
             style={{ minHeight: 48 }}
           />

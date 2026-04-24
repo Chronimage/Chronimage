@@ -20,6 +20,8 @@
 //! Network traffic is gated behind commands prefixed with
 //! `user_initiated_` (the PRD's rule from CLAUDE.md § Security).
 
+pub mod history;
+
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -233,13 +235,37 @@ pub async fn user_initiated_prompt_edit(
         .json()
         .await
         .map_err(|e| AppError::Internal(format!("sidecar JSON parse failed: {e}")))?;
+    let latency_ms = parsed
+        .latency_ms
+        .unwrap_or_else(|| start.elapsed().as_millis() as u64);
+    let model_id = parsed.model_id.unwrap_or(model);
+    let seed = parsed.seed.unwrap_or(0);
+
+    // Best-effort persistence into prompt_edits. A write failure here
+    // shouldn't black out the user's result — the preview stays in the
+    // UI even if the history row never landed.
+    if let Err(e) = history::save(
+        pool,
+        req.photo_id,
+        &req.prompt,
+        req.strength,
+        &req.constraints,
+        req.mask_b64.as_deref(),
+        &parsed.image_b64,
+        &model_id,
+        seed,
+        latency_ms,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "prompt history save failed");
+    }
+
     Ok(PromptEditResult {
         image_b64: parsed.image_b64,
-        latency_ms: parsed
-            .latency_ms
-            .unwrap_or_else(|| start.elapsed().as_millis() as u64),
-        model_id: parsed.model_id.unwrap_or(model),
-        seed: parsed.seed.unwrap_or(0),
+        latency_ms,
+        model_id,
+        seed,
     })
 }
 

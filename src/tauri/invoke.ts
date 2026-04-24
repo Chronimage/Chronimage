@@ -1230,6 +1230,33 @@ export async function maskFromPrompt(req: MaskFromPromptRequest): Promise<MaskFr
   return tauriInvoke<MaskFromPromptResult>('mask_from_prompt', { req });
 }
 
+export interface PromptEditRow {
+  id: number;
+  photo_id: number;
+  prompt: string;
+  strength: number;
+  constraints_json: string;
+  mask_b64: string | null;
+  rendered_b64: string;
+  model_id: string;
+  seed: number;
+  latency_ms: number;
+  state: 'pending' | 'accepted' | 'rejected';
+  created_at: string;
+}
+
+export async function promptEditList(photoId: number): Promise<PromptEditRow[]> {
+  return tauriInvoke<PromptEditRow[]>('prompt_edit_list', { photoId });
+}
+
+export async function promptEditAccept(editId: number): Promise<void> {
+  return tauriInvoke('prompt_edit_accept', { editId });
+}
+
+export async function promptEditReject(editId: number): Promise<void> {
+  return tauriInvoke('prompt_edit_reject', { editId });
+}
+
 export interface ShortcutRow {
   command_id: string;
   key_binding: string;

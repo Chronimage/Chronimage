@@ -211,6 +211,9 @@ fn main() {
             commands::prompt_sidecar_ping,
             commands::prompt_edit,
             commands::mask_from_prompt,
+            commands::prompt_edit_list,
+            commands::prompt_edit_accept,
+            commands::prompt_edit_reject,
             commands::shortcuts_list,
             commands::shortcuts_set,
         ])

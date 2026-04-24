@@ -4283,6 +4283,24 @@ pub async fn mask_from_prompt(
     crate::prompt::user_initiated_mask_from_prompt(&state.pool, req).await
 }
 
+#[tauri::command]
+pub async fn prompt_edit_list(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Vec<crate::prompt::history::PromptEditRow>> {
+    crate::prompt::history::list_for_photo(&state.pool, photo_id).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit_accept(state: State<'_, AppState>, edit_id: i64) -> AppResult<()> {
+    crate::prompt::history::accept(&state.pool, edit_id).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit_reject(state: State<'_, AppState>, edit_id: i64) -> AppResult<()> {
+    crate::prompt::history::reject(&state.pool, edit_id).await
+}
+
 // Shortcut registry — userland stores its bindings in the shortcuts
 // table. Phase 4 §6 scope: list + set. A discovery modal reads the list;
 // a future rebinding UI calls set. Conflict detection is client-side.
