@@ -1354,37 +1354,6 @@ select {
   border-top: 1px solid var(--stroke);
 }
 
-/* Preset card (used in Step 1 — catalog mode picker) */
-.preset-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px;
-  border: 1px solid var(--stroke);
-  border-radius: 12px;
-  background: var(--bg-elev);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 0.12s;
-}
-.preset-card:hover {
-  border-color: var(--stroke-strong);
-}
-.preset-card.on {
-  border-color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 8%, var(--bg-elev));
-}
-.preset-card .name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--fg);
-}
-.preset-card .sub {
-  font-size: 11px;
-  color: var(--fg-mute);
-  font-family: var(--mono-font);
-}
-
 /* Progress card (used in Step 3 — import overview) */
 .progress-card {
   padding: 12px 14px;
@@ -1709,4 +1678,275 @@ select {
 .app[data-density="spacious"] {
   --grid-cols: 3;
   --grid-gap: 18px;
+}
+
+/* --- Cull / Cull Bin additions --- */
+.cull-progress {
+  height: 4px;
+  background: var(--bg-elev);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.cull-progress > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+.cull-mode-seg {
+  background: var(--bg-elev);
+  padding: 3px;
+  border-radius: 9px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  border: 1px solid var(--stroke);
+}
+.cull-mode-seg button {
+  padding: 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: transparent;
+}
+.cull-mode-seg button.on {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.btn.danger {
+  color: var(--warn);
+}
+.btn.danger:hover {
+  background: color-mix(in oklch, var(--warn) 12%, transparent);
+}
+
+.cullbin-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: 10px;
+  background: var(--bg-elev);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+.cullbin-row:hover {
+  border-color: var(--stroke-strong);
+}
+.cullbin-row[data-selected="true"] {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 8%, var(--bg-elev));
+}
+.cullbin-row .ph {
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* --- Develop screen additions (overrides .editor-stage to a 2-col layout) --- */
+.canvas .editor-stage {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  grid-template-rows: unset;
+  min-height: 0;
+}
+.editor-main {
+  display: grid;
+  grid-template-rows: 1fr 88px;
+  min-height: 0;
+  border-right: 1px solid var(--stroke);
+}
+.editor-main .editor-canvas {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+.editor-histogram {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  width: 180px;
+  height: 56px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  padding: 6px;
+  pointer-events: none;
+}
+.editor-histogram svg {
+  width: 100%;
+  height: 100%;
+}
+
+.editor-inspector {
+  background: var(--bg-chrome);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.editor-ihead {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--stroke);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.editor-ibody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.editor-group {
+  border-top: 1px solid var(--stroke);
+  padding-top: 14px;
+}
+.editor-group:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.editor-group h4 {
+  font-family: var(--mono-font);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  margin: 0 0 10px;
+  font-weight: 500;
+}
+
+.curves-box {
+  background: var(--bg);
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  height: 140px;
+  overflow: hidden;
+}
+.curves-box svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Develop side panel — preset library */
+.preset-active-sticky {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--stroke);
+  background: color-mix(in oklch, var(--accent) 6%, var(--bg-chrome));
+}
+.preset-active-sticky .lbl {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.preset-active-sticky .main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--fg);
+  margin-bottom: 4px;
+}
+.preset-active-sticky .main .val {
+  color: var(--accent);
+  font-size: 16px;
+}
+.preset-active-sticky input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.preset-cats {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--stroke);
+  overflow-x: auto;
+}
+.preset-cats button {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  flex-shrink: 0;
+}
+.preset-cats button.on {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border-color: var(--stroke-strong);
+}
+
+.preset-card {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  background: var(--bg-elev);
+  text-align: left;
+  cursor: pointer;
+}
+.preset-card:hover {
+  border-color: var(--stroke-strong);
+}
+.preset-card.on {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 8%, var(--bg-elev));
+}
+.preset-card .pv {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.preset-card .preset-meta .name {
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.preset-card .preset-meta .sub {
+  font-size: 10.5px;
+  color: var(--fg-mute);
+  margin-top: 2px;
+}
+.preset-card .val {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* Prompt tab additions */
+.prompt-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.prompt-box .kbd {
+  font-family: var(--mono-font);
+  font-size: 10px;
+  color: var(--accent-ink);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: color-mix(in oklch, var(--accent-ink) 20%, transparent);
 }
