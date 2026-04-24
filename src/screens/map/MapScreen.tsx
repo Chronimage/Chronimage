@@ -11,11 +11,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import L from 'leaflet';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CircleMarker, MapContainer, Marker, Popup, TileLayer, useMap, useMapEvents } from 'react-leaflet';
+import { CircleMarker, MapContainer, Marker, Popup, useMap, useMapEvents } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { Icon } from '../../primitives/Icon';
 import { Thumbnail } from '../../primitives/Thumbnail';
-import { mapListTrips, mapPhotosInTrip, mapRecomputeTrips, type TripRow } from '../../tauri/invoke';
+import { mapListTrips, mapPhotosInTrip, mapRecomputeTrips, mapTile, type TripRow } from '../../tauri/invoke';
 
 interface PinCluster {
   center_lat: number;
@@ -96,6 +96,48 @@ function tripsBounds(trips: TripRow[]): L.LatLngBoundsExpression | null {
   const bounds = L.latLngBounds(latLngs);
   return bounds.isValid() ? bounds : null;
 }
+
+/** Custom Leaflet TileLayer that routes every tile fetch through the
+ *  Rust `map_tile` command. Hit-then-cache on disk at
+ *  `{data_dir}/tiles/{z}/{x}/{y}.png`; network fallback identifies as
+ *  Chronimage per OSMF fair-use policy. Attribution still rendered by
+ *  the underlying layer. */
+const CachedTileLayer = (() => {
+  const TL = L.TileLayer.extend({
+    createTile(coords: L.Coords, done: L.DoneCallback) {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.setAttribute('role', 'presentation');
+      const self = this as unknown as L.TileLayer;
+      self.fire('tileloadstart', { tile: img, coords });
+      mapTile(coords.z, coords.x, coords.y)
+        .then((bytes) => {
+          const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+          const blob = new Blob([ab as ArrayBuffer], { type: 'image/png' });
+          img.src = URL.createObjectURL(blob);
+          img.onload = () => done(undefined, img);
+          img.onerror = () => done(new Error('decode failed'), img);
+        })
+        .catch((e) => done(e instanceof Error ? e : new Error(String(e)), img));
+      return img;
+    },
+  });
+  return function CachedTiles({ attribution }: { attribution: string }) {
+    const map = useMap();
+    useEffect(() => {
+      const layer = new (TL as unknown as new (url: string, opts: L.TileLayerOptions) => L.TileLayer)('', {
+        attribution,
+        maxZoom: 19,
+        minZoom: 0,
+      });
+      layer.addTo(map);
+      return () => {
+        layer.remove();
+      };
+    }, [map, attribution]);
+    return null;
+  };
+})();
 
 /** Render filtered trips with zoom-aware screen-space clustering. Single
  *  trips keep the CircleMarker look; shared cells collapse into a count
@@ -340,10 +382,7 @@ export function MapScreen() {
               scrollWheelZoom={true}
               style={{ width: '100%', height: '100%', background: 'var(--bg-elev)' }}
             >
-              <TileLayer
-                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-              />
+              <CachedTileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' />
               <FitBoundsOnTrips trips={filteredTrips} />
               <ClusteredMarkers
                 trips={filteredTrips}

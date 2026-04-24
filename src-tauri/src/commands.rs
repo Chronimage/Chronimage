@@ -4308,6 +4308,11 @@ pub async fn backfill_place_labels(
     crate::map::geocode::backfill_place_labels(&state.pool).await
 }
 
+#[tauri::command]
+pub async fn map_tile(z: u32, x: u32, y: u32) -> AppResult<Vec<u8>> {
+    crate::map::tile_cache::user_initiated_fetch_tile(z, x, y).await
+}
+
 // Shortcut registry — userland stores its bindings in the shortcuts
 // table. Phase 4 §6 scope: list + set. A discovery modal reads the list;
 // a future rebinding UI calls set. Conflict detection is client-side.

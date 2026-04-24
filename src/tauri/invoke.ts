@@ -1268,6 +1268,11 @@ export async function backfillPlaceLabels(): Promise<PlaceLabelBackfillReceipt> 
   return tauriInvoke<PlaceLabelBackfillReceipt>('backfill_place_labels');
 }
 
+export async function mapTile(z: number, x: number, y: number): Promise<Uint8Array> {
+  const bytes = await tauriInvoke<number[]>('map_tile', { z, x, y });
+  return new Uint8Array(bytes);
+}
+
 export interface ShortcutRow {
   command_id: string;
   key_binding: string;

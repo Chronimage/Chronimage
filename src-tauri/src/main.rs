@@ -215,6 +215,7 @@ fn main() {
             commands::prompt_edit_accept,
             commands::prompt_edit_reject,
             commands::backfill_place_labels,
+            commands::map_tile,
             commands::shortcuts_list,
             commands::shortcuts_set,
         ])

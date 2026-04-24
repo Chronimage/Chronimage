@@ -16,6 +16,7 @@
 //!   from the centroid.
 
 pub mod geocode;
+pub mod tile_cache;
 pub mod trips;
 
 pub use trips::{list_trips, photos_in_trip, recompute_trips, RecomputeReceipt, TripRow};
