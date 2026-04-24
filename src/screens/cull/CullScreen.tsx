@@ -13,6 +13,7 @@ import { Seg } from '../../primitives/Seg';
 import { Thumbnail } from '../../primitives/Thumbnail';
 import { useCull } from '../../state/cull';
 import { useCullApplyVerdict, usePhotos } from '../../state/queries';
+import { useUi } from '../../state/ui';
 import type { PhotoRow } from '../../tauri/invoke';
 import type { CullMode, CullPair } from './types';
 
@@ -20,8 +21,12 @@ const FALLBACK_ISSUES_A = ['near-duplicate', 'blur 0.18'];
 const FALLBACK_ISSUES_B = ['blur 0.41'];
 
 /**
- * Build mock cull-pairs from adjacent photos in the catalog. Once the real
- * `list_cull_pairs` command lands (Phase 2 §2), this becomes a backend fetch.
+ * Build cull-pairs from adjacent photos in the catalog. Once the real
+ * `list_cull_pairs` command lands (Phase 2 §2 full scope), this becomes a
+ * backend fetch that groups by burst / phash neighbours / sharpness
+ * clusters. For now the pairing is adjacency-based but the winner is
+ * picked from live `aesthetic_score` (NIMA from Phase 1 stage 3):
+ * higher score = AI pick. Ties or missing scores default to A.
  */
 function buildPairs(photos: PhotoRow[]): CullPair[] {
   const pairs: CullPair[] = [];
@@ -30,11 +35,16 @@ function buildPairs(photos: PhotoRow[]): CullPair[] {
     const b = photos[i + 1];
     if (!a || !b) break;
     const reasons = ['burst', 'near-duplicate', 'same subject', 'series'] as const;
+    // §7: NIMA aesthetic_score picks the winner. Higher score wins.
+    // When both photos are missing a score, keep A by convention.
+    const aScore = a.aesthetic_score ?? -Infinity;
+    const bScore = b.aesthetic_score ?? -Infinity;
+    const keep: 0 | 1 = bScore > aScore ? 1 : 0;
     pairs.push({
       ids: [a.id, b.id],
       reason: reasons[i % reasons.length] ?? 'burst',
       similarity: 0.7 + ((i * 13) % 30) / 100,
-      keep: (i % 2) as 0 | 1,
+      keep,
       issues_a: FALLBACK_ISSUES_A,
       issues_b: FALLBACK_ISSUES_B,
     });
@@ -242,6 +252,7 @@ export function CullScreen() {
 
   const { data: photos = [], isLoading } = usePhotos();
   const applyVerdict = useCullApplyVerdict();
+  const retentionDays = useUi((s) => s.tweaks.cullBinRetentionDays);
 
   const pairs = useMemo(() => buildPairs(photos), [photos]);
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos]);
@@ -259,33 +270,38 @@ export function CullScreen() {
           photoId: pair.ids[loserIdx],
           verdict: 'reject_a',
           reason: 'near_dup',
+          retentionDays,
         });
       } else if (uiVerdict === 'reject_a') {
         applyVerdict.mutate({
           photoId: pair.ids[0],
           verdict: 'reject_a',
           reason: 'user',
+          retentionDays,
         });
       } else if (uiVerdict === 'reject_b') {
         applyVerdict.mutate({
           photoId: pair.ids[1],
           verdict: 'reject_a',
           reason: 'user',
+          retentionDays,
         });
       } else if (uiVerdict === 'reject_both') {
         applyVerdict.mutate({
           photoId: pair.ids[0],
           verdict: 'reject_a',
           reason: 'near_dup',
+          retentionDays,
         });
         applyVerdict.mutate({
           photoId: pair.ids[1],
           verdict: 'reject_a',
           reason: 'near_dup',
+          retentionDays,
         });
       }
     },
-    [pair, recordVerdictLocal, applyVerdict],
+    [pair, recordVerdictLocal, applyVerdict, retentionDays],
   );
 
   useEffect(() => {

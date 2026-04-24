@@ -18,6 +18,11 @@ import {
   type ExportFormat,
   type ExportPreset,
   type ExportProgress,
+  gphotosUpload,
+  gphotosUploadScopeOk,
+  onedriveAuthStatus,
+  onedriveUpload,
+  type UploadReceipt,
 } from '../../tauri/invoke';
 import { debug, warn } from '../../util/log';
 
@@ -40,6 +45,9 @@ export function ExportSheet({ open, photoIds, onClose }: ExportSheetProps) {
   const [, setJobId] = useState<number | null>(null);
   const [items, setItems] = useState<ItemStatus[]>([]);
   const [running, setRunning] = useState(false);
+  const [uploadGphotos, setUploadGphotos] = useState(false);
+  const [uploadOnedrive, setUploadOnedrive] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
 
   const enqueue = useExportEnqueue();
   const runNext = useExportRunNext();
@@ -89,13 +97,62 @@ export function ExportSheet({ open, photoIds, onClose }: ExportSheetProps) {
       while (next) {
         next = await runNext.mutateAsync(id);
       }
-      setRunning(false);
       debug('export: job complete', { jobId: id });
+
+      // Phase 2 §6: after local export completes, fan out to upload
+      // targets if the user ticked them. Each call is best-effort — a
+      // failure here doesn't roll back the local export.
+      if (uploadGphotos) {
+        setUploadStatus('Uploading to Google Photos…');
+        try {
+          const scopeOk = await gphotosUploadScopeOk();
+          if (!scopeOk) {
+            setUploadStatus(
+              'Google Photos: upload scope not granted. Reconnect from Settings → Sources to grant the photoslibrary.appendonly scope.',
+            );
+          } else {
+            const r: UploadReceipt = await gphotosUpload(photoIds);
+            setUploadStatus(
+              `Google Photos: ${r.uploaded_count} uploaded, ${r.skipped_count} skipped${
+                r.errors.length > 0 ? `, ${r.errors.length} errors` : ''
+              }`,
+            );
+          }
+        } catch (e) {
+          warn('gphotos_upload failed', e);
+          setUploadStatus(`Google Photos: upload failed (${String(e)})`);
+        }
+      }
+
+      if (uploadOnedrive) {
+        setUploadStatus((s) => (s ? `${s}\nUploading to OneDrive…` : 'Uploading to OneDrive…'));
+        try {
+          const authOk = await onedriveAuthStatus();
+          if (!authOk) {
+            setUploadStatus(
+              'OneDrive: not connected. Connect from Settings → Sources first (requires Azure app registration per docs/manual-setup.md §3).',
+            );
+          } else {
+            const r: UploadReceipt = await onedriveUpload(photoIds, 'Chronimage');
+            setUploadStatus(
+              (s) =>
+                `${s ? `${s}\n` : ''}OneDrive: ${r.uploaded_count} uploaded, ${r.skipped_count} skipped${
+                  r.errors.length > 0 ? `, ${r.errors.length} errors` : ''
+                }`,
+            );
+          }
+        } catch (e) {
+          warn('onedrive_upload failed', e);
+          setUploadStatus((s) => `${s ? `${s}\n` : ''}OneDrive: upload failed (${String(e)})`);
+        }
+      }
+
+      setRunning(false);
     } catch (e) {
       warn('export: job failed', e);
       setRunning(false);
     }
-  }, [enqueue, runNext, preset, outputDir, photoIds]);
+  }, [enqueue, runNext, preset, outputDir, photoIds, uploadGphotos, uploadOnedrive]);
 
   const doneCount = items.filter((i) => i.status === 'done').length;
   const errorCount = items.filter((i) => i.status === 'error').length;
@@ -251,6 +308,40 @@ export function ExportSheet({ open, photoIds, onClose }: ExportSheetProps) {
               />{' '}
               Archive originals alongside
             </label>
+
+            <div className="mono section-label">UPLOAD TARGETS</div>
+            <label className="export-toggle">
+              <input
+                type="checkbox"
+                checked={uploadGphotos}
+                onChange={(e) => setUploadGphotos(e.target.checked)}
+              />{' '}
+              Also upload to Google Photos
+            </label>
+            <label className="export-toggle">
+              <input
+                type="checkbox"
+                checked={uploadOnedrive}
+                onChange={(e) => setUploadOnedrive(e.target.checked)}
+              />{' '}
+              Also upload to OneDrive
+            </label>
+            {uploadStatus && (
+              <div
+                className="mono"
+                style={{
+                  fontSize: 10.5,
+                  color: 'var(--fg-mute)',
+                  marginTop: 6,
+                  whiteSpace: 'pre-line',
+                  padding: '6px 8px',
+                  background: 'var(--bg-elev)',
+                  borderRadius: 6,
+                }}
+              >
+                {uploadStatus}
+              </div>
+            )}
 
             <div className="mono section-label">WATERMARK</div>
             <input

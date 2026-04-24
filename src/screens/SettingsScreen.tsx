@@ -772,6 +772,7 @@ export function SettingsScreen() {
   const dupeSimilarity = useUi((s) => s.tweaks.dupeSimilarity);
   const sharpnessCutoff = useUi((s) => s.tweaks.sharpnessCutoff);
   const requireReview = useUi((s) => s.tweaks.requireReview);
+  const cullBinRetentionDays = useUi((s) => s.tweaks.cullBinRetentionDays);
   const nightlyReindex = useUi((s) => s.tweaks.nightlyReindex);
   const cachePath = useUi((s) => s.tweaks.cachePath);
   const preferredChannel = useUi((s) => s.tweaks.preferredChannel);
@@ -1190,6 +1191,39 @@ export function SettingsScreen() {
                 />
                 <span className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
                   Rejects moved to trash only after you confirm
+                </span>
+              </div>
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 16,
+                padding: '12px 0',
+              }}
+            >
+              <div className="lbl" style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: 'var(--fg)' }}>Cull Bin retention</div>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
+                  Rejects stay recoverable this many days before the daily sweep permanently deletes
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: 260 }}>
+                <input
+                  type="range"
+                  min={1}
+                  max={90}
+                  step={1}
+                  value={cullBinRetentionDays}
+                  onChange={(e) => setTweaks({ cullBinRetentionDays: Number(e.target.value) })}
+                  aria-label="Cull Bin retention days"
+                  style={{ flex: 1, accentColor: 'var(--accent)' }}
+                />
+                <span
+                  className="mono"
+                  style={{ fontSize: 11, color: 'var(--fg)', width: 56, textAlign: 'right' }}
+                >
+                  {cullBinRetentionDays} days
                 </span>
               </div>
             </div>

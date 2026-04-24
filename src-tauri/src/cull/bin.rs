@@ -178,11 +178,13 @@ pub async fn delete_forever(pool: &SqlitePool, photo_ids: &[i64]) -> AppResult<E
     let mut errors: Vec<String> = Vec::new();
 
     // Sum sizes + collect sha256s BEFORE delete (once rows are gone we can't
-    // report what was freed).
+    // report what was freed). Also stash the live source_copies per photo
+    // so the audit log can attribute the delete to a specific source.
     struct DelMeta {
         id: i64,
         sha256: String,
         size_bytes: i64,
+        copies: Vec<(i64, String, Option<String>)>, // (source_id, source_kind, external_id)
     }
     let mut metas: Vec<DelMeta> = Vec::new();
     for id in photo_ids {
@@ -193,18 +195,50 @@ pub async fn delete_forever(pool: &SqlitePool, photo_ids: &[i64]) -> AppResult<E
         .fetch_optional(pool)
         .await?
         {
+            let copies = sqlx::query_as::<_, (i64, String, Option<String>)>(
+                "SELECT sc.source_id, s.kind, sc.external_id \
+                 FROM source_copies sc JOIN sources s ON s.id = sc.source_id \
+                 WHERE sc.photo_id = ?1",
+            )
+            .bind(id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
             metas.push(DelMeta {
                 id: *id,
                 sha256: sha,
                 size_bytes: sz.unwrap_or(0),
+                copies,
             });
         }
     }
 
+    let now = chrono::Utc::now().to_rfc3339();
     let mut tx = pool.begin().await?;
     let mut deleted = 0usize;
     let mut freed = 0i64;
     for meta in &metas {
+        // §4: append to source_deletions for audit BEFORE the cascade
+        // wipes source_copies. `confirm_token = "cull_bin_delete_forever"`
+        // keeps the row distinguishable from source-side cleanup plans.
+        for (source_id, source_kind, external_id) in &meta.copies {
+            let _ = sqlx::query(
+                "INSERT INTO source_deletions \
+                 (photo_id, source_id, source_kind, external_id, deleted_at, \
+                  pre_sha256, pre_size_bytes, confirm_token, dry_run) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'cull_bin_delete_forever', 0)",
+            )
+            .bind(meta.id)
+            .bind(source_id)
+            .bind(source_kind)
+            .bind(external_id)
+            .bind(&now)
+            .bind(&meta.sha256)
+            .bind(meta.size_bytes)
+            .execute(&mut *tx)
+            .await;
+        }
+
         // sqlite-vec cascade isn't automatic — explicit deletes keep the
         // virtual tables in sync (matches remove_photos_from_catalog).
         let _ = sqlx::query("DELETE FROM vec_photo_embeddings WHERE rowid = ?1")
