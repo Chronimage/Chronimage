@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Chronimage/chronimage/blob/develop/SECURITY.md
+    about: Do not open a public issue for security problems. Email security@chronimage.app.
+  - name: Question / discussion
+    url: https://github.com/Chronimage/chronimage/discussions
+    about: Use Discussions for open-ended questions, workflows, and ideas.

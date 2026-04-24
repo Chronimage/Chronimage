@@ -1,6 +1,11 @@
-TBD — license decision deferred to Phase 5.
+Chronimage is dual-licensed under either the MIT License or the Apache
+License, Version 2.0, at your option.
 
-Chronimage is in active development by Jay Amirineni. Until a license is attached,
-all rights are reserved by the author.
+See `LICENSE-MIT` and `LICENSE-APACHE` for the full text of each. This
+is the Rust-community convention: recipients pick whichever suits their
+use case (MIT for simplicity, Apache-2.0 when an explicit patent grant
+matters to you).
 
-Contributors, please open an issue to discuss intended license before submitting PRs.
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+Copyright (c) 2026 Jay Amirineni (<jay@stackular.com>) and contributors.

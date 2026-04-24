@@ -1166,6 +1166,39 @@ export async function xmpExportAll(): Promise<XmpExportReceipt> {
   return tauriInvoke<XmpExportReceipt>('xmp_export_all');
 }
 
+// ── License + telemetry (Phase 5 §4 + §7) ─────────────────────────────────
+
+export interface LicenseState {
+  id: number;
+  plan: string;
+  email: string | null;
+  issued_at: string | null;
+  expires_at: string | null;
+  signature: string | null;
+  verified_at: string | null;
+  last_checked_at: string | null;
+}
+
+export async function licenseLoad(): Promise<LicenseState> {
+  return tauriInvoke<LicenseState>('license_load');
+}
+
+export async function licenseImport(path: string): Promise<LicenseState> {
+  return tauriInvoke<LicenseState>('license_import', { path });
+}
+
+export async function licenseClear(): Promise<void> {
+  return tauriInvoke('license_clear');
+}
+
+export async function telemetryGet(): Promise<boolean> {
+  return tauriInvoke<boolean>('telemetry_get');
+}
+
+export async function telemetryOptIn(enabled: boolean): Promise<void> {
+  return tauriInvoke('telemetry_opt_in', { enabled });
+}
+
 // ── Prompt sidecar (Phase 4 §1/§2) ────────────────────────────────────────
 
 export interface SidecarStatus {

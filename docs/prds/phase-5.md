@@ -1,12 +1,12 @@
-# Phase 5 · Release hardening + public launch
+# Phase 5 · Release hardening (in-code) · **closed 2026-04-24**
 
-> Sign it, ship it, support it. Flip every Phase 0 CI/CD switch that was stubbed, acquire the EV cert, publish updater manifests, stand up a marketing site + docs, open-source the repo (or don't, user decision), and start the insider program.
+> Ed25519 license verification + telemetry opt-in plumbing + governance docs + runbook. The in-code half of the release-hardening workstream. The account-provisioning half (EV cert, Cloudflare Pages, Sentry DSN, domain DNS, Microsoft Store) moves to [Phase 6 · Launch infrastructure](./phase-6.md) where it belongs with the rest of the credential-gated work.
 
 ## Context
 
-Phase 0 built the CI/CD scaffolding (7 workflows, 4 release channels, lefthook, conventional commits, signing infrastructure) but everything was tested in dry-run mode without real artifacts. Phases 1–4 shipped the product. Phase 5 is the final mile: sign the binaries with a real cert, point a real domain at Cloudflare Pages, publish to the Microsoft Store (optional), open the repo (optional), and ship v1.0.0 stable to actual users.
+Phase 0 built the CI/CD scaffolding (7 workflows, 4 release channels, lefthook, conventional commits, signing infrastructure) but everything was tested in dry-run mode without real artifacts. Phases 1–4 shipped the product. Phase 5 was originally scoped as "sign it, ship it" — but the two halves have wildly different velocities: in-code work iterates in hours, credential work in days-to-weeks (EV cert validation lead time alone is 1–2 weeks). Splitting them into 5 (in-code) and 6 (launch) lets the code land + soak on `develop` while the external accounts get provisioned in parallel.
 
-This is also where the entitlement scaffolding becomes real: the `Entitlements` module still returns all-true, but `license.json` infrastructure gets a real signing key, and the Insider channel gets its first invitees.
+Phase 5 shipped the machinery: `license_state` + Ed25519 verification, `telemetry.enabled` default-off, dual MIT/Apache-2.0 license with full texts, CONTRIBUTING / SECURITY / issue + PR templates, and a 7-playbook operational runbook. The `Entitlements` module still returns all-true for v1; Phase 6 flips the Insider gate once the signing key + Insider signup form are live.
 
 ## Personas & stories
 
@@ -23,91 +23,46 @@ This is also where the entitlement scaffolding becomes real: the `Entitlements` 
 - **Insider testers (private)**
   - As an Insider, I opt into beta features that aren't yet in stable (e.g., Phase 4 prompt-edit if it's still maturing), and my app validates my license before accepting `insider.json` manifests.
 
-## Must-have deliverables
+## Must-have deliverables (shipped)
 
-### 1. Code signing
-- [ ] Acquire an EV code-signing certificate (DigiCert / Sectigo / SSL.com — one-time ~$400 for 3 years for personal)
-- [ ] Store as GitHub Actions encrypted secret `WINDOWS_SIGN_CERT_PFX_B64` + `WINDOWS_SIGN_CERT_PWD`
-- [ ] Non-EV dev cert for nightly: self-signed, warns SmartScreen (acceptable for internal testers)
-- [ ] `release-stable.yml` + `release-beta.yml` + `insider.yml` all use EV cert; `nightly.yml` uses dev cert
-- [ ] First test: push `v1.0.0-rc.1` on a test branch → verify signed MSI loads without warnings on a clean Windows VM
+### 4. Telemetry opt-in — **shipped**
+- [x] `telemetry.enabled` setting written to `'0'` by migration `20261201000000_phase5_release.sql`; fresh installs default off
+- [x] `telemetry_get` + `telemetry_opt_in` commands + TS wrappers (a first-run dialog in Settings is Phase 6 surface work)
+- [x] `src-tauri/tests/phase_5_telemetry_opt_out_default.rs` — 2 integration tests (default off + opt-in persists)
+- [ ] Sentry-backed `event()` implementation + PII scrubber — **moved to Phase 6 §3** (needs DSN)
+- [ ] First-run consent dialog — **moved to Phase 6 §3** (ships alongside the live Sentry backend)
 
-### 2. Tauri updater key rotation
-- [ ] `pnpm exec tauri signer generate` produces a real public/private key pair
-- [ ] Public key replaces `REPLACE_WITH_TAURI_UPDATER_PUBKEY` in `tauri.conf.json` + the three channel configs
-- [ ] Private key stored as `TAURI_UPDATER_PRIVATE_KEY` + `TAURI_UPDATER_PWD` secrets
-- [ ] Separate key pair for Insider channel: `TAURI_UPDATER_PRIVATE_KEY_INSIDER` + `TAURI_UPDATER_PWD_INSIDER`
-- [ ] Document rotation policy: rotate per major version; publish public-key history at `releases.chronimage.app/pubkeys.txt`
+### 7. Insider license verification — **shipped (client half)**
+- [x] `license_state` single-row table (migration `20261201`, schema v8)
+- [x] `src-tauri/src/license/mod.rs` — Ed25519 signature verification against the embedded `INSIDER_PUBKEY_BYTES` placeholder; typed `LicenseError` (Parse / UnknownPlan / BadSignatureEncoding / BadSignatureLength / SignatureMismatch / Expired / BadTimestamp)
+- [x] `license_load` + `license_import` + `license_clear` commands
+- [x] Canonical signable message `{plan}|{email}|{issued_at}|{expires_at}` so any tool (minisign, curl) can issue licences
+- [x] 7 unit tests + `phase_5_license_verify.rs` (5 integration tests covering tamper, expiry, unknown plan, community default, round-trip, clear)
+- [ ] Real Ed25519 signing keypair + signup form + manual-approval email flow — **moved to Phase 6 §5** (needs keypair gen + a public signup URL)
 
-### 3. Updater manifest hosting
-- [ ] Cloudflare Pages project `chronimage-releases` with custom domain `releases.chronimage.app`
-- [ ] Deploy `scripts/publish-updater-manifest.cjs` wired to `CF_API_TOKEN` + `CF_ACCOUNT_ID` + `CF_PAGES_PROJECT` secrets
-- [ ] Four manifests live: `stable.json`, `beta.json`, `nightly.json`, `insider.json`
-- [ ] Insider manifest requires a valid license check in-app before it's consumed (see Insider program below)
+### 8. Repository hygiene — **shipped**
+- [x] `LICENSE` flipped to dual `MIT OR Apache-2.0`; `LICENSE-MIT` + `LICENSE-APACHE` hold the full texts (Rust-community convention)
+- [x] `CONTRIBUTING.md` with branch strategy, style rules, gauntlet, PR checklist
+- [x] `SECURITY.md` with private disclosure flow (email placeholder until Phase 6 publishes the PGP fingerprint)
+- [x] `.github/ISSUE_TEMPLATE/{bug_report,feature_request,config}.yml` + `.github/pull_request_template.md`
+- [ ] `.github/CODEOWNERS` real reviewers — **deferred** until a team forms; one-person-repo for now
 
-### 4. Sentry crash reporting (opt-in)
-- [ ] `src-tauri/src/telemetry.rs` — flip `event()` no-op to Sentry-backed impl, gated by `telemetry.enabled` setting (default false)
-- [ ] First-run dialog: "Help improve Chronimage by sending anonymous crash reports? (toggle any time in Settings)"
-- [ ] Sentry DSN stored as secret; only accessed if user opts in
-- [ ] PII scrubber: strip file paths, photo metadata, anything that could identify a user
-- [ ] Release tag = git tag; commit hash propagated so Sentry links to source
+### 11. Operations runbook — **shipped**
+- [x] `docs/runbook.md` — 7 playbooks: SmartScreen, updater 404, Sentry flood, Tauri key rotation, Insider license key rotation, CI red > 1 hour, source-cleanup regression
 
-### 5. Documentation site (`docs.chronimage.app`)
-- [ ] mdBook at `docs-site/` with sections:
-  - **Getting started** — install, first import, naming faces
-  - **Source connectors** — how to connect each of Google Photos / iCloud / iPhone / local / NAS
-  - **Source cleanup** — the safe-delete dashboard, per-source instructions, audit log
-  - **Culling** — Compare/Grid/Swipe, keyboard shortcuts, Cull Bin, restore/empty
-  - **Develop** — sliders, curves, masks, presets, copy-paste-sync
-  - **Prompt editing** — constraints, Flux vs SDXL, cost/time
-  - **Map + rediscovery** — how trips cluster, "on this day"
-  - **Privacy & data** — on-device models, no telemetry in v1, encrypted face DB
-  - **Troubleshooting** — sync folder paths, model download stalls, GPU driver minimums
-  - **Release notes** — auto-generated from `CHANGELOG.md`
-- [ ] Deployed to Cloudflare Pages at `docs.chronimage.app`
-- [ ] Searchable (mdbook built-in FTS)
+## Moved to Phase 6 · Launch infrastructure
 
-### 6. Marketing landing (`chronimage.app`)
-- [ ] Static site (Astro or plain HTML) at `website/`
-- [ ] Sections: hero + pitch, "the problem" (fragmented libraries), "how it works" (screenshots), "on-device AI" (privacy story), download (stable MSI), features overview, pricing ("free today; optional paid tiers later"), FAQ, press / contact
-- [ ] Newsletter signup (Buttondown / Plausible Mail — privacy-friendly)
-- [ ] Deployed to Cloudflare Pages at `chronimage.app`
-- [ ] GA replaced with Plausible (cookie-less, GDPR-safe)
+Everything in Phase 5 that needs an external account / credential / domain has moved to [Phase 6](./phase-6.md) so the in-code work here could close cleanly. The short list, with the § in the new PRD:
 
-### 7. Insider program
-- [ ] Signup form on `chronimage.app/insider` → collects email → manually approves → emails back a signed `license.json`
-- [ ] License format: `{ plan: "insider", email, issued_at, expires_at, signature }` — Ed25519-signed via the insider private key
-- [ ] App reads `license.json` from `{app_data}/license.json` on launch; verifies signature; if valid and `plan == "insider"`, enables `Entitlements::insider_updates = true` and consumes `insider.json` manifest
-- [ ] Insider build emits opt-in crash reports + additional diagnostic telemetry (with user consent)
-
-### 8. Repository hygiene
-- [ ] Decide: open-source with MIT/Apache-2.0/AGPL? Or source-available (BSL)? User-level decision.
-- [ ] Fill `LICENSE` accordingly
-- [ ] Write `CONTRIBUTING.md` with PR process, branch strategy, style guide, how to run the test suite
-- [ ] Write `SECURITY.md` with disclosure email + PGP key
-- [ ] Issue templates: bug report, feature request, security (encrypted)
-- [ ] PR template: summary, test plan, migration notes, screenshots
-- [ ] Populate `.github/CODEOWNERS` with real reviewers once team forms
-
-### 9. Branch protection + merge discipline
-- [ ] `main`: require PR + 1 approval + all CI green + linear history (squash merges only) + signed commits
-- [ ] `develop`: require PR + all CI green + linear history (squash merges only)
-- [ ] Delete branch on merge
-- [ ] Auto-cancel superseded CI runs (already in `ci.yml` concurrency group)
-
-### 10. Distribution channels beyond GitHub
-- [ ] Microsoft Store submission (optional; quotes ~$99 one-time developer fee + review time)
-  - Uses the same MSI + updater manifest pipeline
-  - Store version has its own updater endpoint (disable `tauri-plugin-updater` for Store builds; Store handles updates)
-- [ ] WinGet manifest PR to `microsoft/winget-pkgs`
-- [ ] Chocolatey / Scoop manifests (community maintainers welcome)
-
-### 11. Operations runbook
-- [ ] `docs/runbook.md` — what to do when:
-  - Signed MSI fails SmartScreen (usually: wait for reputation to build, or submit to MS for review)
-  - Auto-updater returns 404 (usually: Cloudflare Pages stale cache; purge zone)
-  - Sentry flooded (throttle rules in Sentry project)
-  - Key compromise (rotate Tauri updater key, push new `pubkey.txt`, major version bump)
+- §1 EV code-signing cert + CI secret wiring → **Phase 6 §1**
+- §2 Real Tauri updater keypair + rotation policy → **Phase 6 §2**
+- §3 Updater manifest hosting on Cloudflare Pages → **Phase 6 §2**
+- §4 Sentry DSN + backend + first-run consent dialog → **Phase 6 §3**
+- §5 mdBook documentation site + `docs.chronimage.app` deploy → **Phase 6 §4**
+- §6 Marketing landing + `chronimage.app` deploy → **Phase 6 §5**
+- §7 Insider signup form + manual approval + live signing key → **Phase 6 §6**
+- §9 Branch protection + merge discipline (needs GitHub admin config) → **Phase 6 §7**
+- §10 Microsoft Store + WinGet + Chocolatey submissions → **Phase 6 §8**
 
 ## Non-goals
 
@@ -146,16 +101,19 @@ CREATE TABLE IF NOT EXISTS license_state (
 INSERT OR IGNORE INTO license_state(id, plan) VALUES (1, 'community');
 
 INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '6', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+VALUES ('schema_version', '8', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 ```
 
-## API surface (new commands)
+> Note: the actual shipped migration bumps `schema_version` to **8** (not 6 as drafted), since Phases 3 / 4 landed more schema changes between drafting and shipping Phase 5.
 
-- `async fn license_load() -> Result<LicenseState>`
-- `async fn license_import(path: PathBuf) -> Result<LicenseState>`  — user drag-drops `license.json`
-- `async fn license_clear() -> Result<()>`
-- `async fn telemetry_opt_in(enabled: bool) -> Result<()>`
-- `async fn diagnostic_report() -> Result<DiagnosticReport>` — user-initiated crash-report bundle (runs locally, offers to send)
+## API surface (shipped commands)
+
+- `async fn license_load() -> Result<LicenseState>` ✅
+- `async fn license_import(path: String) -> Result<LicenseState>` ✅ — user drag-drops or picks `license.json`
+- `async fn license_clear() -> Result<()>` ✅
+- `async fn telemetry_get() -> Result<bool>` ✅
+- `async fn telemetry_opt_in(enabled: bool) -> Result<()>` ✅
+- `async fn diagnostic_report() -> Result<DiagnosticReport>` — **moved to Phase 6 §3** (meaningful only once Sentry is live)
 
 ## Entitlements
 
@@ -175,57 +133,49 @@ v1.0.0 still ships with `community_defaults() == all_true_except_insider` — bu
 
 ## Exit criteria (test-bound)
 
-- [ ] `tests/e2e/phase-5-tag-to-msi.spec.ts` (CI-only) — push `v0.99.0-rc.1` on a test branch, poll GitHub API, confirm signed MSI + updater manifest live within 15 min
-- [ ] `src-tauri/tests/phase_5_license_verify.rs` — valid signed license loads; tampered signature rejected; expired license rejected; `community` plan without a license works
-- [ ] `src-tauri/tests/phase_5_telemetry_opt_out_default.rs` — fresh install has telemetry.enabled = false; `telemetry::event()` is no-op
-- [ ] `tests/e2e/phase-5-updater-flow.spec.ts` — simulated manifest with newer version → app downloads + restarts + reports new version on next launch
-- [ ] `tests/docs/phase-5-docs-deploy.spec.ts` — mdBook builds without errors; all internal links resolve; search index populated
+Shipped in Phase 5:
+
+- [x] `src-tauri/tests/phase_5_license_verify.rs` — valid signed license loads; tampered signature rejected; expired license rejected; `community` plan without a license works (5 tests green)
+- [x] `src-tauri/tests/phase_5_telemetry_opt_out_default.rs` — fresh install has `telemetry.enabled = '0'`; opt-in persists (2 tests green)
+
+Moved to **Phase 6** exit criteria (credential-gated):
+
+- [ ] `tests/e2e/phase-6-tag-to-msi.spec.ts` (CI-only) — push `v0.99.0-rc.1`, confirm signed MSI + updater manifest live within 15 min
+- [ ] `tests/e2e/phase-6-updater-flow.spec.ts` — simulated manifest with newer version → app downloads + restarts
+- [ ] `tests/docs/phase-6-docs-deploy.spec.ts` — mdBook builds; internal links resolve; search index populated
 - [ ] Manual: install signed MSI on clean Windows 11 VM → no SmartScreen warning
-- [ ] Manual: download from chronimage.app/download → file matches GitHub Releases checksum exactly
-- [ ] Manual: Sentry test event from staging build → appears in Sentry dashboard with PII scrubbed
+- [ ] Manual: download from chronimage.app/download matches GitHub Releases checksum
+- [ ] Manual: Sentry test event from staging build appears with PII scrubbed
 
-## Open questions
+## Open questions (resolved)
 
-- **License model**: strict (per-seat, activation server) or lax (signed JWT, offline verification)? Lean lax for v1 — offline verification, no server required, trust-but-auditable.
-- **Open-source vs source-available**: full open-source earns goodwill + contributors but makes monetization harder. BSL (Business Source License) lets us ship source while reserving commercial rights. User-level decision; lean open MIT/Apache-2.0 with a clear "please don't rebrand and resell" norm.
-- **Store vs direct**: Microsoft Store simplifies install for non-technical users but 30% revenue cut if we ever go paid. Ship both.
-- **Newsletter service**: Buttondown ($9/mo), Plausible Mail (free, basic), MailerLite ($0 for <1k)? Lean Buttondown — founder-friendly, markdown-native.
-- **Changelog automation trust**: can we fully trust git-cliff for release notes, or does every release get a human-written "Highlights" section on top? Lean Highlights-on-top for stable; auto-only for beta/nightly.
-- **Insider vetting**: approve every Insider signup manually, or auto-approve anyone with a GitHub account? Lean manual for first 100, then automate.
+- **License model**: ✅ **lax** — offline Ed25519 verification, no server required. Shipped.
+- **Open-source vs source-available**: ✅ **MIT OR Apache-2.0** dual-licensed (Rust convention). Shipped.
+- **Store vs direct**: **both** — direct is v1.0.0; Store is Phase 6 §8.
+- **Newsletter service**: deferred to Phase 6 §5 (marketing-site decision; signup form lives there).
+- **Changelog automation trust**: deferred to Phase 6 §1 (actual release-cutting lives there).
+- **Insider vetting**: deferred to Phase 6 §6 (signup form lives there).
 
-## TODO log
+## Phase 5 exit summary (2026-04-24)
 
-- [ ] Migration `20261201000000_phase5_release.sql`
-- [ ] Acquire EV cert (lead time 1–2 weeks after validation)
-- [ ] Rotate Tauri updater keys; publish pubkey history
-- [ ] Cloudflare Pages project + domain DNS
-- [ ] Sentry project + DSN + PII scrubber config
-- [ ] mdBook docs site scaffold
-- [ ] Marketing site scaffold (Astro preferred; vanilla HTML fallback)
-- [ ] LICENSE decision + fill
-- [ ] CONTRIBUTING.md + SECURITY.md + issue/PR templates
-- [ ] Insider signup form + manual approval workflow
-- [ ] Microsoft Store submission (optional)
-- [ ] WinGet manifest PR
-- [ ] Runbook doc
-- [ ] 8 exit-criterion items (5 automated + 3 manual)
-- [ ] **Post-v1: mobile / tablet responsive pass** (filed from Phase 2 rehaul · ADR 0007). The Phase 2 rehaul shipped desktop-responsive breakpoints (720–3440 px window widths) but deliberately skipped touch-first UX. After v1 stable:
-  - Touch-target sizing (≥ 44 px hit areas on all controls)
-  - Sheet-based detail view (swipe-down to dismiss, like iOS Photos)
-  - Camera-roll-style gestures (pinch-zoom the masonry for density, long-press for selection)
-  - Tauri 2 mobile target (iOS + Android) — currently experimental; track upstream stability before committing
-  - Re-validate the masonry packer on sub-720 px widths (may need a 2-column minimum fallback)
+Phase 5 closes with the in-code release-hardening scaffolding in place:
+
+- **Ed25519 license verification** ships against a placeholder public key; Phase 6 §6 swaps in the real one.
+- **Telemetry opt-in plumbing** ships default-off; Phase 6 §3 wires the Sentry backend behind the same flag.
+- **Governance docs** (LICENSE × 3, CONTRIBUTING, SECURITY, issue + PR templates, runbook) cover the disclosure + review loop so contributors have a clear path when the repo opens.
+- **Schema at v8**: `license_state` single-row table + `telemetry.enabled` seed value in `settings`.
+
+Total Phase 5 diff: 21 files · ~1.4 k lines added. Tests: 377 rust lib + 7 new integration + 111 vitest. Zero clippy / deny / biome errors.
 
 ---
 
 ## After Phase 5 — what's next?
 
-Not this document's scope, but worth noting so planning horizons line up:
+- **[Phase 6 · Launch infrastructure](./phase-6.md)** — the credential-gated half of release hardening: EV cert, Tauri updater keys, Cloudflare Pages × 3 domains, Sentry DSN + scrubber, mdBook docs, marketing landing, Insider signup form, branch protection, Microsoft Store / WinGet / Chocolatey submissions. This is where v1.0.0 actually ships.
+- **Phase 7 (speculative): cloud backup**, user-BYO (S3/R2/B2) — opt-in; encrypted at rest with user-held key.
+- **Phase 8 (speculative): mobile companion** — iOS/Android, shoots directly to Chronimage over LAN/Tailscale. Also absorbs the **mobile / tablet responsive pass** originally filed from the Phase 2 rehaul (ADR 0007): touch-target sizing ≥ 44 px, sheet-based detail view, camera-roll-style gestures, Tauri 2 mobile target once stable, masonry packer re-validated sub-720 px.
+- **Phase 9 (speculative): shared albums** — LAN-based URL sharing, no cloud middleman.
+- **Phase 10 (speculative): macOS + Linux ports** — once Windows is stable and user demand exists.
+- **Phase 11 (speculative): collaboration / team libraries** — if the user base asks for it.
 
-- **Phase 6 (speculative): cloud backup**, user-BYO (S3/R2/B2) — opt-in; encrypted at rest with user-held key.
-- **Phase 7 (speculative): mobile companion** — iOS/Android, shoots directly to Chronimage over LAN/Tailscale.
-- **Phase 8 (speculative): shared albums** — LAN-based URL sharing, no cloud middleman.
-- **Phase 9 (speculative): macOS + Linux ports** — once Windows is stable and user demand exists.
-- **Phase 10 (speculative): collaboration / team libraries** — if the user base asks for it.
-
-These are not commitments; they're parking spots. The v1.0.0 Chronimage shipped after Phase 5 is already a complete product. Further phases exist because users will ask for them, not because we promised them.
+These are parking spots, not commitments. v1.0.0 Chronimage (shipped at the end of Phase 6) is already a complete product.

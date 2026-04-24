@@ -4235,6 +4235,54 @@ pub async fn xmp_export_all(state: State<'_, AppState>) -> AppResult<ExportRecei
     crate::xmp::export_all(&state.pool).await
 }
 
+// ── License (Phase 5 §7) ──────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn license_load(state: State<'_, AppState>) -> AppResult<crate::license::LicenseState> {
+    crate::license::load(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn license_import(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<crate::license::LicenseState> {
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| AppError::InvalidInput(format!("license file read failed: {e}")))?;
+    crate::license::import_from_json(&state.pool, &raw, crate::license::INSIDER_PUBKEY_BYTES).await
+}
+
+#[tauri::command]
+pub async fn license_clear(state: State<'_, AppState>) -> AppResult<()> {
+    crate::license::clear(&state.pool).await
+}
+
+// ── Telemetry opt-in (Phase 5 §4) ─────────────────────────────────────────
+
+#[tauri::command]
+pub async fn telemetry_get(state: State<'_, AppState>) -> AppResult<bool> {
+    let row: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'telemetry.enabled'")
+            .fetch_optional(&state.pool)
+            .await?;
+    Ok(matches!(row.as_deref(), Some("1" | "true" | "on")))
+}
+
+#[tauri::command]
+pub async fn telemetry_opt_in(state: State<'_, AppState>, enabled: bool) -> AppResult<()> {
+    let val = if enabled { "1" } else { "0" };
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO settings(key, value, updated_at) VALUES ('telemetry.enabled', ?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(val)
+    .bind(&now)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
 // ── Prompt sidecar (Phase 4 §1/§2) ────────────────────────────────────────
 
 #[tauri::command]

@@ -2,7 +2,7 @@
 
 > **Resume protocol:** Read this file → read `docs/checkpoints/latest.md` → read the active PRD in `docs/prds/phase-N.md`. Do this on *every* session start before touching code.
 
-**Current phase:** Phase 2 — Cull + Cull Bin + Export (week 1 hotfix done 2026-04-24 · imports 22× faster · onboarding deleted · see ADR 0004, ADR 0005)
+**Current phase:** Phase 6 — Launch infrastructure + distribution (Phases 1–5 closed; Phase 5 shipped license + telemetry + governance in-code on 2026-04-24; Phase 6 picks up EV cert + Cloudflare Pages × 3 + Sentry + Insider signup form + Microsoft Store submission)
 
 ---
 
