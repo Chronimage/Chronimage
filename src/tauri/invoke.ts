@@ -989,6 +989,49 @@ export async function onedriveAuthStatus(): Promise<boolean> {
 
 // ── Phase 3: Develop (non-destructive edits) ──────────────────────────────────
 
+/** A single channel curve as 5 `[x, y]` control points, sorted by x, in
+ * `[0, 1]`. The backend bakes a Catmull-Rom spline through these + two
+ * virtual endpoints to produce a 256-entry LUT. */
+export type DevelopCurve = [
+  [number, number],
+  [number, number],
+  [number, number],
+  [number, number],
+  [number, number],
+];
+
+/** Identity (y = x) curve — the no-op shape. */
+export function identityCurve(): DevelopCurve {
+  return [
+    [0.0, 0.0],
+    [0.25, 0.25],
+    [0.5, 0.5],
+    [0.75, 0.75],
+    [1.0, 1.0],
+  ];
+}
+
+/** Per-channel tone curves. `rgb` is the composite master; the others
+ *  are isolated channel curves applied in order after the master. `l`
+ *  acts on Rec.709 luma and preserves chroma. */
+export interface DevelopCurves {
+  rgb: DevelopCurve;
+  r: DevelopCurve;
+  g: DevelopCurve;
+  b: DevelopCurve;
+  l: DevelopCurve;
+}
+
+export function identityCurves(): DevelopCurves {
+  return {
+    rgb: identityCurve(),
+    r: identityCurve(),
+    g: identityCurve(),
+    b: identityCurve(),
+    l: identityCurve(),
+  };
+}
+
 export interface DevelopOperations {
   exposure: number;
   contrast: number;
@@ -1002,6 +1045,7 @@ export interface DevelopOperations {
   saturation: number;
   clarity: number;
   dehaze: number;
+  curves: DevelopCurves;
 }
 
 export function identityOperations(): DevelopOperations {
@@ -1018,6 +1062,7 @@ export function identityOperations(): DevelopOperations {
     saturation: 0,
     clarity: 0,
     dehaze: 0,
+    curves: identityCurves(),
   };
 }
 

@@ -9,6 +9,8 @@ export interface Preset {
   group: 'Face' | 'Scene' | 'Quality' | 'Style';
 }
 
+import { type DevelopCurves, identityCurves } from '../../tauri/invoke';
+
 export interface DevelopValues {
   exp: number;
   con: number;
@@ -22,6 +24,7 @@ export interface DevelopValues {
   sat: number;
   clarity: number;
   dehaze: number;
+  curves: DevelopCurves;
 }
 
 export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
@@ -37,6 +40,7 @@ export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
   sat: 0,
   clarity: 0,
   dehaze: 0,
+  curves: identityCurves(),
 };
 
 /** Convert UI slider shorthand → backend Operations shape. The UI caps
@@ -56,6 +60,7 @@ export function valuesToOperations(v: DevelopValues): import('../../tauri/invoke
     saturation: v.sat,
     clarity: v.clarity,
     dehaze: v.dehaze,
+    curves: v.curves,
   };
 }
 
@@ -73,6 +78,7 @@ export function operationsToValues(ops: import('../../tauri/invoke').DevelopOper
     sat: ops.saturation,
     clarity: ops.clarity,
     dehaze: ops.dehaze,
+    curves: ops.curves ?? identityCurves(),
   };
 }
 

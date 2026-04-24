@@ -13,11 +13,13 @@
 //!   6. Vibrance + Saturation (HSV-based)
 //!   7. Clarity (local-contrast boost via unsharp mask on luma)
 //!   8. Dehaze (raise blacks + saturation inversely to haze estimate)
+//!   9. Tone curves — master RGB + per-channel R/G/B, then luma curve
+//!      applied on Y with chroma preserved.
 //!
 //! Every stage is cheap + embarrassingly parallel → `rayon::par_chunks_mut`.
 //! A 2000 px preview under all 8 stages runs in ~50 ms on an i5.
 
-use super::ops::Operations;
+use super::ops::{identity_curve, Curve, Operations};
 use image::{DynamicImage, RgbImage};
 use rayon::prelude::*;
 
@@ -152,6 +154,50 @@ pub fn apply(img: &RgbImage, ops: &Operations) -> RgbImage {
         });
     }
 
+    // Stage 9: Tone curves. Order: master RGB → per-channel R/G/B → luma.
+    // Each non-identity curve is baked into a 256-entry LUT once per
+    // pass so the per-pixel work is just an index + linear interpolation.
+    if !ops.curves.is_identity() {
+        let rgb_lut = bake_lut(&ops.curves.rgb);
+        let r_lut = bake_lut(&ops.curves.r);
+        let g_lut = bake_lut(&ops.curves.g);
+        let b_lut = bake_lut(&ops.curves.b);
+        let l_lut = bake_lut(&ops.curves.l);
+
+        let apply_rgb = !is_identity_curve(&ops.curves.rgb);
+        let apply_r = !is_identity_curve(&ops.curves.r);
+        let apply_g = !is_identity_curve(&ops.curves.g);
+        let apply_b = !is_identity_curve(&ops.curves.b);
+        let apply_l = !is_identity_curve(&ops.curves.l);
+
+        buf.par_iter_mut().for_each(|p| {
+            if apply_rgb {
+                p[0] = lookup_lut(&rgb_lut, p[0]);
+                p[1] = lookup_lut(&rgb_lut, p[1]);
+                p[2] = lookup_lut(&rgb_lut, p[2]);
+            }
+            if apply_r {
+                p[0] = lookup_lut(&r_lut, p[0]);
+            }
+            if apply_g {
+                p[1] = lookup_lut(&g_lut, p[1]);
+            }
+            if apply_b {
+                p[2] = lookup_lut(&b_lut, p[2]);
+            }
+            if apply_l {
+                // Luma curve: shift Y while keeping chroma (Cb/Cr) intact.
+                // Using Rec. 709 for consistency with `luminance`.
+                let y = luminance(p);
+                let y2 = lookup_lut(&l_lut, y);
+                let delta = y2 - y;
+                p[0] = (p[0] + delta).clamp(0.0, 1.5);
+                p[1] = (p[1] + delta).clamp(0.0, 1.5);
+                p[2] = (p[2] + delta).clamp(0.0, 1.5);
+            }
+        });
+    }
+
     // Back to u8.
     let mut out_bytes: Vec<u8> = Vec::with_capacity(buf.len() * 3);
     for p in &buf {
@@ -197,6 +243,84 @@ fn s_curve(x: f32, k: f32) -> f32 {
     let a = 1.0 + k * 3.0;
     let y = (x - 0.5) * a + 0.5;
     y.clamp(0.0, 1.5)
+}
+
+/// Build a 256-entry `u8 -> u8` LUT from a 5-point curve using a
+/// Catmull-Rom spline. The two endpoints at x=0 and x=1 are implicit —
+/// the 5 control points fully specify the curve. Points are assumed to
+/// be in x-sorted order; if the UI violates that, we still return a
+/// valid LUT by clamping to the nearest point at each index.
+fn bake_lut(curve: &Curve) -> [f32; 256] {
+    let mut out = [0.0f32; 256];
+    // Extend with virtual endpoints so the Catmull-Rom spline behaves
+    // at the boundaries. Virtual left = mirror of point 0 over x=0.
+    // Virtual right = mirror of point 4 over x=1. Both clamped to
+    // [-1, 2] — well outside the image's [0, 1] range.
+    let p0 = [-curve[0][0], -curve[0][1]];
+    let pn = [2.0 - curve[4][0], 2.0 - curve[4][1]];
+    let pts: [[f32; 2]; 7] = [p0, curve[0], curve[1], curve[2], curve[3], curve[4], pn];
+
+    for (i, out_slot) in out.iter_mut().enumerate() {
+        let x = i as f32 / 255.0;
+        // Find which segment the x falls into. Each segment is between
+        // pts[j+1] and pts[j+2] (j in 0..=4).
+        let mut j = 0usize;
+        for k in 0..5 {
+            if x >= pts[k + 1][0] && x <= pts[k + 2][0] {
+                j = k;
+                break;
+            }
+            if x < pts[k + 1][0] {
+                j = k.saturating_sub(1);
+                break;
+            }
+            if k == 4 {
+                j = 4;
+            }
+        }
+        let p_minus = pts[j];
+        let p_a = pts[j + 1];
+        let p_b = pts[j + 2];
+        let p_plus = pts[j + 3];
+
+        let span = (p_b[0] - p_a[0]).max(1e-6);
+        let t = ((x - p_a[0]) / span).clamp(0.0, 1.0);
+        let y = catmull_rom(p_minus[1], p_a[1], p_b[1], p_plus[1], t);
+        *out_slot = y.clamp(0.0, 1.0);
+    }
+    out
+}
+
+/// Catmull-Rom 1D interpolation. `p1` and `p2` are the segment endpoints
+/// for parameter `t ∈ [0, 1]`; `p0` and `p3` are the surrounding points
+/// that shape the tangents.
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+}
+
+/// Interpolate a LUT at a floating-point input in `[0, 1+ε]`.
+fn lookup_lut(lut: &[f32; 256], x: f32) -> f32 {
+    let xc = x.clamp(0.0, 1.0);
+    let i = (xc * 255.0).floor() as usize;
+    let frac = xc * 255.0 - i as f32;
+    let a = lut[i];
+    let b = lut[i.saturating_add(1).min(255)];
+    a + (b - a) * frac
+}
+
+fn is_identity_curve(curve: &Curve) -> bool {
+    let ident = identity_curve();
+    for i in 0..5 {
+        if (curve[i][0] - ident[i][0]).abs() > 1e-6 || (curve[i][1] - ident[i][1]).abs() > 1e-6 {
+            return false;
+        }
+    }
+    true
 }
 
 fn apply_clarity(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
@@ -290,5 +414,64 @@ mod tests {
         let out = apply(&img, &ops);
         let avg = out.as_raw().iter().map(|&b| b as u32).sum::<u32>() / out.as_raw().len() as u32;
         assert!(avg < 30, "expected near-black, got avg {avg}");
+    }
+
+    #[test]
+    fn identity_curves_are_no_op() {
+        let img = solid(128);
+        let ops = Operations {
+            curves: super::super::ops::Curves::identity(),
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        assert_eq!(img.as_raw(), out.as_raw());
+    }
+
+    #[test]
+    fn rgb_curve_lifts_midtones() {
+        // Pull the mids up: 0.5 → 0.75. Darkens/brightens should follow.
+        let mut curves = super::super::ops::Curves::identity();
+        curves.rgb = [
+            [0.0, 0.0],
+            [0.25, 0.35],
+            [0.5, 0.75],
+            [0.75, 0.9],
+            [1.0, 1.0],
+        ];
+        let img = solid(128); // roughly 0.5
+        let ops = Operations {
+            curves,
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        let avg = out.as_raw().iter().map(|&b| b as u32).sum::<u32>() / out.as_raw().len() as u32;
+        // 0.75 × 255 ≈ 191; allow ±5 for spline + quantisation slack.
+        assert!(
+            (185..=196).contains(&avg),
+            "expected ~191 after +midtone curve, got {avg}"
+        );
+    }
+
+    #[test]
+    fn bake_lut_endpoints_match_identity() {
+        let lut = super::bake_lut(&super::identity_curve());
+        assert!((lut[0] - 0.0).abs() < 1e-3);
+        assert!((lut[255] - 1.0).abs() < 1e-3);
+        // Mid sample should be ~0.5.
+        assert!((lut[128] - 128.0 / 255.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn lookup_lut_interpolates_between_entries() {
+        let mut lut = [0.0f32; 256];
+        for (i, slot) in lut.iter_mut().enumerate() {
+            *slot = (i as f32) / 255.0;
+        }
+        // x = 128.5 / 255 should sit between lut[128] and lut[129].
+        let v = super::lookup_lut(&lut, 128.5 / 255.0);
+        assert!(
+            (v - 128.5 / 255.0).abs() < 1e-3,
+            "expected linear interp, got {v}"
+        );
     }
 }

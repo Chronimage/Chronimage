@@ -1,19 +1,29 @@
+import { useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Slider } from '../../primitives/Slider';
-import type { PhotoRow } from '../../tauri/invoke';
-import { CurvesPanel } from './CurvesPanel';
+import type { DevelopCurves, PhotoRow } from '../../tauri/invoke';
+import { type CurveChannel, CurvesPanel } from './CurvesPanel';
 import type { DevelopValues } from './types';
 
 export interface EditorInspectorProps {
   photo: PhotoRow;
   values: DevelopValues;
   onChange: (key: keyof DevelopValues, value: number) => void;
+  onCurvesChange: (next: DevelopCurves) => void;
   onAutoLight: () => void;
   onReset: () => void;
 }
 
-export function EditorInspector({ photo, values, onChange, onAutoLight, onReset }: EditorInspectorProps) {
+export function EditorInspector({
+  photo,
+  values,
+  onChange,
+  onCurvesChange,
+  onAutoLight,
+  onReset,
+}: EditorInspectorProps) {
+  const [curveChannel, setCurveChannel] = useState<CurveChannel>('rgb');
   const megapixels =
     photo.width && photo.height ? ((photo.width * photo.height) / 1_000_000).toFixed(0) : '—';
   const cameraLabel = [photo.camera_make, photo.camera_model].filter(Boolean).join(' ') || 'Camera unknown';
@@ -113,7 +123,12 @@ export function EditorInspector({ photo, values, onChange, onAutoLight, onReset 
 
         <div className="editor-group">
           <h4>Curves</h4>
-          <CurvesPanel />
+          <CurvesPanel
+            value={values.curves}
+            onChange={onCurvesChange}
+            channel={curveChannel}
+            setChannel={setCurveChannel}
+          />
         </div>
 
         <div className="editor-group">
