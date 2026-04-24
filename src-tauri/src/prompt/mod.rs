@@ -21,6 +21,7 @@
 //! `user_initiated_` (the PRD's rule from CLAUDE.md § Security).
 
 pub mod history;
+pub mod supervisor;
 
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
