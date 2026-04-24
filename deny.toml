@@ -33,6 +33,12 @@ allow = [
   # webpki-roots / webpki-root-certs ship Mozilla's CA bundle under this
   # permissive data license. Transitive via reqwest/rustls.
   "CDLA-Permissive-2.0",
+  # mozjpeg + mozjpeg-sys (optional `mozjpeg` cargo feature — see
+  # src-tauri/Cargo.toml). IJG is the Independent JPEG Group license —
+  # the same permissive license every libjpeg-derived library ships
+  # under; equivalent to modified-BSD in effect. Pulled into the graph
+  # only when the `mozjpeg` feature is enabled at build time.
+  "IJG",
 ]
 # Ignore license checks for private (non-published) workspace crates.
 [licenses.private]
