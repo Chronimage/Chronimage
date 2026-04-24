@@ -3712,8 +3712,8 @@ async fn generate_thumbnail_bytes(
     let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
 
     let bytes = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
-        let img = image::open(&path_buf)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let img = crate::ai::image_util::open_any(&path_buf)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
         let resized = img.thumbnail(size, size);
         let mut buf = Vec::with_capacity(64 * 1024);

@@ -101,6 +101,59 @@ pub fn laplacian_variance(img: &DynamicImage) -> f32 {
     }
 }
 
+/// Extensions the `image` crate can't decode but that carry an embedded
+/// JPEG preview we can pull out via `rawler`.
+const RAW_EXTENSIONS: &[&str] = &[
+    "arw", "cr2", "cr3", "nef", "nrw", "raf", "rw2", "orf", "dng", "pef", "srw",
+];
+
+/// Does this path look like a RAW file by extension? Case-insensitive.
+pub fn is_raw_extension(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .map(|e| RAW_EXTENSIONS.contains(&e.as_str()))
+        .unwrap_or(false)
+}
+
+/// Open an image file. For RAW formats (ARW, CR2, CR3, NEF, etc.) the
+/// `image` crate returns `Err`; this helper falls through to `rawler` and
+/// extracts the embedded preview JPEG (typical on Sony A7 IV / Canon R5 /
+/// Nikon Z etc.) before falling all the way to a full sensor decode.
+///
+/// Returns in this order of preference:
+/// 1. `image::open` succeeds (all non-RAW formats)
+/// 2. Rawler's `preview_image` (full-res embedded JPEG, ~2-24 MP)
+/// 3. Rawler's `thumbnail_image` (160-320 px thumb — last resort)
+pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
+    // Fast path — JPEG/PNG/TIFF/WebP/etc. handled by `image`.
+    if let Ok(img) = image::open(path) {
+        return Ok(img);
+    }
+    // RAW fallback via rawler.
+    if is_raw_extension(path) {
+        let source = rawler::rawsource::RawSource::new(path)
+            .map_err(|e| format!("rawler: open {}: {e}", path.display()))?;
+        let decoder = rawler::get_decoder(&source)
+            .map_err(|e| format!("rawler: get_decoder {}: {e}", path.display()))?;
+        let params = rawler::decoders::RawDecodeParams::default();
+        if let Ok(Some(img)) = decoder.preview_image(&source, &params) {
+            return Ok(img);
+        }
+        if let Ok(Some(img)) = decoder.thumbnail_image(&source, &params) {
+            return Ok(img);
+        }
+        return Err(format!(
+            "rawler: no embedded preview or thumbnail in {}",
+            path.display()
+        ));
+    }
+    Err(format!(
+        "image crate can't decode {} and it's not a known RAW extension",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +283,34 @@ mod tests {
         // Below 3×3 = no interior pixels → should return 0 without panicking.
         let img = solid(2, 2, [128, 128, 128]);
         assert_eq!(laplacian_variance(&img), 0.0);
+    }
+
+    #[test]
+    fn is_raw_extension_recognises_common_formats() {
+        use std::path::Path;
+        assert!(is_raw_extension(Path::new("DSC02451.ARW")));
+        assert!(is_raw_extension(Path::new("DSC02452.arw")));
+        assert!(is_raw_extension(Path::new("IMG_1234.CR3")));
+        assert!(is_raw_extension(Path::new("a.cr2")));
+        assert!(is_raw_extension(Path::new("b.nef")));
+        assert!(is_raw_extension(Path::new("c.dng")));
+        assert!(!is_raw_extension(Path::new("photo.jpg")));
+        assert!(!is_raw_extension(Path::new("scan.tif")));
+        assert!(!is_raw_extension(Path::new("noext")));
+    }
+
+    #[test]
+    fn open_any_reads_a_jpeg_via_image_crate_path() {
+        use image::ImageFormat;
+        use std::io::Write;
+        let img = solid(16, 16, [200, 100, 50]);
+        let mut bytes: Vec<u8> = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Jpeg)
+            .expect("encode");
+        let tmp = tempfile::NamedTempFile::with_suffix(".jpg").expect("tmp");
+        tmp.as_file().write_all(&bytes).expect("write");
+        let opened = open_any(tmp.path()).expect("open");
+        assert_eq!(opened.width(), 16);
+        assert_eq!(opened.height(), 16);
     }
 }

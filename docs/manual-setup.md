@@ -17,6 +17,7 @@
 | Microsoft Graph / OneDrive OAuth app | 🟡 scaffolded — requires Azure app registration | `onedrive_upload` command |
 | GitHub repository secrets (release workflows) | 🟡 partial | nightly/beta/stable/insider releases |
 | Windows EV code-signing cert | ⛔ not acquired | signed stable/beta MSIs (Phase 5 §4) |
+| LGPL THIRD_PARTY_LICENSES + rawler source mirror | ⛔ not done | Phase 5 release-prep — see §6.b |
 | Cloudflare R2 for model mirror | 🟡 token ref-ed by workflows, bucket TBD | release-time model upload |
 
 Legend: ✅ done · 🟡 partial · ⛔ not done · — not blocking.
@@ -126,6 +127,17 @@ Required for stable + beta to install without SmartScreen warnings.
 - **Nightly channel fallback:** self-signed cert is fine; users accept the warning for nightlies
 
 **Status:** ⛔ — Phase 5 §4 budget item.
+
+### 6.b LGPL distribution obligation (Phase 5 release-prep)
+
+`rawler` (and any RAW decoder we'd realistically use — they all derive from libraw) is licensed LGPL-2.1. Allowed in `deny.toml`. Implications for distribution:
+
+- Either **dynamically link** rawler (requires extra crate-side work; currently statically linked like all Rust deps), OR
+- **Ship rawler's source** alongside our installer + provide linkable object files so a user could relink against a modified rawler.
+
+Practically simplest for v1 stable: include a `THIRD_PARTY_LICENSES.txt` in the installer + a download link to rawler's source on the release page. This is what most LGPL-using Rust apps do (e.g. several Tauri apps using rawler).
+
+**Status:** ⛔ — defer to Phase 5 release pipeline. Not a v1 dev blocker.
 
 ## 7. Optional dev-tool endpoints
 

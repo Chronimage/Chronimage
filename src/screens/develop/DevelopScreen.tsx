@@ -110,7 +110,13 @@ export function DevelopScreen() {
   // the side-effect (scheduleApply) happens outside `setValues`'s
   // updater function (an anti-pattern that fires twice under React
   // Strict Mode, clearing our debounce timer on the second run).
+  // The ref is updated *synchronously* inside updateValue so two slider
+  // drags dispatched in the same event tick don't both compute `next`
+  // from the same stale snapshot.
   const valuesRef = useRef(values);
+  // Sync the ref whenever React commits a new `values` from elsewhere
+  // (preset apply / reset / paste / opened seed). Slider drags update
+  // the ref synchronously below so they don't depend on this effect.
   useEffect(() => {
     valuesRef.current = values;
   }, [values]);
@@ -118,6 +124,7 @@ export function DevelopScreen() {
   const updateValue = useCallback(
     (key: keyof DevelopValues, value: number) => {
       const next = { ...valuesRef.current, [key]: value };
+      valuesRef.current = next;
       setValues(next);
       scheduleApply(valuesToOperations(next));
     },

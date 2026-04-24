@@ -39,6 +39,13 @@ allow = [
   # under; equivalent to modified-BSD in effect. Pulled into the graph
   # only when the `mozjpeg` feature is enabled at build time.
   "IJG",
+  # rawler (Phase 3 §1) and its libraw-derivative deps. LGPL is the
+  # universal license for open-source RAW decoders (libraw → rawloader →
+  # rawler all inherit it). Implication for distribution: at release time
+  # we must ship the relevant source + linkable object files, OR use
+  # rawler as a dynamic library. Tracked as a Phase 5 release-prep task
+  # in docs/manual-setup.md §6 (code-signing / distribution).
+  "LGPL-2.1",
 ]
 # Ignore license checks for private (non-published) workspace crates.
 [licenses.private]
