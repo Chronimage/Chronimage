@@ -12,28 +12,16 @@ function wrapper({ children }: { children: React.ReactNode }) {
   return React.createElement(QueryClientProvider, { client }, children);
 }
 
-function photoFixture(id: number) {
+function binRow(id: number, reason = 'user') {
   return {
-    id,
-    sha256: String(id).padStart(64, '0'),
+    photo_id: id,
     filename: `IMG_${id}.jpg`,
-    width: 6000,
-    height: 4000,
-    captured_at: '2026-04-01T12:00:00Z',
-    imported_at: '2026-04-22T10:00:00Z',
-    is_raw: false,
+    rejected_at: '2026-04-26T10:00:00Z',
+    reason,
+    retention_days: 30,
+    permanent_delete_after: '2026-05-26T10:00:00Z',
     size_bytes: 8_000_000,
-    camera_make: 'Sony',
-    camera_model: 'ILCE-7M4',
-    aperture: 2.8,
-    shutter: '1/500',
-    iso: 400,
-    focal_mm: 50,
-    aesthetic_score: 7.5,
-    paired_photo_id: null,
-    raw_format: null,
-    orientation: 1,
-    sharpness_score: 450,
+    sha256: String(id).padStart(64, '0'),
   };
 }
 
@@ -46,7 +34,8 @@ describe('CullBinScreen', () => {
   it('renders a row per rejected photo with reject reason chip', async () => {
     const { invoke } = await import('@tauri-apps/api/core');
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_photos') return [photoFixture(1), photoFixture(2)];
+      if (cmd === 'cull_bin_list') return [binRow(1), binRow(2, 'blur')];
+      if (cmd === 'cull_bin_summary') return { total_count: 2, total_bytes: 16_000_000, by_reason: [] };
       return undefined;
     });
 

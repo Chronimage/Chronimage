@@ -544,3 +544,201 @@ export function useRebuildThumbnails() {
     },
   });
 }
+
+// ── Phase 2: Cull + Rate + Flag ───────────────────────────────────────────────
+
+import {
+  addUserTag,
+  type CullBinFilter,
+  type CullBinRow,
+  type CullBinSummary,
+  type CullReason,
+  type CullVerdict,
+  cullApplyVerdict,
+  cullBinDeleteForever,
+  cullBinList,
+  cullBinRestore,
+  cullBinSummary,
+  cullBinSweep,
+  type EmptyReceipt,
+  type ExportJob,
+  type ExportPreset,
+  type ExportProgress,
+  exportEnqueue,
+  exportListJobs,
+  exportRunNext,
+  flagPhoto,
+  listUserTags,
+  type RestoreReceipt,
+  ratePhoto,
+  removeUserTag,
+  renameUserTag,
+  type UserTagSummary,
+  type VerdictReceipt,
+} from '../tauri/invoke';
+
+export type {
+  CullBinFilter,
+  CullBinRow,
+  CullBinSummary,
+  CullReason,
+  CullVerdict,
+  EmptyReceipt,
+  ExportJob,
+  ExportPreset,
+  ExportProgress,
+  RestoreReceipt,
+  UserTagSummary,
+  VerdictReceipt,
+};
+
+export function useCullApplyVerdict() {
+  const qc = useQueryClient();
+  return useMutation<
+    VerdictReceipt,
+    Error,
+    { photoId: number; verdict: CullVerdict; reason: CullReason; retentionDays?: number }
+  >({
+    mutationFn: ({ photoId, verdict, reason, retentionDays }) =>
+      cullApplyVerdict(photoId, verdict, reason, retentionDays),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['cull_bin'] });
+      qc.invalidateQueries({ queryKey: ['cull_bin_summary'] });
+    },
+  });
+}
+
+export function useRatePhoto() {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { photoId: number; rating: number }>({
+    mutationFn: ({ photoId, rating }) => ratePhoto(photoId, rating),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
+}
+
+export function useFlagPhoto() {
+  const qc = useQueryClient();
+  return useMutation<boolean, Error, number>({
+    mutationFn: (photoId: number) => flagPhoto(photoId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
+}
+
+export function useCullBin(filter?: CullBinFilter) {
+  return useQuery({
+    queryKey: ['cull_bin', filter ?? 'all'],
+    queryFn: () => cullBinList(filter),
+  });
+}
+
+export function useCullBinSummary() {
+  return useQuery({
+    queryKey: ['cull_bin_summary'],
+    queryFn: () => cullBinSummary(),
+  });
+}
+
+export function useCullBinRestore() {
+  const qc = useQueryClient();
+  return useMutation<RestoreReceipt, Error, number[]>({
+    mutationFn: (ids) => cullBinRestore(ids),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['cull_bin'] });
+      qc.invalidateQueries({ queryKey: ['cull_bin_summary'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
+}
+
+export function useCullBinDeleteForever() {
+  const qc = useQueryClient();
+  return useMutation<EmptyReceipt, Error, number[]>({
+    mutationFn: (ids) => cullBinDeleteForever(ids),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['cull_bin'] });
+      qc.invalidateQueries({ queryKey: ['cull_bin_summary'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+    },
+  });
+}
+
+export function useCullBinSweep() {
+  const qc = useQueryClient();
+  return useMutation<EmptyReceipt, Error, void>({
+    mutationFn: () => cullBinSweep(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['cull_bin'] });
+      qc.invalidateQueries({ queryKey: ['cull_bin_summary'] });
+    },
+  });
+}
+
+// ── Phase 2: Export ───────────────────────────────────────────────────────────
+
+export function useExportJobs() {
+  return useQuery({ queryKey: ['export_jobs'], queryFn: () => exportListJobs() });
+}
+
+export function useExportEnqueue() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { photoIds: number[]; preset: ExportPreset; outputDir: string }>({
+    mutationFn: ({ photoIds, preset, outputDir }) => exportEnqueue(photoIds, preset, outputDir),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['export_jobs'] });
+    },
+  });
+}
+
+export function useExportRunNext() {
+  const qc = useQueryClient();
+  return useMutation<ExportProgress | null, Error, number>({
+    mutationFn: (jobId) => exportRunNext(jobId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['export_jobs'] });
+    },
+  });
+}
+
+// ── Phase 2 §10: Manual tagging ───────────────────────────────────────────────
+
+export function useUserTags() {
+  return useQuery({ queryKey: ['user_tags'], queryFn: () => listUserTags() });
+}
+
+export function useAddUserTag() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { photoIds: number[]; label: string }>({
+    mutationFn: ({ photoIds, label }) => addUserTag(photoIds, label),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['user_tags'] });
+      qc.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+}
+
+export function useRemoveUserTag() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { photoIds: number[]; label: string }>({
+    mutationFn: ({ photoIds, label }) => removeUserTag(photoIds, label),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['user_tags'] });
+      qc.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+}
+
+export function useRenameUserTag() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { oldLabel: string; newLabel: string }>({
+    mutationFn: ({ oldLabel, newLabel }) => renameUserTag(oldLabel, newLabel),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['user_tags'] });
+      qc.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+}

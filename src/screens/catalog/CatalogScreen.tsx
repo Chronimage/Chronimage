@@ -2,14 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon } from '../../primitives/Icon';
+import { StarRater } from '../../primitives/StarRater';
+import { TagDropdown } from '../../primitives/TagDropdown';
 import { Thumbnail } from '../../primitives/Thumbnail';
 import {
   useAlbums,
+  useCullApplyVerdict,
   useFirstTimeOnNewCamera,
+  useFlagPhoto,
   useOnThisDay,
   usePhotoLocation,
   usePhotoQuality,
   usePhotos,
+  useRatePhoto,
   useRecordPhotoView,
   useRecycleSourceCopies,
   useRemovePhotosFromCatalog,
@@ -23,6 +28,7 @@ import {
 } from '../../state/queries';
 import { useUi } from '../../state/ui';
 import type { PhotoRow } from '../../tauri/invoke';
+import { ExportSheet } from '../export/ExportSheet';
 import { CatalogEmptyState } from './CatalogEmptyState';
 import { DuplicatesPanel } from './DuplicatesPanel';
 import { MasonryGrid } from './MasonryGrid';
@@ -396,6 +402,48 @@ function DetailView({
     .filter(Boolean)
     .join(' · ');
 
+  const ratePhoto = useRatePhoto();
+  const flagPhotoMut = useFlagPhoto();
+  const applyVerdict = useCullApplyVerdict();
+
+  const onRate = useCallback(
+    (rating: number) => {
+      ratePhoto.mutate({ photoId: photo.id, rating });
+    },
+    [photo.id, ratePhoto],
+  );
+
+  const onFlagToggle = useCallback(() => {
+    flagPhotoMut.mutate(photo.id);
+  }, [photo.id, flagPhotoMut]);
+
+  const onFlagToBin = useCallback(() => {
+    // Phase 2 §2: Flag = RejectA shortcut with no pair context.
+    applyVerdict.mutate({
+      photoId: photo.id,
+      verdict: 'reject_a',
+      reason: 'flag',
+    });
+  }, [photo.id, applyVerdict]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key >= '1' && e.key <= '5') {
+        e.preventDefault();
+        onRate(Number(e.key));
+      } else if (e.key === '0') {
+        e.preventDefault();
+        onRate(0);
+      } else if (e.key === 'x' || e.key === 'X') {
+        e.preventDefault();
+        onFlagToggle();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onRate, onFlagToggle]);
+
   return (
     <div className="canvas">
       <div className="toolbar">
@@ -414,23 +462,17 @@ function DetailView({
           {photo.filename} · {photoIndex + 1}/{totalPhotos}
         </span>
         <div style={{ flex: 1 }} />
+        <StarRater rating={photo.star_rating ?? 0} onChange={onRate} />
         <button
           type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2"
+          className={`btn${photo.is_flagged ? ' on' : ''}`}
+          onClick={onFlagToggle}
+          title="Toggle flag (X)"
         >
-          <Icon name="star" size={13} /> Rate
+          <Icon name="flag" size={13} /> {photo.is_flagged ? 'Flagged' : 'Flag'}
         </button>
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2"
-        >
-          <Icon name="flag" size={13} /> Flag
+        <button type="button" className="btn danger" onClick={onFlagToBin} title="Flag + send to Cull Bin">
+          <Icon name="reject" size={13} /> To bin
         </button>
         <div className="divider" />
         <button
@@ -598,6 +640,9 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [showDuplicates, setShowDuplicates] = useState(false);
   const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [bulkCullOpen, setBulkCullOpen] = useState(false);
+  const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const searching = query.trim().length > 0;
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -625,6 +670,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const removeFromCatalog = useRemovePhotosFromCatalog();
   const recycleFiles = useRecycleSourceCopies();
   const removeBusy = removeFromCatalog.isPending || recycleFiles.isPending;
+  const cullApplyVerdictMut = useCullApplyVerdict();
 
   async function handleRemoveConfirm(choices: Set<string>) {
     const ids = selectedIds;
@@ -813,31 +859,33 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
             </button>
             <button
               type="button"
-              className="btn phase-gated"
-              disabled
-              title="Coming in Phase 2 — Cull workflow"
-              aria-disabled="true"
+              className="btn danger"
+              onClick={() => setBulkCullOpen(true)}
+              title="Reject selected photos"
             >
               <Icon name="cull" size={13} /> Cull
             </button>
             <button
               type="button"
-              className="btn phase-gated"
-              disabled
-              title="Coming in Phase 2 — Export sheet"
-              aria-disabled="true"
+              className="btn"
+              onClick={() => setExportOpen(true)}
+              title="Export selected photos"
             >
               <Icon name="export" size={13} /> Export
             </button>
-            <button
-              type="button"
-              className="btn phase-gated"
-              disabled
-              title="Coming in Phase 2 — Manual tagging"
-              aria-disabled="true"
-            >
-              <Icon name="tag" size={13} /> Tag
-            </button>
+            <div style={{ position: 'relative' }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setTagMenuOpen((v) => !v)}
+                aria-haspopup="menu"
+                aria-expanded={tagMenuOpen}
+                title="Manage tags on selected photos"
+              >
+                <Icon name="tag" size={13} /> Tag
+              </button>
+              {tagMenuOpen && <TagDropdown photoIds={[...selected]} onClose={() => setTagMenuOpen(false)} />}
+            </div>
             <button
               type="button"
               className="btn"
@@ -1047,6 +1095,26 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
         busy={removeBusy}
         onCancel={() => setRemoveDialogOpen(false)}
         onConfirm={handleRemoveConfirm}
+      />
+      <ExportSheet open={exportOpen} photoIds={[...selected]} onClose={() => setExportOpen(false)} />
+      <ConfirmDialog
+        open={bulkCullOpen}
+        title={`Reject ${selected.size} ${selected.size === 1 ? 'photo' : 'photos'}?`}
+        description="Selected photos move to the Cull Bin. They remain recoverable for 30 days; nothing leaves disk."
+        confirmLabel={`Reject ${selected.size}`}
+        confirmTone="danger"
+        onCancel={() => setBulkCullOpen(false)}
+        onConfirm={() => {
+          for (const pid of selected) {
+            cullApplyVerdictMut.mutate({
+              photoId: pid,
+              verdict: 'reject_a',
+              reason: 'user',
+            });
+          }
+          setSelected(new Set());
+          setBulkCullOpen(false);
+        }}
       />
     </div>
   );

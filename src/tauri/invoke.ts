@@ -86,6 +86,10 @@ export interface PhotoRow {
   orientation: number;
   /** Laplacian-variance sharpness score from Stage 2.6. */
   sharpness_score: number | null;
+  /** Phase 2 §1 — 0..=5 star rating set from the detail-view toolbar. */
+  star_rating: number;
+  /** Phase 2 §2 — soft flag toggled via the detail-view `X` key. */
+  is_flagged: boolean;
 }
 
 export interface SourceRow {
@@ -752,4 +756,204 @@ export interface RebuildReceipt {
 
 export async function rebuildThumbnails(): Promise<RebuildReceipt> {
   return tauriInvoke<RebuildReceipt>('rebuild_thumbnails');
+}
+
+// ── Phase 2: Cull verdict + rating + flag ─────────────────────────────────────
+
+export type CullVerdict = 'keep' | 'reject_a' | 'reject_b' | 'reject_both' | 'skip';
+export type CullReason =
+  | 'near_dup'
+  | 'blur'
+  | 'eyes_closed'
+  | 'exposure'
+  | 'user'
+  | 'flag'
+  | 'duplicate'
+  | 'other';
+
+export interface VerdictReceipt {
+  photo_id: number;
+  verdict: CullVerdict;
+  rejected_ids: number[];
+  retention_days: number;
+}
+
+export const CULL_PROGRESS_EVENT = 'chronimage://cull-progress';
+
+export async function cullApplyVerdict(
+  photoId: number,
+  verdict: CullVerdict,
+  reason: CullReason,
+  retentionDays?: number,
+): Promise<VerdictReceipt> {
+  return tauriInvoke<VerdictReceipt>('cull_apply_verdict', {
+    photoId,
+    verdict,
+    reason,
+    retentionDays: retentionDays ?? null,
+  });
+}
+
+export async function ratePhoto(photoId: number, rating: number): Promise<void> {
+  return tauriInvoke('rate_photo', { photoId, rating });
+}
+
+export async function flagPhoto(photoId: number): Promise<boolean> {
+  return tauriInvoke<boolean>('flag_photo', { photoId });
+}
+
+// ── Phase 2: Cull Bin ─────────────────────────────────────────────────────────
+
+export type CullBinFilter = CullReason | 'all';
+
+export interface CullBinRow {
+  photo_id: number;
+  filename: string;
+  rejected_at: string;
+  reason: CullReason;
+  retention_days: number;
+  permanent_delete_after: string;
+  size_bytes: number | null;
+  sha256: string;
+}
+
+export interface CullBinSummary {
+  total_count: number;
+  total_bytes: number;
+  by_reason: [string, number][];
+}
+
+export interface RestoreReceipt {
+  restored_count: number;
+  skipped: number[];
+}
+
+export interface EmptyReceipt {
+  deleted_photo_count: number;
+  freed_bytes: number;
+  errors: string[];
+}
+
+export async function cullBinList(filter?: CullBinFilter): Promise<CullBinRow[]> {
+  return tauriInvoke<CullBinRow[]>('cull_bin_list', {
+    filter: filter ?? null,
+  });
+}
+
+export async function cullBinSummary(): Promise<CullBinSummary> {
+  return tauriInvoke<CullBinSummary>('cull_bin_summary');
+}
+
+export async function cullBinRestore(photoIds: number[]): Promise<RestoreReceipt> {
+  return tauriInvoke<RestoreReceipt>('cull_bin_restore', { photoIds });
+}
+
+export async function cullBinDeleteForever(photoIds: number[]): Promise<EmptyReceipt> {
+  return tauriInvoke<EmptyReceipt>('cull_bin_delete_forever', { photoIds });
+}
+
+export async function cullBinSweep(): Promise<EmptyReceipt> {
+  return tauriInvoke<EmptyReceipt>('cull_bin_sweep');
+}
+
+// ── Phase 2: Export ───────────────────────────────────────────────────────────
+
+export type ExportFormat = 'jpeg' | 'tiff' | 'heic';
+export type ColorProfile = 'srgb' | 'displayp3' | 'adobergb';
+
+export interface StripMeta {
+  gps: boolean;
+  all_exif: boolean;
+  camera_serial: boolean;
+}
+
+export interface ExportPreset {
+  format: ExportFormat;
+  color: ColorProfile;
+  quality: number;
+  long_edge_px: number;
+  strip_meta: StripMeta;
+  watermark_text: string | null;
+  archive_originals: boolean;
+}
+
+export function defaultExportPreset(): ExportPreset {
+  return {
+    format: 'jpeg',
+    color: 'srgb',
+    quality: 88,
+    long_edge_px: 2000,
+    strip_meta: { gps: true, all_exif: false, camera_serial: false },
+    watermark_text: null,
+    archive_originals: false,
+  };
+}
+
+export interface ExportJob {
+  id: number;
+  created_at: string;
+  preset_json: string;
+  total_photos: number;
+  done_count: number;
+  error_count: number;
+  status: 'queued' | 'running' | 'paused' | 'done' | 'cancelled' | 'error';
+  output_dir: string;
+}
+
+export interface ExportProgress {
+  job_id: number;
+  photo_id: number;
+  done_count: number;
+  error_count: number;
+  total: number;
+  status: 'queued' | 'running' | 'paused' | 'done' | 'cancelled' | 'error';
+  item_status: 'queued' | 'running' | 'done' | 'error';
+  op: string;
+  output_path: string | null;
+  error_msg: string | null;
+}
+
+export const EXPORT_PROGRESS_EVENT = 'chronimage://export-progress';
+
+export async function exportEnqueue(
+  photoIds: number[],
+  preset: ExportPreset,
+  outputDir: string,
+): Promise<number> {
+  return tauriInvoke<number>('export_enqueue', {
+    photoIds,
+    preset,
+    outputDir,
+  });
+}
+
+export async function exportRunNext(jobId: number): Promise<ExportProgress | null> {
+  return tauriInvoke<ExportProgress | null>('export_run_next', { jobId });
+}
+
+export async function exportListJobs(): Promise<ExportJob[]> {
+  return tauriInvoke<ExportJob[]>('export_list_jobs');
+}
+
+// ── Phase 2 §10: Manual tagging ───────────────────────────────────────────────
+
+export interface UserTagSummary {
+  label: string;
+  photo_count: number;
+}
+
+export async function listUserTags(): Promise<UserTagSummary[]> {
+  return tauriInvoke<UserTagSummary[]>('list_user_tags');
+}
+
+export async function addUserTag(photoIds: number[], label: string): Promise<number> {
+  return tauriInvoke<number>('add_user_tag', { photoIds, label });
+}
+
+export async function removeUserTag(photoIds: number[], label: string): Promise<number> {
+  return tauriInvoke<number>('remove_user_tag', { photoIds, label });
+}
+
+export async function renameUserTag(oldLabel: string, newLabel: string): Promise<number> {
+  return tauriInvoke<number>('rename_user_tag', { oldLabel, newLabel });
 }

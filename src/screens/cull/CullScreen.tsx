@@ -5,14 +5,14 @@
  * verdict engine lands (Phase 2 §2).
  */
 
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { Seg } from '../../primitives/Seg';
 import { Thumbnail } from '../../primitives/Thumbnail';
 import { useCull } from '../../state/cull';
-import { usePhotos } from '../../state/queries';
+import { useCullApplyVerdict, usePhotos } from '../../state/queries';
 import type { PhotoRow } from '../../tauri/invoke';
 import type { CullMode, CullPair } from './types';
 
@@ -236,17 +236,57 @@ export function CullScreen() {
   const idx = useCull((s) => s.idx);
   const kept = useCull((s) => s.kept);
   const rejected = useCull((s) => s.rejected);
-  const recordVerdict = useCull((s) => s.recordVerdict);
+  const recordVerdictLocal = useCull((s) => s.recordVerdict);
   const onPrev = useCull((s) => s.prev);
   const onNext = useCull((s) => s.next);
 
   const { data: photos = [], isLoading } = usePhotos();
+  const applyVerdict = useCullApplyVerdict();
 
   const pairs = useMemo(() => buildPairs(photos), [photos]);
   const photosById = useMemo(() => new Map(photos.map((p) => [p.id, p])), [photos]);
 
   const totalPairs = pairs.length;
   const pair = totalPairs > 0 ? pairs[idx % totalPairs] : null;
+
+  const recordVerdict = useCallback(
+    (uiVerdict: import('./types').CullVerdict) => {
+      if (!pair) return;
+      recordVerdictLocal(uiVerdict);
+      if (uiVerdict === 'accept_ai') {
+        const loserIdx = pair.keep === 0 ? 1 : 0;
+        applyVerdict.mutate({
+          photoId: pair.ids[loserIdx],
+          verdict: 'reject_a',
+          reason: 'near_dup',
+        });
+      } else if (uiVerdict === 'reject_a') {
+        applyVerdict.mutate({
+          photoId: pair.ids[0],
+          verdict: 'reject_a',
+          reason: 'user',
+        });
+      } else if (uiVerdict === 'reject_b') {
+        applyVerdict.mutate({
+          photoId: pair.ids[1],
+          verdict: 'reject_a',
+          reason: 'user',
+        });
+      } else if (uiVerdict === 'reject_both') {
+        applyVerdict.mutate({
+          photoId: pair.ids[0],
+          verdict: 'reject_a',
+          reason: 'near_dup',
+        });
+        applyVerdict.mutate({
+          photoId: pair.ids[1],
+          verdict: 'reject_a',
+          reason: 'near_dup',
+        });
+      }
+    },
+    [pair, recordVerdictLocal, applyVerdict],
+  );
 
   useEffect(() => {
     if (!pair) return;
@@ -368,31 +408,16 @@ export function CullScreen() {
       <div className="cull-verdict">
         <button
           type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · verdict engine"
+          className="btn"
+          title="Reject both (Ctrl+R)"
+          onClick={() => recordVerdict('reject_both')}
         >
           <Icon name="reject" size={14} /> Reject both <span className="kbd">⌃R</span>
         </button>
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · verdict engine"
-          onClick={() => recordVerdict('reject_a')}
-        >
+        <button type="button" className="btn" title="Reject A (A)" onClick={() => recordVerdict('reject_a')}>
           <Icon name="reject" size={14} /> Reject A <span className="kbd">A</span>
         </button>
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · verdict engine"
-          onClick={() => recordVerdict('reject_b')}
-        >
+        <button type="button" className="btn" title="Reject B (B)" onClick={() => recordVerdict('reject_b')}>
           <Icon name="reject" size={14} /> Reject B <span className="kbd">B</span>
         </button>
         <div style={{ flex: 1 }} />
