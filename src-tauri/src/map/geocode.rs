@@ -182,9 +182,86 @@ pub fn label_for(lat: f64, lng: f64) -> String {
     }
 }
 
+// ── place_label persistence (Phase 4 §5) ─────────────────────────────────
+
+use crate::AppResult;
+use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackfillReceipt {
+    pub scanned: usize,
+    pub labelled: usize,
+    pub skipped: usize,
+    pub elapsed_ms: u64,
+}
+
+/// Write the nearest-city label for a single photo. Intended for use
+/// at import time once GPS has been extracted. No-op when either
+/// coordinate is NULL.
+pub async fn label_photo(pool: &SqlitePool, photo_id: i64) -> AppResult<Option<String>> {
+    let row: Option<(Option<f64>, Option<f64>)> =
+        sqlx::query_as("SELECT gps_lat, gps_lng FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((Some(lat), Some(lng))) = row else {
+        return Ok(None);
+    };
+    let label = label_for(lat, lng);
+    sqlx::query("UPDATE photos SET place_label = ?1 WHERE id = ?2")
+        .bind(&label)
+        .bind(photo_id)
+        .execute(pool)
+        .await?;
+    Ok(Some(label))
+}
+
+/// Scan the entire catalog, compute the nearest-city label for every
+/// photo that has GPS but no cached label. Idempotent — safe to run
+/// over and over.
+pub async fn backfill_place_labels(pool: &SqlitePool) -> AppResult<BackfillReceipt> {
+    let start = std::time::Instant::now();
+    type Row = (i64, Option<f64>, Option<f64>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, gps_lat, gps_lng FROM photos \
+         WHERE gps_lat IS NOT NULL AND gps_lng IS NOT NULL AND place_label IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let scanned = rows.len();
+    let mut labelled = 0usize;
+    let mut skipped = 0usize;
+    let mut tx = pool.begin().await?;
+    for (id, lat, lng) in rows {
+        let (Some(lat), Some(lng)) = (lat, lng) else {
+            skipped += 1;
+            continue;
+        };
+        let label = label_for(lat, lng);
+        sqlx::query("UPDATE photos SET place_label = ?1 WHERE id = ?2")
+            .bind(&label)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        labelled += 1;
+    }
+    tx.commit().await?;
+
+    Ok(BackfillReceipt {
+        scanned,
+        labelled,
+        skipped,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::db::{open_pool, PoolOptions};
+    use sqlx::Executor;
 
     #[test]
     fn bengaluru_is_its_own_nearest() {
@@ -211,5 +288,47 @@ mod tests {
     fn label_prefers_city_when_close() {
         let s = label_for(35.68, 139.65);
         assert_eq!(s, "Tokyo, JP");
+    }
+
+    #[tokio::test]
+    async fn backfill_places_labels_for_rows_with_gps() {
+        let pool = open_pool(PoolOptions::new(":memory:".into()))
+            .await
+            .unwrap();
+        // Bengaluru photo.
+        pool.execute(
+            "INSERT INTO photos (id, sha256, filename, width, height, imported_at, \
+               is_raw, gps_lat, gps_lng) \
+             VALUES (1, '1111111111111111111111111111111111111111111111111111111111111111', \
+               'a.jpg', 100, 100, '2026-10-01T00:00:00Z', 0, 12.9716, 77.5946)",
+        )
+        .await
+        .unwrap();
+        // No-GPS photo — should be skipped.
+        pool.execute(
+            "INSERT INTO photos (id, sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (2, '2222222222222222222222222222222222222222222222222222222222222222', \
+               'b.jpg', 100, 100, '2026-10-01T00:00:00Z', 0)",
+        )
+        .await
+        .unwrap();
+
+        let receipt = backfill_place_labels(&pool).await.unwrap();
+        assert_eq!(receipt.scanned, 1);
+        assert_eq!(receipt.labelled, 1);
+
+        let label: Option<String> =
+            sqlx::query_scalar("SELECT place_label FROM photos WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(label.as_deref(), Some("Bengaluru, IN"));
+
+        let none_label: Option<String> =
+            sqlx::query_scalar("SELECT place_label FROM photos WHERE id = 2")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(none_label.is_none());
     }
 }

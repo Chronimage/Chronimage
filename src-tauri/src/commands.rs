@@ -4301,6 +4301,13 @@ pub async fn prompt_edit_reject(state: State<'_, AppState>, edit_id: i64) -> App
     crate::prompt::history::reject(&state.pool, edit_id).await
 }
 
+#[tauri::command]
+pub async fn backfill_place_labels(
+    state: State<'_, AppState>,
+) -> AppResult<crate::map::geocode::BackfillReceipt> {
+    crate::map::geocode::backfill_place_labels(&state.pool).await
+}
+
 // Shortcut registry — userland stores its bindings in the shortcuts
 // table. Phase 4 §6 scope: list + set. A discovery modal reads the list;
 // a future rebinding UI calls set. Conflict detection is client-side.

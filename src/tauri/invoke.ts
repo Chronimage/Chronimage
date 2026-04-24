@@ -1257,6 +1257,17 @@ export async function promptEditReject(editId: number): Promise<void> {
   return tauriInvoke('prompt_edit_reject', { editId });
 }
 
+export interface PlaceLabelBackfillReceipt {
+  scanned: number;
+  labelled: number;
+  skipped: number;
+  elapsed_ms: number;
+}
+
+export async function backfillPlaceLabels(): Promise<PlaceLabelBackfillReceipt> {
+  return tauriInvoke<PlaceLabelBackfillReceipt>('backfill_place_labels');
+}
+
 export interface ShortcutRow {
   command_id: string;
   key_binding: string;

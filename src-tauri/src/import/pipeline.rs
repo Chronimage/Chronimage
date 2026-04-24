@@ -351,6 +351,13 @@ async fn execute_pipeline(
                     tracing::warn!(error = %e, photo_id, "metadata UPDATE failed");
                 }
 
+                // Phase 4 §5 — nearest-city label for photos with GPS.
+                if exif.gps_lat.is_some() && exif.gps_lng.is_some() {
+                    if let Err(e) = crate::map::geocode::label_photo(&pool, photo_id).await {
+                        tracing::warn!(error = %e, photo_id, "place_label write failed");
+                    }
+                }
+
                 // Stage 2.6: apply EXIF orientation, cache a 320 px thumbnail,
                 // and compute a Laplacian-variance sharpness score from the
                 // same decoded + resized image. All in one spawn_blocking so
