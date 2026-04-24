@@ -9,3 +9,4 @@
 //! refresh tokens never touch the catalog DB.
 
 pub mod google_photos;
+pub mod onedrive;

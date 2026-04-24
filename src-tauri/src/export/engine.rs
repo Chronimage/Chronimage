@@ -284,9 +284,12 @@ fn encode_one(
     preset: &ExportPreset,
     output_dir: &Path,
 ) -> AppResult<PathBuf> {
+    #[cfg(not(feature = "heic"))]
     if matches!(preset.format, Format::Heic) {
         return Err(AppError::InvalidInput(
-            "HEIC export not yet supported — pick JPEG or TIFF".into(),
+            "HEIC export requires the `heic` cargo feature + libheif installed. \
+             On Windows: vcpkg install libheif, then cargo build --features heic."
+                .into(),
         ));
     }
     if !matches!(preset.color, ColorProfile::Srgb) {
@@ -320,9 +323,52 @@ fn encode_one(
     match preset.format {
         Format::Jpeg => encode_jpeg(&resized, &out, preset.quality)?,
         Format::Tiff => encode_tiff(&resized, &out)?,
-        Format::Heic => unreachable!(),
+        #[cfg(feature = "heic")]
+        Format::Heic => encode_heic(&resized, &out, preset.quality)?,
+        #[cfg(not(feature = "heic"))]
+        Format::Heic => unreachable!("guarded above when feature disabled"),
     }
     Ok(out)
+}
+
+#[cfg(feature = "heic")]
+fn encode_heic(img: &DynamicImage, out: &Path, quality: u8) -> AppResult<()> {
+    use libheif_rs::{
+        Channel, ColorSpace, CompressionFormat, EncoderQuality, HeifContext, LibHeif, RgbChroma,
+    };
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let heif = LibHeif::new();
+    let mut ctx = HeifContext::new().map_err(|e| AppError::Internal(format!("heif ctx: {e}")))?;
+    let mut enc = heif
+        .encoder_for_format(CompressionFormat::Hevc)
+        .map_err(|e| AppError::Internal(format!("heif encoder: {e}")))?;
+    enc.set_quality(EncoderQuality::Lossy(quality))
+        .map_err(|e| AppError::Internal(format!("heif quality: {e}")))?;
+    let mut heif_img = libheif_rs::Image::new(w, h, ColorSpace::Rgb(RgbChroma::Rgb))
+        .map_err(|e| AppError::Internal(format!("heif image: {e}")))?;
+    heif_img
+        .create_plane(Channel::Interleaved, w, h, 8)
+        .map_err(|e| AppError::Internal(format!("heif plane: {e}")))?;
+    {
+        let mut plane = heif_img
+            .planes_mut()
+            .interleaved
+            .ok_or_else(|| AppError::Internal("heif plane missing".into()))?;
+        let stride = plane.stride;
+        let data = plane.data;
+        for y in 0..(h as usize) {
+            let src_start = y * (w as usize) * 3;
+            let dst_start = y * stride;
+            data[dst_start..dst_start + (w as usize) * 3]
+                .copy_from_slice(&rgb.as_raw()[src_start..src_start + (w as usize) * 3]);
+        }
+    }
+    ctx.encode_image(&heif_img, &mut enc, None)
+        .map_err(|e| AppError::Internal(format!("heif encode: {e}")))?;
+    ctx.write_to_file(out.to_string_lossy().as_ref())
+        .map_err(|e| AppError::Internal(format!("heif write {}: {e}", out.display())))?;
+    Ok(())
 }
 
 fn resize_to_long_edge(img: DynamicImage, long_edge: u32) -> DynamicImage {
@@ -337,6 +383,15 @@ fn resize_to_long_edge(img: DynamicImage, long_edge: u32) -> DynamicImage {
 }
 
 fn encode_jpeg(img: &DynamicImage, out: &Path, quality: u8) -> AppResult<()> {
+    #[cfg(feature = "mozjpeg")]
+    {
+        return encode_jpeg_mozjpeg(img, out, quality);
+    }
+    #[cfg(not(feature = "mozjpeg"))]
+    encode_jpeg_image_crate(img, out, quality)
+}
+
+fn encode_jpeg_image_crate(img: &DynamicImage, out: &Path, quality: u8) -> AppResult<()> {
     let mut file = std::fs::File::create(out)?;
     let rgb = img.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -344,6 +399,28 @@ fn encode_jpeg(img: &DynamicImage, out: &Path, quality: u8) -> AppResult<()> {
     encoder
         .write_image(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|e| AppError::Internal(format!("jpeg encode {}: {e}", out.display())))?;
+    Ok(())
+}
+
+#[cfg(feature = "mozjpeg")]
+fn encode_jpeg_mozjpeg(img: &DynamicImage, out: &Path, quality: u8) -> AppResult<()> {
+    use mozjpeg::{ColorSpace, Compress, ScanMode};
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    let mut comp = Compress::new(ColorSpace::JCS_RGB);
+    comp.set_size(w as usize, h as usize);
+    comp.set_quality(quality as f32);
+    comp.set_scan_optimization_mode(ScanMode::AllComponentsTogether);
+    let mut comp = comp.start_compress(Vec::new()).map_err(|e| {
+        AppError::Internal(format!("mozjpeg start_compress {}: {e}", out.display()))
+    })?;
+    comp.write_scanlines(rgb.as_raw())
+        .map_err(|e| AppError::Internal(format!("mozjpeg scanlines {}: {e}", out.display())))?;
+    let bytes = comp
+        .finish()
+        .map_err(|e| AppError::Internal(format!("mozjpeg finish {}: {e}", out.display())))?;
+    std::fs::write(out, &bytes)
+        .map_err(|e| AppError::Internal(format!("write {}: {e}", out.display())))?;
     Ok(())
 }
 

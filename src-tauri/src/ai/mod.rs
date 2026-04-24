@@ -4,6 +4,7 @@
 //! initialised once and reused across Tauri command calls.
 
 pub mod aesthetic;
+pub mod ann;
 pub mod budget;
 pub mod caption;
 pub mod cluster;

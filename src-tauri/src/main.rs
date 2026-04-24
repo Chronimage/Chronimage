@@ -125,6 +125,15 @@ fn main() {
             commands::gphotos_poll_picker_session,
             commands::gphotos_delete_picker_session,
             commands::import_google_photos,
+            commands::gphotos_upload_scope_ok,
+            commands::gphotos_upload,
+            commands::onedrive_begin_oauth_flow,
+            commands::onedrive_poll_oauth_flow,
+            commands::onedrive_cancel_oauth_flow,
+            commands::onedrive_auth_status,
+            commands::onedrive_sign_out,
+            commands::onedrive_account_info,
+            commands::onedrive_upload,
             #[cfg(debug_assertions)]
             commands::__test_generate_fixture,
             #[cfg(debug_assertions)]

@@ -31,6 +31,15 @@ path = "src/lib.rs"
 [build-dependencies]
 tauri-build = { version = "2.1", features = [] }
 
+[features]
+default = []
+# Enable HEIC export in src/export/engine.rs. Requires libheif installed on
+# the build host (vcpkg install libheif on Windows).
+heic = ["dep:libheif-rs"]
+# Enable MozJPEG encoding in src/export/engine.rs. Requires NASM in PATH
+# on Windows.
+mozjpeg = ["dep:mozjpeg"]
+
 [dependencies]
 # Tauri
 tauri = { version = "2.2", features = ["devtools", "tray-icon"] }
@@ -126,6 +135,24 @@ clap = { version = "4", features = ["derive", "env"] }
 # Photos OAuth client_secret) can live in the gitignored .env.local.
 dotenvy = "0.15"
 trash = "5.2.5"
+
+# HNSW graph for ANN over SigLIP embeddings. Pure-Rust, no system deps.
+# The PRD §9 fallback plan (docs/prds/phase-2.md). Used by `ai::ann` when
+# the catalog gets big enough that the int8 brute-force scan exceeds
+# ~100 ms p95. Brute-force stays as the fallback.
+hnsw_rs = "0.3"
+
+# Optional encoders behind cargo features. Default build uses image crate's
+# built-in JPEG/TIFF encoders so CI doesn't require libheif or NASM.
+#
+# `heic` feature — libheif-rs requires the libheif C library installed on
+# the build host. On Windows: vcpkg install libheif. Enables HEIC export
+# in src/export/engine.rs.
+libheif-rs = { version = "2", optional = true }
+# `mozjpeg` feature — mozjpeg crate requires NASM on Windows. Enables
+# higher-quality JPEG encoding (better size/quality tradeoff vs. the image
+# crate's built-in encoder).
+mozjpeg = { version = "0.10", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.6"
