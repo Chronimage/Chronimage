@@ -1147,6 +1147,25 @@ export async function xmpRescan(): Promise<XmpRescanReceipt> {
   return tauriInvoke<XmpRescanReceipt>('xmp_rescan');
 }
 
+export interface XmpExportReceipt {
+  written: number;
+  skipped: number;
+  error_count: number;
+  errors: string[];
+}
+
+export async function xmpWriteOnChangeGet(): Promise<boolean> {
+  return tauriInvoke<boolean>('xmp_write_on_change_get');
+}
+
+export async function xmpWriteOnChangeSet(enabled: boolean): Promise<void> {
+  return tauriInvoke('xmp_write_on_change_set', { enabled });
+}
+
+export async function xmpExportAll(): Promise<XmpExportReceipt> {
+  return tauriInvoke<XmpExportReceipt>('xmp_export_all');
+}
+
 export interface ShortcutRow {
   command_id: string;
   key_binding: string;

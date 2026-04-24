@@ -49,29 +49,29 @@ The generative path is intentionally gated behind an entitlement + first-run mod
 The Settings → Library screen already exposes theme / accent / display font / grid density / facet placement / cull mode / editor layout via the existing `useUi().tweaks` plumbing from Phase 0. A separate drawer UI was deemed redundant; all the same controls are reachable from Settings without the overlay. Closed out 2026-04-24 per user direction.
 
 ### 5. Map view
-- [x] `src/screens/map/` new screen (added to Rail between Cull Bin and Develop) — trip list + photo grid; ships 2026-04-24
+- [x] `src/screens/map/` new screen (added to Rail between Cull Bin and Develop) — Leaflet map + trip list + photo grid; ships 2026-04-24
 - [x] Trip clustering (backend `src-tauri/src/map/trips.rs`) — single-pass temporal (48 h gap) + spatial (30 km centroid cutoff) Haversine clustering; auto-runs post-import
 - [x] Commands `map_recompute_trips`, `map_list_trips`, `map_photos_in_trip`
-- [ ] OpenStreetMap tiles cached locally to `{data_dir}/tiles/{z}/{x}/{y}.png` — **deferred** to week 2+: v1 ships as a list view
-- [ ] Tile cache respects Nominatim usage policy (attribution shown, max 2 zooms per second) — **deferred**
-- [ ] Pin clusters via supercluster-rs algorithm (or Leaflet's cluster plugin) — **deferred** (needs leaflet/maplibre)
-- [ ] Click cluster → zoom; click pin → photo detail overlay — **deferred**
-- [ ] Filter by time range (slider: "last week / last month / last year / all time") — **deferred**
-- [ ] **Offline reverse-geocoder** — embedded SQLite of ~100k city centroids from the GeoNames `cities15000` dataset (~5 MB compressed). Ship bundled via `scripts/fetch-bundled-models.*`. At import time (or in a post-hoc backfill), resolve each photo's `gps_lat/lng` to the nearest city + country and cache in a new `photos.place_label` column. Also populates human-readable labels in the Catalog **Places facet** (Phase 2 rehaul ADR 0007 v1 ships with raw coordinate buckets; this replaces them with "Bengaluru · 18 photos" etc). Map tooltips reuse the same lookup. — **deferred**
+- [x] OpenStreetMap tiles via `react-leaflet` 5 — attribution shown; circle markers per trip centroid, radius scaled by photo count; marker click selects trip (2026-04-24 week 2)
+- [ ] OpenStreetMap tiles cached locally to `{data_dir}/tiles/{z}/{x}/{y}.png` — **deferred** (week 3+): app currently streams tiles from `tile.openstreetmap.org`
+- [ ] Pin clusters via supercluster (many overlapping pins at low zoom) — **deferred** (week 3+): current render uses plain circle markers per trip
+- [ ] Filter by time range (slider: "last week / last month / last year / all time") — **deferred** (week 3+)
+- [ ] **Offline reverse-geocoder** — embedded SQLite of ~100k city centroids from the GeoNames `cities15000` dataset (~5 MB compressed). Ship bundled via `scripts/fetch-bundled-models.*`. At import time (or in a post-hoc backfill), resolve each photo's `gps_lat/lng` to the nearest city + country and cache in a new `photos.place_label` column. Also populates human-readable labels in the Catalog **Places facet** (Phase 2 rehaul ADR 0007 v1 ships with raw coordinate buckets; this replaces them with "Bengaluru · 18 photos" etc). Map tooltips reuse the same lookup. — **deferred** (week 3+)
 
 ### 6. Keyboard shortcut overlay
 - [x] Press `?` anywhere → modal showing all shortcuts grouped by context (`src/primitives/ShortcutOverlay.tsx` + `useShortcutOverlay` hook)
 - [x] `shortcuts` table + `shortcuts_list` / `shortcuts_set` commands for per-command overrides
-- [ ] Shortcuts registered via a central `useShortcut(key, handler, scope)` hook — **deferred**: v1 uses the existing ad-hoc `onKeyDown` handlers; overlay reads a static seed + applies DB overrides for display
-- [ ] Customizable via Settings → Shortcuts table (per-command rebinding, conflict detection) — **deferred**
+- [x] `useShortcut(commandId, defaultBinding, handler)` hook — registers a keydown listener that respects any override stored in `shortcuts` (2026-04-24 week 2)
+- [x] Click-to-rebind inside the overlay — captures the next keystroke combo, persists via `shortcuts_set`, with inline **reset** back to the built-in default (2026-04-24 week 2)
+- [ ] Settings → Shortcuts full table with conflict detection — **deferred** (overlay rebinder covers the common path; a dedicated Settings surface is week 3+)
 - [ ] All shortcut data stored in tauri-plugin-store; exported/imported with tweaks — superseded: live in SQLite `shortcuts` table
 
-### 7. Import keyword + star from `.xmp` sidecars
+### 7. Import + write-out via `.xmp` sidecars
 - [x] On import, if `photo.xmp` exists alongside `photo.jpg`, parse it (`src-tauri/src/xmp/mod.rs`)
 - [x] Map `dc:subject` → `tags` (kind='user'), `xmp:Rating` → `photos.rating INTEGER`, `xmp:Label` → `photos.color_label`
 - [x] `xmp_rescan` command for post-hoc library re-scan
-- [ ] Embedded XMP inside `.arw` — **deferred** (v1 only reads external sidecars)
-- [ ] Write-out: when user edits tags / rating in Chronimage, write back to sidecar `.xmp` (opt-in, default off — avoids surprising other tools) — **deferred**
+- [x] Write-out — opt-in `xmp.write_on_change` setting; `write_sidecar()` emits a minimal Adobe-compatible packet that round-trips through `parse_str`; `add_user_tag` / `remove_user_tag` trigger a best-effort write; `xmp_export_all` backfills the entire library on demand (2026-04-24 week 2)
+- [ ] Embedded XMP inside `.arw` — **deferred** (week 3+): v1 only reads/writes external sidecars
 
 ### 8. `.chronimage-ignore` file support
 - [x] `.gitignore`-style include/exclude at any folder level (via `ignore::WalkBuilder` with `add_custom_ignore_filename`)
@@ -182,13 +182,14 @@ XMP:
 - [x] Migration `20261001000000_phase4_polish.sql`
 - [ ] `src-tauri/src/prompt/` module (sidecar, jobs, constraints) — **week 2+**
 - [x] `src-tauri/src/map/` module (trip clustering — tile cache deferred)
-- [x] `src-tauri/src/xmp/` module (parser — writer deferred)
-- [x] `src/screens/map/` new screen (list view; map renderer deferred)
-- [x] `src/primitives/ShortcutOverlay.tsx`
-- [ ] `src/components/ExportSheet` — add the Phase 3-gated toggles (auto-light, copy-paste-edits) — **week 2+**
-- [ ] SAM2 + CLIP text encoder integration — **week 2+**
-- [ ] Flux / SDXL-Inpaint sidecar download + start scripts — **week 2+**
-- [ ] `reqwest` + `leaflet` / `maplibre-gl-js` + `supercluster` dependencies — **week 2+**
+- [x] `src-tauri/src/xmp/` module (parser + opt-in writer)
+- [x] `src/screens/map/` new screen (Leaflet renderer + trip list + photo grid)
+- [x] `src/primitives/ShortcutOverlay.tsx` + `useShortcut` hook + inline rebinder
+- [x] `leaflet` + `react-leaflet` frontend deps (2026-04-24 week 2)
+- [ ] `src/components/ExportSheet` — add the Phase 3-gated toggles (auto-light, copy-paste-edits) — **week 3+**
+- [ ] SAM2 + CLIP text encoder integration — **week 3+**
+- [ ] Flux / SDXL-Inpaint sidecar download + start scripts — **week 3+**
+- [ ] `supercluster` + offline reverse-geocoder SQLite — **week 3+**
 - [x] 2 of 7 exit-criterion test files (xmp roundtrip, .chronimage-ignore); remaining 5 tied to deferred deliverables
 
 ## Week 1 status (2026-04-24)
@@ -212,3 +213,21 @@ Deferred to week 2+ (all gated on generative infra or rendering libs we don't ye
 - §5 Map view renderer — OpenStreetMap tile cache, leaflet/maplibre, pin clustering, time-range filter, offline reverse-geocoder
 - §6 `useShortcut` central hook + Settings rebinder UI
 - §7 XMP write-out + embedded-XMP-in-ARW
+
+## Week 2 status (2026-04-24)
+
+Shipped end-to-end:
+
+- §5 Map view — real Leaflet map with OSM tiles + circle markers sized by trip photo count; fits to bounds; popups on marker click
+- §6 `useShortcut(commandId, defaultBinding, handler)` hook — respects per-user overrides from the `shortcuts` table
+- §6 Overlay inline rebinder — click any keys column to capture a new combo + persist; `reset` link reverts to built-in default
+- §7 XMP write-out — opt-in `xmp.write_on_change` setting + `write_sidecar` (round-trip safe) + `add_user_tag`/`remove_user_tag` hooks + `xmp_export_all` backfill command
+- §1 Prompt tab polish — tooltips corrected (Phase 4 week 3+ instead of stale "Phase 3"); constraints are now add/remove-stateful with an inline input
+
+Still deferred (week 3+):
+
+- §1/§2 Flux + SDXL sidecar (Python runtime, first-run model download, PID supervision)
+- §3 SAM2 + CLIP text encoder for mask-from-prompt
+- §5 tile cache, supercluster, time-range filter, offline reverse-geocoder
+- §6 Settings → Shortcuts table with conflict detection
+- §7 Embedded XMP inside `.arw`

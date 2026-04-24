@@ -42,6 +42,7 @@ export function DevelopScreen() {
     'Lift shadows slightly, keep skin tones natural, subtle dehaze on sky.',
   );
   const [promptStrength, setPromptStrength] = useState(65);
+  const [promptConstraints, setPromptConstraints] = useState<string[]>(['keep faces sharp', 'natural tones']);
 
   const photo = photos[focusedIdx] ?? null;
   const focusedPhotoId = photo?.id ?? null;
@@ -252,6 +253,8 @@ export function DevelopScreen() {
           setPromptText={setPromptText}
           promptStrength={promptStrength}
           setPromptStrength={setPromptStrength}
+          constraints={promptConstraints}
+          setConstraints={setPromptConstraints}
         />
       )}
     </div>
@@ -443,6 +446,8 @@ interface PromptStageProps {
   setPromptText: (s: string) => void;
   promptStrength: number;
   setPromptStrength: (n: number) => void;
+  constraints: string[];
+  setConstraints: (s: string[]) => void;
 }
 
 function PromptStage({
@@ -451,7 +456,19 @@ function PromptStage({
   setPromptText,
   promptStrength,
   setPromptStrength,
+  constraints,
+  setConstraints,
 }: PromptStageProps) {
+  const [newConstraint, setNewConstraint] = useState('');
+  const addConstraint = () => {
+    const v = newConstraint.trim();
+    if (!v || constraints.includes(v)) return;
+    setConstraints([...constraints, v]);
+    setNewConstraint('');
+  };
+  const removeConstraint = (s: string) => {
+    setConstraints(constraints.filter((c) => c !== s));
+  };
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div
@@ -497,7 +514,7 @@ function PromptStage({
           }}
         >
           <div className="mono" style={{ fontSize: 10.5, color: 'var(--accent)', letterSpacing: '0.08em' }}>
-            AFTER · prompt stub (no edits applied)
+            AFTER · awaiting Flux/SDXL sidecar (Phase 4 week 3+)
           </div>
           <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
             <Placeholder
@@ -505,7 +522,7 @@ function PromptStage({
               showLabel={false}
             />
             <div style={{ position: 'absolute', top: 10, right: 10 }}>
-              <Chip variant="solid">AI · Phase 3</Chip>
+              <Chip variant="solid">AI · Flux/SDXL pending</Chip>
             </div>
           </div>
         </div>
@@ -537,13 +554,38 @@ function PromptStage({
               className="btn phase-gated"
               disabled
               aria-disabled="true"
-              title="Coming in Phase 3 · masked prompt edits"
+              title="Masked prompt edits need SAM2 — Phase 4 week 3+"
               style={{ padding: '5px 9px', fontSize: 11.5 }}
             >
               <Icon name="brush" size={12} /> Mask
             </button>
-            <Chip onClose={() => {}}>keep faces sharp</Chip>
-            <Chip onClose={() => {}}>natural tones</Chip>
+            {constraints.map((c) => (
+              <Chip key={c} onClose={() => removeConstraint(c)}>
+                {c}
+              </Chip>
+            ))}
+            <input
+              type="text"
+              value={newConstraint}
+              onChange={(e) => setNewConstraint(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addConstraint();
+                }
+              }}
+              placeholder="+ add constraint"
+              aria-label="Add a constraint"
+              style={{
+                width: 140,
+                fontSize: 11.5,
+                padding: '3px 8px',
+                border: '1px dashed var(--stroke-strong)',
+                borderRadius: 999,
+                background: 'transparent',
+                color: 'var(--fg)',
+              }}
+            />
             <div style={{ flex: 1 }} />
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)' }}>
               Strength {promptStrength}
@@ -562,7 +604,7 @@ function PromptStage({
               className="btn primary phase-gated"
               disabled
               aria-disabled="true"
-              title="Coming in Phase 3 · AI generate"
+              title="Needs Flux/SDXL sidecar — Phase 4 week 3+"
               style={{ padding: '6px 12px', fontSize: 12 }}
             >
               <Icon name="sparkles" size={12} /> Generate <span className="kbd">⌘↵</span>

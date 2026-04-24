@@ -1,4 +1,4 @@
-//! Phase 4 §7 — XMP sidecar import.
+//! Phase 4 §7 — XMP sidecar import + opt-in write-out.
 //!
 //! At import time, for every JPG or RAW we look for a matching
 //! `<stem>.xmp` sidecar file and extract:
@@ -12,8 +12,10 @@
 //! `quick-xml` keeps this under 200 LOC and avoids pulling a serde-xml
 //! crate.
 //!
-//! Write-out (tags/rating → sidecar) is deferred — the PRD's §7 has it
-//! behind an opt-in Settings toggle that's not yet wired.
+//! Write-out — gated behind the `xmp.write_on_change` setting (KV
+//! `settings` table, default `false`). When on, every user-driven tag
+//! add/remove triggers [`export_for_photo`], which emits a minimal
+//! Adobe-compatible sidecar next to the first `source_copies` path.
 
 use crate::{AppError, AppResult};
 use quick_xml::events::Event;
@@ -289,12 +291,226 @@ pub struct RescanReceipt {
     pub errors: Vec<String>,
 }
 
-// Silence "impossible" warning — `AppError::from` for the `FromStr` parse
-// above isn't used but keeps the file's dependency surface ready for
-// future xmp::write() wiring.
-#[allow(dead_code)]
-fn _noop(e: AppError) -> AppError {
-    e
+// ── write-out ─────────────────────────────────────────────────────────────
+
+/// KV key used to gate write-out. Default off.
+pub const WRITE_ON_CHANGE_KEY: &str = "xmp.write_on_change";
+
+pub async fn is_write_on_change_enabled(pool: &SqlitePool) -> AppResult<bool> {
+    let row: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?1")
+        .bind(WRITE_ON_CHANGE_KEY)
+        .fetch_optional(pool)
+        .await?;
+    Ok(matches!(row.as_deref(), Some("1" | "true" | "on")))
+}
+
+pub async fn set_write_on_change(pool: &SqlitePool, enabled: bool) -> AppResult<()> {
+    let val = if enabled { "1" } else { "0" };
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO settings(key, value, updated_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(WRITE_ON_CHANGE_KEY)
+    .bind(val)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Emit a minimal Adobe-compatible XMP packet. Round-trip safe — a
+/// subsequent [`parse_str`] yields [`XmpData`] equal to the input.
+pub fn serialise(data: &XmpData) -> String {
+    let mut descr_attrs = String::new();
+    if let Some(r) = data.rating {
+        descr_attrs.push_str(&format!(" xmp:Rating=\"{}\"", r.clamp(0, 5)));
+    }
+    if let Some(lbl) = &data.color_label {
+        let cap = capitalise(lbl);
+        descr_attrs.push_str(&format!(" xmp:Label=\"{}\"", xml_escape(&cap)));
+    }
+
+    let mut subject_block = String::new();
+    if !data.subjects.is_empty() {
+        subject_block.push_str("      <dc:subject>\n        <rdf:Bag>\n");
+        for s in &data.subjects {
+            subject_block.push_str(&format!("          <rdf:li>{}</rdf:li>\n", xml_escape(s)));
+        }
+        subject_block.push_str("        </rdf:Bag>\n      </dc:subject>\n");
+    }
+
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n  \
+<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\"\n           \
+xmlns:dc=\"http://purl.org/dc/elements/1.1/\"\n           \
+xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\">\n    \
+<rdf:Description rdf:about=\"\"{descr_attrs}>\n\
+{subject_block}    </rdf:Description>\n  </rdf:RDF>\n</x:xmpmeta>\n"
+    )
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Write a sidecar file next to `photo_path`. Uses the Lightroom
+/// convention (`<stem>.xmp`) so Lightroom / Darktable pick it up.
+pub fn write_sidecar(photo_path: &Path, data: &XmpData) -> AppResult<std::path::PathBuf> {
+    let stem = photo_path
+        .file_stem()
+        .ok_or_else(|| AppError::InvalidInput("photo path has no stem".into()))?;
+    let parent = photo_path
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput("photo path has no parent".into()))?;
+    let mut sidecar = parent.to_path_buf();
+    sidecar.push(stem);
+    sidecar.set_extension("xmp");
+    std::fs::write(&sidecar, serialise(data))?;
+    Ok(sidecar)
+}
+
+/// Pull the current rating/label/user-tags for `photo_id` and, if
+/// write-out is enabled + a source file exists on disk, write a sidecar.
+/// Returns `Ok(None)` when write-out is off or no path is available.
+pub async fn export_for_photo(
+    pool: &SqlitePool,
+    photo_id: i64,
+) -> AppResult<Option<std::path::PathBuf>> {
+    if !is_write_on_change_enabled(pool).await? {
+        return Ok(None);
+    }
+    let Some((rating, color_label)): Option<(i64, Option<String>)> =
+        sqlx::query_as("SELECT rating, color_label FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(pool)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let subjects: Vec<String> = sqlx::query_scalar(
+        "SELECT label FROM tags WHERE photo_id = ?1 AND kind = 'user' ORDER BY label",
+    )
+    .bind(photo_id)
+    .fetch_all(pool)
+    .await?;
+    let data = XmpData {
+        rating: if rating > 0 { Some(rating) } else { None },
+        color_label,
+        subjects,
+    };
+
+    let path: Option<String> = sqlx::query_scalar(
+        "SELECT path FROM source_copies WHERE photo_id = ?1 AND path IS NOT NULL LIMIT 1",
+    )
+    .bind(photo_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let photo_path = std::path::PathBuf::from(path);
+    if !photo_path.exists() {
+        return Ok(None);
+    }
+    let written = write_sidecar(&photo_path, &data)?;
+    Ok(Some(written))
+}
+
+/// Force-export every photo in the catalog (regardless of the
+/// write-on-change flag). User-triggered via `xmp_export_all` command.
+pub async fn export_all(pool: &SqlitePool) -> AppResult<ExportReceipt> {
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM photos")
+        .fetch_all(pool)
+        .await?;
+
+    let mut written = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    for id in ids {
+        // Read the same data as export_for_photo but bypass the gate.
+        let res = force_export(pool, id).await;
+        match res {
+            Ok(Some(_)) => written += 1,
+            Ok(None) => skipped += 1,
+            Err(e) => errors.push(format!("photo {id}: {e}")),
+        }
+    }
+    Ok(ExportReceipt {
+        written,
+        skipped,
+        error_count: errors.len(),
+        errors,
+    })
+}
+
+async fn force_export(pool: &SqlitePool, photo_id: i64) -> AppResult<Option<std::path::PathBuf>> {
+    let Some((rating, color_label)): Option<(i64, Option<String>)> =
+        sqlx::query_as("SELECT rating, color_label FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(pool)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let subjects: Vec<String> = sqlx::query_scalar(
+        "SELECT label FROM tags WHERE photo_id = ?1 AND kind = 'user' ORDER BY label",
+    )
+    .bind(photo_id)
+    .fetch_all(pool)
+    .await?;
+    let data = XmpData {
+        rating: if rating > 0 { Some(rating) } else { None },
+        color_label,
+        subjects,
+    };
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    let path: Option<String> = sqlx::query_scalar(
+        "SELECT path FROM source_copies WHERE photo_id = ?1 AND path IS NOT NULL LIMIT 1",
+    )
+    .bind(photo_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let photo_path = std::path::PathBuf::from(path);
+    if !photo_path.exists() {
+        return Ok(None);
+    }
+    let written = write_sidecar(&photo_path, &data)?;
+    Ok(Some(written))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportReceipt {
+    pub written: usize,
+    pub skipped: usize,
+    pub error_count: usize,
+    pub errors: Vec<String>,
 }
 
 #[cfg(test)]
@@ -429,5 +645,48 @@ mod tests {
         let photo = tmp.path().join("IMG_0003.jpg");
         std::fs::write(&photo, b"jpg").unwrap();
         assert!(sidecar_for(&photo).is_none());
+    }
+
+    #[test]
+    fn serialise_roundtrips_through_parse_str() {
+        let original = XmpData {
+            rating: Some(3),
+            color_label: Some("blue".into()),
+            subjects: vec!["street".into(), "night & day".into()],
+        };
+        let xml = serialise(&original);
+        let parsed = parse_str(&xml);
+        assert_eq!(parsed.rating, Some(3));
+        assert_eq!(parsed.color_label.as_deref(), Some("blue"));
+        assert_eq!(parsed.subjects, original.subjects);
+    }
+
+    #[test]
+    fn write_sidecar_writes_next_to_photo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let photo = tmp.path().join("IMG_9999.jpg");
+        std::fs::write(&photo, b"jpg").unwrap();
+        let data = XmpData {
+            rating: Some(5),
+            color_label: None,
+            subjects: vec!["keep".into()],
+        };
+        let side = write_sidecar(&photo, &data).unwrap();
+        assert_eq!(side, tmp.path().join("IMG_9999.xmp"));
+        let text = std::fs::read_to_string(&side).unwrap();
+        assert!(text.contains("xmp:Rating=\"5\""));
+        assert!(text.contains("<rdf:li>keep</rdf:li>"));
+    }
+
+    #[tokio::test]
+    async fn write_on_change_default_off_and_toggles() {
+        let pool = open_pool(PoolOptions::new(":memory:".into()))
+            .await
+            .expect("pool");
+        assert!(!is_write_on_change_enabled(&pool).await.unwrap());
+        set_write_on_change(&pool, true).await.unwrap();
+        assert!(is_write_on_change_enabled(&pool).await.unwrap());
+        set_write_on_change(&pool, false).await.unwrap();
+        assert!(!is_write_on_change_enabled(&pool).await.unwrap());
     }
 }

@@ -3968,6 +3968,7 @@ pub async fn add_user_tag(
         added += res.rows_affected() as usize;
     }
     tx.commit().await?;
+    xmp_write_on_change(&state.pool, &photo_ids).await;
     Ok(added)
 }
 
@@ -3993,7 +3994,20 @@ pub async fn remove_user_tag(
         removed += res.rows_affected() as usize;
     }
     tx.commit().await?;
+    xmp_write_on_change(&state.pool, &photo_ids).await;
     Ok(removed)
+}
+
+/// Best-effort XMP sidecar write-out for a set of photos. Skips when
+/// the `xmp.write_on_change` setting is off or a photo has no resolvable
+/// source file. Errors are logged but never surfaced — write-out must
+/// never block the user-facing tag operation.
+async fn xmp_write_on_change(pool: &sqlx::SqlitePool, photo_ids: &[i64]) {
+    for pid in photo_ids {
+        if let Err(e) = crate::xmp::export_for_photo(pool, *pid).await {
+            tracing::warn!(photo_id = pid, error = %e, "xmp write-out failed");
+        }
+    }
 }
 
 #[tauri::command]
@@ -4184,7 +4198,7 @@ async fn render_preview(
 // ── Phase 4 §5 §6 §7 — map trips + shortcuts + xmp rescan ────────────────────
 
 use crate::map::trips::{RecomputeReceipt, TripRow};
-use crate::xmp::RescanReceipt;
+use crate::xmp::{ExportReceipt, RescanReceipt};
 
 #[tauri::command]
 pub async fn map_recompute_trips(state: State<'_, AppState>) -> AppResult<RecomputeReceipt> {
@@ -4204,6 +4218,21 @@ pub async fn map_photos_in_trip(state: State<'_, AppState>, trip_id: i64) -> App
 #[tauri::command]
 pub async fn xmp_rescan(state: State<'_, AppState>) -> AppResult<RescanReceipt> {
     crate::xmp::rescan_all(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn xmp_write_on_change_get(state: State<'_, AppState>) -> AppResult<bool> {
+    crate::xmp::is_write_on_change_enabled(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn xmp_write_on_change_set(state: State<'_, AppState>, enabled: bool) -> AppResult<()> {
+    crate::xmp::set_write_on_change(&state.pool, enabled).await
+}
+
+#[tauri::command]
+pub async fn xmp_export_all(state: State<'_, AppState>) -> AppResult<ExportReceipt> {
+    crate::xmp::export_all(&state.pool).await
 }
 
 // Shortcut registry — userland stores its bindings in the shortcuts

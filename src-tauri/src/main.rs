@@ -201,6 +201,9 @@ fn main() {
             commands::map_list_trips,
             commands::map_photos_in_trip,
             commands::xmp_rescan,
+            commands::xmp_write_on_change_get,
+            commands::xmp_write_on_change_set,
+            commands::xmp_export_all,
             commands::shortcuts_list,
             commands::shortcuts_set,
         ])
