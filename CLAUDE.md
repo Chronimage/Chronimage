@@ -101,6 +101,9 @@ Don't rely on the pre-commit / pre-push hook alone — it skips `cargo deny` and
 - Never commit `models/`, `catalog.db`, `tests/fixtures/photos/*.arw`-`*.heic` (LFS-only), `src-tauri/target/`, `dist/`, `.vite/`, OneDrive temp files, or anything in `tmp/`.
 - Never commit `src-tauri/models/bundled/` binary files (`.onnx`, `.gguf`). The directory is tracked via `.gitkeep`; the binaries are populated at build time by `scripts/fetch-bundled-models.*`.
 
+### Manual setup / credentials — `docs/manual-setup.md` is the single source of truth
+Anything that a human has to configure personally — API keys, OAuth client registrations, GitHub Actions secrets, code-signing certs, Cloudflare tokens, dev-tool endpoints — lives in [`docs/manual-setup.md`](docs/manual-setup.md). **Rule**: any PR that adds a new external credential, env var, or `secrets.*` reference **must update that doc in the same PR** — new row in the relevant section, plus a line in the Quick-status table. Don't let it drift. Easier to spend 30 seconds updating the table than to debug a CI secret mismatch later.
+
 ---
 
 ## Design tokens
