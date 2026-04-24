@@ -103,6 +103,9 @@ reqwest = { version = "0.12", default-features = false, features = ["stream", "r
 base64 = "0.22"
 # Cryptographic RNG for PKCE verifier + state token (OS entropy source).
 getrandom = "0.2"
+# Ed25519 signature verification for Phase 5 §7 Insider licences. Offline-only;
+# we embed a public key and verify signed license.json files without a server.
+ed25519-dalek = { version = "2", features = ["pkcs8"] }
 # Cross-platform secret store. On Windows this routes to Credential Manager; on
 # macOS to Keychain; on Linux to Secret Service. OAuth refresh tokens for cloud
 # source connectors are persisted here — never in the catalog DB.

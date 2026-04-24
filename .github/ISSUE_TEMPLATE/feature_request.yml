@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest a new capability or change to an existing one
+title: "[feature] "
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check the [active PRD](../../tree/develop/docs/prds)
+        to see if this is already planned for a later phase. If it is,
+        add a 👍 to the existing PRD issue instead of opening a new one.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the pain point, not the feature. We'll design the feature together.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Chronimage to do?
+      description: A sketch is fine. We'll refine the shape.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Other tools, workarounds, or related features we already have.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope sanity check
+      options:
+        - label: This fits within Chronimage's non-goals (no cloud sync, no mobile v1, no team libraries).
+          required: true

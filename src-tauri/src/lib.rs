@@ -20,6 +20,7 @@ pub mod entitlements;
 pub mod error;
 pub mod export;
 pub mod import;
+pub mod license;
 pub mod lift_and_shift;
 pub mod map;
 pub mod prompt;
