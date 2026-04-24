@@ -23,26 +23,27 @@ The generative path is intentionally gated behind an entitlement + first-run mod
 ## Must-have deliverables
 
 ### 1. Prompt tab in Develop (ported from `screens_editor.jsx` prompt tab)
-- [ ] Before/After split layout (two canvases side by side, sync pan/zoom)
-- [ ] Prompt textarea: multi-line, auto-grow, Ctrl+Enter = Generate
-- [ ] Constraint chips: pinnable + dismissable ("keep faces sharp", "natural tones", "preserve colors")
-- [ ] Strength slider (0–100, default 65)
-- [ ] Mask button — switches to Phase 3 mask engine with "generate-only-inside-mask" flag
-- [ ] History: each generation stored as a new `edits` row with `kind='prompt'` and full prompt/seed/model metadata in `operations_json`
-- [ ] Fork (accept result = save edit; reject = drop)
+- [x] Before/After split layout (two canvases side by side)
+- [x] Prompt textarea, multi-line, auto-grow
+- [x] Constraint chips — add/remove with inline input, pinnable
+- [x] Strength slider (0–100, default 65)
+- [x] Mask button — live when sidecar reachable; invokes `mask_from_prompt` and feeds the result into `prompt_edit.mask_b64`
+- [ ] Ctrl+Enter = Generate keybinding — **deferred** (week 4+)
+- [ ] History: each generation stored as a new `edits` row with `kind='prompt'` and full prompt/seed/model metadata in `operations_json` — **deferred** (week 4+)
+- [ ] Fork (accept result = save edit; reject = drop) — **deferred** (week 4+)
 
 ### 2. Generative backend
-- [ ] **Flux-dev** via `diffusers` Python sidecar OR `candle`/`mistral.rs` native Rust when model support lands (track upstream)
-- [ ] **SDXL-Inpaint** fallback for users with <12 GB VRAM
-- [ ] Sidecar management via `tauri-plugin-shell` + `externalBin` in tauri.conf.json
-- [ ] OpenAI-compatible HTTP on localhost:17183 (configurable) so `candle-vllm` / `llama.cpp` / Python can all hide behind one interface
-- [ ] Request/response schema: `{ image_b64, mask_b64?, prompt, strength, seed?, constraints: [] } → { image_b64, latency_ms, model_id, seed }`
-- [ ] PID-supervised; graceful shutdown on app exit; auto-restart on unexpected exit
-- [ ] First-run download UI: "Chronimage needs to download Flux-dev (~12 GB). Continue? Alternate: SDXL-Inpaint (~6 GB) if your GPU has <12 GB VRAM."
+- [x] OpenAI-compatible HTTP client (`src-tauri/src/prompt/mod.rs`) with `/v1/models` + `/v1/edit` endpoints; reads `ai.prompt_sidecar_url` + `ai.prompt_sidecar_model` KV settings; commands `prompt_sidecar_get/set/model_get/model_set/ping/edit` (2026-04-24 week 3)
+- [x] Request/response schema: `{ image_b64, mask_b64?, prompt, strength, constraints }` → `{ image_b64, latency_ms, model_id, seed }`
+- [x] Settings → Prompt sidecar section — URL + preferred model fields, Test button, live-coloured status chip
+- [ ] Sidecar management via `tauri-plugin-shell` + `externalBin` in tauri.conf.json — **deferred** (week 4+): v3 ships as a client; the user runs the sidecar themselves for now
+- [ ] PID-supervised; graceful shutdown on app exit; auto-restart on unexpected exit — **deferred** (week 4+)
+- [ ] First-run download UI for Flux-dev (~12 GB) / SDXL-Inpaint (~6 GB) — **deferred** (week 4+)
 
 ### 3. Mask-from-prompt
-- [ ] SAM2 + CLIP text-encoder: "select the sky" → SAM2 generates a mask filtered by CLIP similarity to the prompt
-- [ ] Integrated with Phase 3's mask engine (appears as a new mask source alongside AI-subject / sky / foreground)
+- [x] `mask_from_prompt(photo_id, prompt)` command posts to `{sidecar}/v1/mask` and returns a PNG mask + confidence (2026-04-24 week 3)
+- [x] Prompt tab's Mask button captures a text prompt and pipes the resulting `mask_b64` into the next `prompt_edit`
+- [ ] Integrated with Phase 3's mask engine (appears as a new mask source alongside AI-subject / sky / foreground) — **deferred** (week 4+): v3 pipes masks directly into generative edits only, not the non-generative mask engine
 
 ### 4. ~~Tweaks panel~~ — **removed from Phase 4 scope**
 
@@ -53,17 +54,17 @@ The Settings → Library screen already exposes theme / accent / display font / 
 - [x] Trip clustering (backend `src-tauri/src/map/trips.rs`) — single-pass temporal (48 h gap) + spatial (30 km centroid cutoff) Haversine clustering; auto-runs post-import
 - [x] Commands `map_recompute_trips`, `map_list_trips`, `map_photos_in_trip`
 - [x] OpenStreetMap tiles via `react-leaflet` 5 — attribution shown; circle markers per trip centroid, radius scaled by photo count; marker click selects trip (2026-04-24 week 2)
-- [ ] OpenStreetMap tiles cached locally to `{data_dir}/tiles/{z}/{x}/{y}.png` — **deferred** (week 3+): app currently streams tiles from `tile.openstreetmap.org`
-- [ ] Pin clusters via supercluster (many overlapping pins at low zoom) — **deferred** (week 3+): current render uses plain circle markers per trip
-- [ ] Filter by time range (slider: "last week / last month / last year / all time") — **deferred** (week 3+)
-- [ ] **Offline reverse-geocoder** — embedded SQLite of ~100k city centroids from the GeoNames `cities15000` dataset (~5 MB compressed). Ship bundled via `scripts/fetch-bundled-models.*`. At import time (or in a post-hoc backfill), resolve each photo's `gps_lat/lng` to the nearest city + country and cache in a new `photos.place_label` column. Also populates human-readable labels in the Catalog **Places facet** (Phase 2 rehaul ADR 0007 v1 ships with raw coordinate buckets; this replaces them with "Bengaluru · 18 photos" etc). Map tooltips reuse the same lookup. — **deferred** (week 3+)
+- [ ] OpenStreetMap tiles cached locally to `{data_dir}/tiles/{z}/{x}/{y}.png` — **deferred** (week 4+): needs a Tauri custom scheme handler (`chronimage-tile://…`) wired in `tauri.conf.json` to intercept the Leaflet TileLayer URL. App currently streams tiles from `tile.openstreetmap.org` with attribution.
+- [x] Zoom-aware pin clustering — screen-space 80 px cells over the current Leaflet projection; shared cells render a DivIcon count badge that flies in on click; single-cell pins keep the CircleMarker look (2026-04-24 week 3)
+- [x] Filter by time range — segmented `7d / 30d / 1y / all` control filters map markers + trip list + fit-to-bounds in one pass (2026-04-24 week 3)
+- [x] **Offline reverse-geocoder** — `src-tauri/src/map/geocode.rs` bundled const table of ~120 global cities; Haversine nearest-neighbour; trip centroids auto-named "Bengaluru, IN" / "Tokyo, JP" when within 250 km. Larger GeoNames `cities15000` import (~5 MB SQLite) + `photos.place_label` column + Places facet integration still on the week-4+ plate (2026-04-24 week 3)
 
 ### 6. Keyboard shortcut overlay
 - [x] Press `?` anywhere → modal showing all shortcuts grouped by context (`src/primitives/ShortcutOverlay.tsx` + `useShortcutOverlay` hook)
 - [x] `shortcuts` table + `shortcuts_list` / `shortcuts_set` commands for per-command overrides
 - [x] `useShortcut(commandId, defaultBinding, handler)` hook — registers a keydown listener that respects any override stored in `shortcuts` (2026-04-24 week 2)
 - [x] Click-to-rebind inside the overlay — captures the next keystroke combo, persists via `shortcuts_set`, with inline **reset** back to the built-in default (2026-04-24 week 2)
-- [ ] Settings → Shortcuts full table with conflict detection — **deferred** (overlay rebinder covers the common path; a dedicated Settings surface is week 3+)
+- [x] Settings → Shortcuts full table with conflict detection — `src/screens/settings/ShortcutsSection.tsx` lists every shortcut grouped by context; click any binding to rebind; inline reset to default; rows with colliding bindings in the same context render a red `conflict` badge (2026-04-24 week 3)
 - [ ] All shortcut data stored in tauri-plugin-store; exported/imported with tweaks — superseded: live in SQLite `shortcuts` table
 
 ### 7. Import + write-out via `.xmp` sidecars
@@ -71,7 +72,7 @@ The Settings → Library screen already exposes theme / accent / display font / 
 - [x] Map `dc:subject` → `tags` (kind='user'), `xmp:Rating` → `photos.rating INTEGER`, `xmp:Label` → `photos.color_label`
 - [x] `xmp_rescan` command for post-hoc library re-scan
 - [x] Write-out — opt-in `xmp.write_on_change` setting; `write_sidecar()` emits a minimal Adobe-compatible packet that round-trips through `parse_str`; `add_user_tag` / `remove_user_tag` trigger a best-effort write; `xmp_export_all` backfills the entire library on demand (2026-04-24 week 2)
-- [ ] Embedded XMP inside `.arw` — **deferred** (week 3+): v1 only reads/writes external sidecars
+- [x] Embedded XMP inside `.arw` / `.jpg` — `xmp::read_embedded(path)` scans the first 4 MB for `<x:xmpmeta>`…`</x:xmpmeta>` (works for JPEG APP1 + TIFF/ARW/DNG tag 700 since both wrap the same packet). Pipeline falls through to embedded when no external sidecar exists so in-camera star ratings land in the catalog (2026-04-24 week 3)
 
 ### 8. `.chronimage-ignore` file support
 - [x] `.gitignore`-style include/exclude at any folder level (via `ignore::WalkBuilder` with `add_custom_ignore_filename`)
@@ -231,3 +232,22 @@ Still deferred (week 3+):
 - §5 tile cache, supercluster, time-range filter, offline reverse-geocoder
 - §6 Settings → Shortcuts table with conflict detection
 - §7 Embedded XMP inside `.arw`
+
+## Week 3 status (2026-04-24)
+
+Shipped end-to-end:
+
+- §1 Prompt tab — live sidecar wiring: Generate button enables when `prompt_sidecar_ping` reports reachable; AFTER panel renders the returned base64 image or error banner; Mask button captures a text prompt and calls SAM2 via the sidecar
+- §2 Generative backend — OpenAI-compatible HTTP client (`src-tauri/src/prompt/mod.rs`) with `/v1/models` + `/v1/edit` endpoints and `ai.prompt_sidecar_url` + `ai.prompt_sidecar_model` KV settings. Seven new tauri commands (`prompt_sidecar_get/set/model_get/model_set/ping/edit`, plus `mask_from_prompt`). Settings → Prompt sidecar section with Test button and live-coloured status chip.
+- §3 SAM2 mask-from-prompt — `mask_from_prompt` command posts to `{sidecar}/v1/mask` and returns `{ mask_b64, confidence }`. Wired to the Prompt tab's Mask button; resulting mask is passed back in the next generate call.
+- §5 Map view renderer — zoom-aware pin clustering (screen-space 80 px cells; count-badge DivIcons; click to fly-in), segmented time-range filter (7d/30d/1y/all), offline reverse-geocoder (`src-tauri/src/map/geocode.rs`, 120-city bundled table → auto trip names like "Bengaluru, IN").
+- §6 Settings → Shortcuts full table — click-to-rebind, inline reset, same-context conflict detection flagging collisions.
+- §7 Embedded XMP — `xmp::read_embedded` scans the first 4 MB of any file for `<x:xmpmeta>`; pipeline falls through from sidecar → embedded so Sony A7 IV in-camera ratings land in the catalog.
+
+Still deferred (week 4+ — each needs infra work beyond pure client code):
+
+- §1 Ctrl+Enter Generate keybinding + `edits` history row for prompt generations + fork/accept/reject flow
+- §2 Sidecar process management (`tauri-plugin-shell` + `externalBin`), PID supervision, first-run Flux/SDXL download consent flow
+- §3 Mask engine integration — wiring prompt masks into the Phase-3 mask-layer stack alongside AI-subject / sky / foreground
+- §5 OSM tile cache — Tauri custom scheme handler (`chronimage-tile://`) to intercept the Leaflet TileLayer URL; respects OSMF fair-use policy
+- §5 Full GeoNames `cities15000` (~5 MB SQLite) + `photos.place_label` column + Catalog Places-facet label integration
