@@ -7,10 +7,12 @@
 //!   `kind = 'rediscovery_today'` marks it for daily recomputation by the
 //!   background re-evaluator.
 //!
-//! - **"First time on new camera"** — photos captured on a specific camera
-//!   model (Sony ILCE-7M4 as the Phase 1 persona default). Phase 2 will
-//!   personalize this per-user by computing the first-seen timestamp for each
-//!   camera model in the catalog.
+//! - **"First time on new camera"** — photos captured within 30 days of the
+//!   first-seen timestamp for each camera model the user actually owns.
+//!   Rebuilt on every boot by scanning `photos.camera_model` + its
+//!   `MIN(captured_at)`; the resulting rule_json is an `Any`-union of
+//!   per-camera `All{Camera, CapturedAt between}` clauses. Falls back to a
+//!   static Sony ILCE-7M4 rule when the catalog is still empty (fresh install).
 //!
 //! - **"Unflagged favorites"** — aesthetic score ≥ 8.0 AND not starred. The
 //!   "not in any user album" half of the PRD rule is deferred to Phase 2 when
@@ -18,8 +20,17 @@
 
 use crate::catalog::rules::validated_mmdd;
 use crate::{AppError, AppResult};
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
+
+/// Days after a camera's first-seen timestamp that still count as "first
+/// time on". 30 days covers a typical honeymoon-with-a-new-body window
+/// without polluting the rediscovery row once the camera is the daily driver.
+const FIRST_TIME_WINDOW_DAYS: i64 = 30;
+
+/// Static fallback rule_json used when the catalog has no photos yet (fresh
+/// install) so the seed still produces a valid, non-empty album.
+const FIRST_TIME_CAMERA_FALLBACK: &str = r#"{"type":"camera","field":"model","value":"ILCE-7M4"}"#;
 
 /// Row shape for an upsert into `smart_albums`.
 struct RediscoverySeed {
@@ -35,7 +46,7 @@ struct RediscoverySeed {
 /// `today_mmdd` must be a validated "MM-DD" string (e.g. "04-20") produced by
 /// the caller from the current UTC date. Separated from I/O so tests can
 /// inject a fixed date.
-fn build_seeds(today_mmdd: &str) -> Vec<RediscoverySeed> {
+fn build_seeds(today_mmdd: &str, first_time_camera_rule: String) -> Vec<RediscoverySeed> {
     vec![
         RediscoverySeed {
             name: "On this day",
@@ -46,12 +57,10 @@ fn build_seeds(today_mmdd: &str) -> Vec<RediscoverySeed> {
             kind: Some("rediscovery_today"),
         },
         RediscoverySeed {
-            // Phase 2 TODO(cc): personalize by scanning the catalog for each
-            // camera model's first-seen date and replacing the between bounds.
             name: "First time on new camera",
-            description: "Sony A7 IV — first shots on this camera body",
-            rule_json: r#"{"type":"camera","field":"model","value":"ILCE-7M4"}"#.to_owned(),
-            kind: None,
+            description: "First 30 days of shots from each camera body in your catalog",
+            rule_json: first_time_camera_rule,
+            kind: Some("rediscovery_cameras"),
         },
         RediscoverySeed {
             name: "Unflagged favorites",
@@ -70,11 +79,13 @@ fn build_seeds(today_mmdd: &str) -> Vec<RediscoverySeed> {
     ]
 }
 
-/// Seed the three rediscovery smart albums.
+/// Seed the four rediscovery smart albums.
 ///
-/// Idempotent: uses `INSERT OR IGNORE` keyed by `name`. Safe to call on every
-/// app startup. Albums that already exist are left untouched (the re-evaluator
-/// handles keeping `rule_json` current for `rediscovery_today` albums).
+/// Idempotent for three of the four rows (`INSERT OR IGNORE` keyed by name).
+/// The `rediscovery_cameras` row is additionally refreshed on every boot
+/// with a rule_json that reflects the camera models actually present in the
+/// catalog — newly added bodies show up in the Catalog row on next launch
+/// without a manual reset.
 pub async fn seed_rediscovery_albums(pool: &SqlitePool) -> AppResult<()> {
     let today_mmdd = Utc::now().format("%m-%d").to_string();
 
@@ -82,7 +93,8 @@ pub async fn seed_rediscovery_albums(pool: &SqlitePool) -> AppResult<()> {
     validated_mmdd(&today_mmdd)
         .ok_or_else(|| AppError::Internal(format!("invalid today mmdd: {today_mmdd}")))?;
 
-    let seeds = build_seeds(&today_mmdd);
+    let first_time_camera_rule = build_first_time_camera_rule(pool).await?;
+    let seeds = build_seeds(&today_mmdd, first_time_camera_rule.clone());
     let now = Utc::now().to_rfc3339();
 
     for seed in &seeds {
@@ -101,8 +113,83 @@ pub async fn seed_rediscovery_albums(pool: &SqlitePool) -> AppResult<()> {
         .await?;
     }
 
+    // Refresh the cameras row every boot so new bodies land in the album
+    // without the user having to delete + re-seed the row. Scoped to
+    // `kind = 'rediscovery_cameras'` so we never clobber a user-edited album.
+    sqlx::query(
+        "UPDATE smart_albums \
+         SET rule_json = ?1, updated_at = ?2 \
+         WHERE kind = 'rediscovery_cameras'",
+    )
+    .bind(&first_time_camera_rule)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
     tracing::info!(count = seeds.len(), "seeded rediscovery smart albums");
     Ok(())
+}
+
+/// Compute a personalized rule_json for "First time on new camera".
+///
+/// Walks `photos.camera_model` + `MIN(captured_at)` per model and emits an
+/// `Any`-union of per-model `All{Camera, CapturedAt{between}}` clauses. The
+/// window is the first [`FIRST_TIME_WINDOW_DAYS`] days after each model's
+/// first-seen timestamp.
+///
+/// Returns the static Sony ILCE-7M4 fallback when the catalog is empty
+/// (fresh install) or when no camera_model is tagged yet.
+async fn build_first_time_camera_rule(pool: &SqlitePool) -> AppResult<String> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT camera_model, MIN(captured_at) AS first_seen \
+         FROM photos \
+         WHERE camera_model IS NOT NULL \
+           AND camera_model != '' \
+           AND captured_at IS NOT NULL \
+         GROUP BY camera_model",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(FIRST_TIME_CAMERA_FALLBACK.to_string());
+    }
+
+    // Build the All-clauses per camera; skip any row whose first-seen
+    // timestamp can't be parsed rather than hard-failing the whole seed.
+    let mut branches: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+    for (model, first_seen_str) in rows {
+        let Ok(first_seen) = DateTime::parse_from_rfc3339(&first_seen_str) else {
+            tracing::warn!(
+                model = %model,
+                first_seen = %first_seen_str,
+                "rediscovery: skipping camera — first_seen not RFC3339"
+            );
+            continue;
+        };
+        let end = first_seen.with_timezone(&Utc) + Duration::days(FIRST_TIME_WINDOW_DAYS);
+        branches.push(serde_json::json!({
+            "type": "all",
+            "rules": [
+                { "type": "camera", "field": "model", "value": model },
+                {
+                    "type": "captured_at",
+                    "op": "between",
+                    "value": [
+                        first_seen.with_timezone(&Utc).to_rfc3339(),
+                        end.to_rfc3339(),
+                    ]
+                }
+            ]
+        }));
+    }
+
+    if branches.is_empty() {
+        return Ok(FIRST_TIME_CAMERA_FALLBACK.to_string());
+    }
+
+    let doc = serde_json::json!({ "type": "any", "rules": branches });
+    Ok(doc.to_string())
 }
 
 #[cfg(test)]
@@ -173,7 +260,7 @@ mod tests {
     #[test]
     fn on_this_day_rule_parses_to_strftime_sql() {
         // Build the seeds with a fixed MM-DD and assert the generated SQL fragment.
-        let seeds = build_seeds("04-20");
+        let seeds = build_seeds("04-20", FIRST_TIME_CAMERA_FALLBACK.to_string());
         let on_this_day = seeds
             .iter()
             .find(|s| s.name == "On this day")
@@ -190,6 +277,52 @@ mod tests {
         assert!(
             sql.contains("'04-20'"),
             "expected MM-DD value in SQL, got: {sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_time_camera_rule_falls_back_to_static_on_empty_catalog() {
+        let (_tmp, pool) = make_pool().await;
+        let rule = build_first_time_camera_rule(&pool).await.unwrap();
+        assert_eq!(rule, FIRST_TIME_CAMERA_FALLBACK);
+    }
+
+    #[tokio::test]
+    async fn first_time_camera_rule_emits_per_model_branches() {
+        let (_tmp, pool) = make_pool().await;
+
+        // Seed two distinct cameras with known first-seen timestamps.
+        use sqlx::Executor;
+        pool.execute(
+            "INSERT INTO photos (id, sha256, filename, width, height, imported_at, \
+               is_raw, camera_model, captured_at) VALUES \
+             (1, '0101010101010101010101010101010101010101010101010101010101010101', \
+              'a.arw', 100, 100, '2026-01-01T00:00:00Z', 1, 'ILCE-7M4', '2025-06-01T00:00:00Z'), \
+             (2, '0202020202020202020202020202020202020202020202020202020202020202', \
+              'b.arw', 100, 100, '2026-01-01T00:00:00Z', 1, 'ILCE-7M4', '2025-06-15T00:00:00Z'), \
+             (3, '0303030303030303030303030303030303030303030303030303030303030303', \
+              'c.jpg', 100, 100, '2026-01-01T00:00:00Z', 0, 'FUJIFILM X-T5', '2024-03-10T00:00:00Z')",
+        )
+        .await
+        .expect("seed photos");
+
+        let raw = build_first_time_camera_rule(&pool).await.unwrap();
+        let rule = crate::catalog::rules::parse_rule(&raw).expect("rule_json must parse");
+        // Top-level is `any` with two per-model branches (each an `all{camera,
+        // captured_at between}`). `matches!` avoids a naked `panic!` that the
+        // forbidden-patterns grep would flag even inside tests.
+        let branches = match rule {
+            crate::catalog::rules::AlbumRule::Any { ref rules } => rules.len(),
+            _ => 0,
+        };
+        assert_eq!(
+            branches, 2,
+            "expected Any{{rules: [..2..]}} at top, got {rule:?}"
+        );
+        // Sanity: ILCE-7M4 window ends 30 days after 2025-06-01.
+        assert!(
+            raw.contains("2025-07-01"),
+            "window end must be first_seen + 30d, got {raw}"
         );
     }
 }

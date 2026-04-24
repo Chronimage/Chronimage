@@ -546,6 +546,11 @@ export interface LiftPlan {
   total_file_count: number;
   items: LiftItem[];
   free_space_ok: boolean;
+  /** OS-level error string from the free-space probe. `null` on a clean
+   *  probe (success or insufficient-space); `string` when the probe itself
+   *  errored, in which case `free_space_ok` is forced to `true` but the
+   *  1.5× guarantee is effectively skipped — surface this as a warning. */
+  free_space_probe_error: string | null;
 }
 
 export interface LiftReceipt {
