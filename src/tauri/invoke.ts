@@ -1102,3 +1102,192 @@ export async function presetSave(
 export async function onedriveUpload(photoIds: number[], remoteFolder: string): Promise<UploadReceipt> {
   return tauriInvoke<UploadReceipt>('onedrive_upload', { photoIds, remoteFolder });
 }
+
+// ── Phase 4: Map · Shortcuts · XMP rescan ─────────────────────────────────────
+
+export interface TripRow {
+  id: number;
+  name: string | null;
+  start_at: string;
+  end_at: string;
+  center_lat: number;
+  center_lng: number;
+  radius_km: number;
+  photo_count: number;
+  auto_generated: boolean;
+  updated_at: string;
+}
+
+export interface TripRecomputeReceipt {
+  trip_count: number;
+  photo_count: number;
+  elapsed_ms: number;
+}
+
+export async function mapRecomputeTrips(): Promise<TripRecomputeReceipt> {
+  return tauriInvoke<TripRecomputeReceipt>('map_recompute_trips');
+}
+
+export async function mapListTrips(): Promise<TripRow[]> {
+  return tauriInvoke<TripRow[]>('map_list_trips');
+}
+
+export async function mapPhotosInTrip(tripId: number): Promise<number[]> {
+  return tauriInvoke<number[]>('map_photos_in_trip', { tripId });
+}
+
+export interface XmpRescanReceipt {
+  scanned: number;
+  applied: number;
+  error_count: number;
+  errors: string[];
+}
+
+export async function xmpRescan(): Promise<XmpRescanReceipt> {
+  return tauriInvoke<XmpRescanReceipt>('xmp_rescan');
+}
+
+export interface XmpExportReceipt {
+  written: number;
+  skipped: number;
+  error_count: number;
+  errors: string[];
+}
+
+export async function xmpWriteOnChangeGet(): Promise<boolean> {
+  return tauriInvoke<boolean>('xmp_write_on_change_get');
+}
+
+export async function xmpWriteOnChangeSet(enabled: boolean): Promise<void> {
+  return tauriInvoke('xmp_write_on_change_set', { enabled });
+}
+
+export async function xmpExportAll(): Promise<XmpExportReceipt> {
+  return tauriInvoke<XmpExportReceipt>('xmp_export_all');
+}
+
+// ── Prompt sidecar (Phase 4 §1/§2) ────────────────────────────────────────
+
+export interface SidecarStatus {
+  configured: boolean;
+  url: string | null;
+  reachable: boolean;
+  model: string | null;
+  error: string | null;
+}
+
+export interface PromptEditRequest {
+  photo_id: number;
+  prompt: string;
+  strength: number;
+  constraints: string[];
+  mask_b64?: string | null;
+}
+
+export interface PromptEditResult {
+  image_b64: string;
+  latency_ms: number;
+  model_id: string;
+  seed: number;
+}
+
+export async function promptSidecarGet(): Promise<string | null> {
+  return tauriInvoke<string | null>('prompt_sidecar_get');
+}
+
+export async function promptSidecarSet(url: string | null): Promise<void> {
+  return tauriInvoke('prompt_sidecar_set', { url });
+}
+
+export async function promptSidecarModelGet(): Promise<string | null> {
+  return tauriInvoke<string | null>('prompt_sidecar_model_get');
+}
+
+export async function promptSidecarModelSet(model: string | null): Promise<void> {
+  return tauriInvoke('prompt_sidecar_model_set', { model });
+}
+
+export async function promptSidecarPing(): Promise<SidecarStatus> {
+  return tauriInvoke<SidecarStatus>('prompt_sidecar_ping');
+}
+
+export async function promptEdit(req: PromptEditRequest): Promise<PromptEditResult> {
+  return tauriInvoke<PromptEditResult>('prompt_edit', { req });
+}
+
+export interface MaskFromPromptRequest {
+  photo_id: number;
+  prompt: string;
+}
+
+export interface MaskFromPromptResult {
+  mask_b64: string;
+  confidence: number;
+  latency_ms: number;
+}
+
+export async function maskFromPrompt(req: MaskFromPromptRequest): Promise<MaskFromPromptResult> {
+  return tauriInvoke<MaskFromPromptResult>('mask_from_prompt', { req });
+}
+
+export interface PromptEditRow {
+  id: number;
+  photo_id: number;
+  prompt: string;
+  strength: number;
+  constraints_json: string;
+  mask_b64: string | null;
+  rendered_b64: string;
+  model_id: string;
+  seed: number;
+  latency_ms: number;
+  state: 'pending' | 'accepted' | 'rejected';
+  created_at: string;
+}
+
+export async function promptEditList(photoId: number): Promise<PromptEditRow[]> {
+  return tauriInvoke<PromptEditRow[]>('prompt_edit_list', { photoId });
+}
+
+export async function promptEditAccept(editId: number): Promise<void> {
+  return tauriInvoke('prompt_edit_accept', { editId });
+}
+
+export async function promptEditReject(editId: number): Promise<void> {
+  return tauriInvoke('prompt_edit_reject', { editId });
+}
+
+export interface PlaceLabelBackfillReceipt {
+  scanned: number;
+  labelled: number;
+  skipped: number;
+  elapsed_ms: number;
+}
+
+export async function backfillPlaceLabels(): Promise<PlaceLabelBackfillReceipt> {
+  return tauriInvoke<PlaceLabelBackfillReceipt>('backfill_place_labels');
+}
+
+export async function mapTile(z: number, x: number, y: number): Promise<Uint8Array> {
+  const bytes = await tauriInvoke<number[]>('map_tile', { z, x, y });
+  return new Uint8Array(bytes);
+}
+
+export interface ShortcutRow {
+  command_id: string;
+  key_binding: string;
+  context: string;
+  updated_at: string;
+}
+
+export async function shortcutsList(): Promise<ShortcutRow[]> {
+  return tauriInvoke<ShortcutRow[]>('shortcuts_list');
+}
+
+export async function shortcutsSet(commandId: string, keyBinding: string, context?: string): Promise<void> {
+  return tauriInvoke('shortcuts_set', {
+    commandId,
+    keyBinding,
+    context: context ?? null,
+  });
+}

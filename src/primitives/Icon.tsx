@@ -44,7 +44,8 @@ export type IconName =
   | 'brush'
   | 'faces'
   | 'ai'
-  | 'compare';
+  | 'compare'
+  | 'pin';
 
 export interface IconProps {
   name: IconName;
@@ -256,6 +257,12 @@ const PATHS: Record<IconName, React.ReactElement> = {
       <rect x="3" y="5" width="8" height="14" rx="1" />
       <rect x="13" y="5" width="8" height="14" rx="1" />
       <path d="M12 2v20" strokeDasharray="2 2" />
+    </>
+  ),
+  pin: (
+    <>
+      <path d="M12 21c4-5 7-8.5 7-12a7 7 0 0 0-14 0c0 3.5 3 7 7 12z" />
+      <circle cx="12" cy="9" r="2.5" />
     </>
   ),
 };

@@ -2168,3 +2168,198 @@ select {
   border-top: 1px solid var(--stroke);
   background: var(--bg-chrome);
 }
+
+/* --- Phase 4 · ShortcutOverlay --- */
+.shortcut-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+.shortcut-modal {
+  width: min(760px, 90vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--stroke);
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  cursor: auto;
+  text-align: left;
+}
+.shortcut-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--stroke);
+}
+.shortcut-modal-head h2 {
+  margin: 0;
+  font-family: var(--display-font);
+  font-size: 24px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+.shortcut-modal-head h2 em {
+  color: var(--accent);
+  font-style: italic;
+}
+.shortcut-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.shortcut-section-label {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--fg-mute);
+  margin-bottom: 8px;
+}
+.shortcut-list {
+  display: flex;
+  flex-direction: column;
+}
+.shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--stroke);
+}
+.shortcut-row:last-child {
+  border-bottom: 0;
+}
+.shortcut-label {
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+.shortcut-keys {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.shortcut-keys kbd {
+  font-family: var(--mono-font);
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--stroke-strong);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.shortcut-modal-foot {
+  padding: 10px 20px;
+  border-top: 1px solid var(--stroke);
+  font-size: 11px;
+  color: var(--fg-mute);
+  background: var(--bg-chrome);
+}
+.shortcut-keys-btn {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  background: transparent;
+  border: 1px dashed transparent;
+  border-radius: 6px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.shortcut-keys-btn:hover {
+  border-color: var(--stroke-strong);
+  background: var(--bg-hover);
+}
+.shortcut-capturing {
+  font-size: 10.5px;
+  color: var(--accent);
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--accent);
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+}
+.shortcut-reset {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--fg-mute);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.shortcut-reset:hover {
+  color: var(--fg);
+}
+.shortcut-error {
+  margin: 0 0 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  color: var(--danger, #d66);
+  background: color-mix(in oklch, var(--danger, #d66) 10%, transparent);
+  font-size: 11px;
+}
+.shortcuts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.shortcuts-table thead th {
+  font-family: var(--mono-font);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  border-bottom: 1px solid var(--stroke);
+  font-weight: 400;
+}
+.shortcuts-table tbody tr {
+  border-bottom: 1px solid var(--stroke);
+}
+.shortcuts-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+.map-cluster-icon > div {
+  text-align: center;
+  color: #fff;
+  font-family: var(--mono-font);
+  font-size: 12px;
+  font-weight: 600;
+  background: #2f7d64;
+  border: 2px solid #5ae3b6;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+.map-cluster-icon:hover > div {
+  background: #5ae3b6;
+  color: #0b1c17;
+}
+
+/* --- Phase 4 · Map · trip cards --- */
+.trip-card {
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--stroke);
+  background: var(--bg-elev);
+  cursor: pointer;
+}
+.trip-card:hover {
+  border-color: var(--stroke-strong);
+}
+.trip-card.on {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 10%, var(--bg-elev));
+}

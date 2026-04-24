@@ -255,6 +255,43 @@ async fn execute_pipeline(
                 .await?;
                 imported.fetch_add(1, Ordering::Relaxed);
 
+                // Phase 4 §7 — XMP metadata import. Sidecar first (Lightroom
+                // convention), falling back to the embedded XMP packet in
+                // the photo itself (JPEG APP1 / TIFF-ARW tag 700). Best-
+                // effort; malformed data logs a warn but never fails the
+                // import.
+                let xmp_data = match crate::xmp::sidecar_for(&path) {
+                    Some(sidecar) => match crate::xmp::read_sidecar(&sidecar) {
+                        Ok(Some(data)) if !data.is_empty() => Some(data),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                sidecar = %sidecar.display(),
+                                "xmp: read_sidecar failed"
+                            );
+                            None
+                        }
+                        _ => None,
+                    },
+                    None => match crate::xmp::read_embedded(&path) {
+                        Ok(Some(data)) if !data.is_empty() => Some(data),
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %path.display(), "xmp: read_embedded failed");
+                            None
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(data) = xmp_data {
+                    if let Err(e) = crate::xmp::apply_to_photo(&pool, photo_id, &data).await {
+                        tracing::warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "xmp: apply_to_photo failed"
+                        );
+                    }
+                }
+
                 // Stage 2.5: extract EXIF + pHash for this photo.
                 let meta_start = Instant::now();
                 let meta_path = path.clone();
@@ -312,6 +349,13 @@ async fn execute_pipeline(
                 .await
                 {
                     tracing::warn!(error = %e, photo_id, "metadata UPDATE failed");
+                }
+
+                // Phase 4 §5 — nearest-city label for photos with GPS.
+                if exif.gps_lat.is_some() && exif.gps_lng.is_some() {
+                    if let Err(e) = crate::map::geocode::label_photo(&pool, photo_id).await {
+                        tracing::warn!(error = %e, photo_id, "place_label write failed");
+                    }
                 }
 
                 // Stage 2.6: apply EXIF orientation, cache a 320 px thumbnail,
@@ -841,6 +885,19 @@ async fn execute_pipeline(
             "reeval_clusters: done"
         ),
         Err(e) => tracing::warn!(error = %e, "reeval_clusters: failed"),
+    }
+
+    // Phase 4 §5 — recompute trips whenever new GPS-tagged photos land.
+    // Best-effort; trips are a derived view.
+    match crate::map::trips::recompute_trips(&pool).await {
+        Ok(r) => tracing::info!(
+            import_id,
+            trip_count = r.trip_count,
+            photo_count = r.photo_count,
+            elapsed_ms = r.elapsed_ms,
+            "recompute_trips: done"
+        ),
+        Err(e) => tracing::warn!(error = %e, "recompute_trips: failed"),
     }
 
     tracing::info!(

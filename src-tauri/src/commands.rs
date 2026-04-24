@@ -3968,6 +3968,7 @@ pub async fn add_user_tag(
         added += res.rows_affected() as usize;
     }
     tx.commit().await?;
+    xmp_write_on_change(&state.pool, &photo_ids).await;
     Ok(added)
 }
 
@@ -3993,7 +3994,20 @@ pub async fn remove_user_tag(
         removed += res.rows_affected() as usize;
     }
     tx.commit().await?;
+    xmp_write_on_change(&state.pool, &photo_ids).await;
     Ok(removed)
+}
+
+/// Best-effort XMP sidecar write-out for a set of photos. Skips when
+/// the `xmp.write_on_change` setting is off or a photo has no resolvable
+/// source file. Errors are logged but never surfaced — write-out must
+/// never block the user-facing tag operation.
+async fn xmp_write_on_change(pool: &sqlx::SqlitePool, photo_ids: &[i64]) {
+    for pid in photo_ids {
+        if let Err(e) = crate::xmp::export_for_photo(pool, *pid).await {
+            tracing::warn!(photo_id = pid, error = %e, "xmp write-out failed");
+        }
+    }
 }
 
 #[tauri::command]
@@ -4179,6 +4193,180 @@ async fn render_preview(
         .write_image(processed.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|e| AppError::Internal(format!("encode preview: {e}")))?;
     Ok(format!("data:image/jpeg;base64,{}", B64.encode(&out)))
+}
+
+// ── Phase 4 §5 §6 §7 — map trips + shortcuts + xmp rescan ────────────────────
+
+use crate::map::trips::{RecomputeReceipt, TripRow};
+use crate::xmp::{ExportReceipt, RescanReceipt};
+
+#[tauri::command]
+pub async fn map_recompute_trips(state: State<'_, AppState>) -> AppResult<RecomputeReceipt> {
+    crate::map::trips::recompute_trips(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn map_list_trips(state: State<'_, AppState>) -> AppResult<Vec<TripRow>> {
+    crate::map::trips::list_trips(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn map_photos_in_trip(state: State<'_, AppState>, trip_id: i64) -> AppResult<Vec<i64>> {
+    crate::map::trips::photos_in_trip(&state.pool, trip_id).await
+}
+
+#[tauri::command]
+pub async fn xmp_rescan(state: State<'_, AppState>) -> AppResult<RescanReceipt> {
+    crate::xmp::rescan_all(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn xmp_write_on_change_get(state: State<'_, AppState>) -> AppResult<bool> {
+    crate::xmp::is_write_on_change_enabled(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn xmp_write_on_change_set(state: State<'_, AppState>, enabled: bool) -> AppResult<()> {
+    crate::xmp::set_write_on_change(&state.pool, enabled).await
+}
+
+#[tauri::command]
+pub async fn xmp_export_all(state: State<'_, AppState>) -> AppResult<ExportReceipt> {
+    crate::xmp::export_all(&state.pool).await
+}
+
+// ── Prompt sidecar (Phase 4 §1/§2) ────────────────────────────────────────
+
+#[tauri::command]
+pub async fn prompt_sidecar_get(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    crate::prompt::get_sidecar_url(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_set(state: State<'_, AppState>, url: Option<String>) -> AppResult<()> {
+    crate::prompt::set_sidecar_url(&state.pool, url.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_model_get(state: State<'_, AppState>) -> AppResult<Option<String>> {
+    crate::prompt::get_preferred_model(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_model_set(
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> AppResult<()> {
+    crate::prompt::set_preferred_model(&state.pool, model.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn prompt_sidecar_ping(
+    state: State<'_, AppState>,
+) -> AppResult<crate::prompt::SidecarStatus> {
+    crate::prompt::user_initiated_ping_sidecar(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit(
+    state: State<'_, AppState>,
+    req: crate::prompt::PromptEditRequest,
+) -> AppResult<crate::prompt::PromptEditResult> {
+    crate::prompt::user_initiated_prompt_edit(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn mask_from_prompt(
+    state: State<'_, AppState>,
+    req: crate::prompt::MaskFromPromptRequest,
+) -> AppResult<crate::prompt::MaskFromPromptResult> {
+    crate::prompt::user_initiated_mask_from_prompt(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit_list(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Vec<crate::prompt::history::PromptEditRow>> {
+    crate::prompt::history::list_for_photo(&state.pool, photo_id).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit_accept(state: State<'_, AppState>, edit_id: i64) -> AppResult<()> {
+    crate::prompt::history::accept(&state.pool, edit_id).await
+}
+
+#[tauri::command]
+pub async fn prompt_edit_reject(state: State<'_, AppState>, edit_id: i64) -> AppResult<()> {
+    crate::prompt::history::reject(&state.pool, edit_id).await
+}
+
+#[tauri::command]
+pub async fn backfill_place_labels(
+    state: State<'_, AppState>,
+) -> AppResult<crate::map::geocode::BackfillReceipt> {
+    crate::map::geocode::backfill_place_labels(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn map_tile(z: u32, x: u32, y: u32) -> AppResult<Vec<u8>> {
+    crate::map::tile_cache::user_initiated_fetch_tile(z, x, y).await
+}
+
+// Shortcut registry — userland stores its bindings in the shortcuts
+// table. Phase 4 §6 scope: list + set. A discovery modal reads the list;
+// a future rebinding UI calls set. Conflict detection is client-side.
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ShortcutRow {
+    pub command_id: String,
+    pub key_binding: String,
+    pub context: String,
+    pub updated_at: String,
+}
+
+#[tauri::command]
+pub async fn shortcuts_list(state: State<'_, AppState>) -> AppResult<Vec<ShortcutRow>> {
+    sqlx::query_as::<_, ShortcutRow>(
+        "SELECT command_id, key_binding, context, updated_at \
+         FROM shortcuts ORDER BY context ASC, command_id ASC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn shortcuts_set(
+    state: State<'_, AppState>,
+    command_id: String,
+    key_binding: String,
+    context: Option<String>,
+) -> AppResult<()> {
+    let command_id = command_id.trim();
+    let key_binding = key_binding.trim();
+    if command_id.is_empty() || key_binding.is_empty() {
+        return Err(AppError::InvalidInput(
+            "command_id + key_binding required".into(),
+        ));
+    }
+    let ctx = context.unwrap_or_else(|| "global".into());
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO shortcuts (command_id, key_binding, context, updated_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(command_id) DO UPDATE SET \
+           key_binding = excluded.key_binding, \
+           context = excluded.context, \
+           updated_at = excluded.updated_at",
+    )
+    .bind(command_id)
+    .bind(key_binding)
+    .bind(&ctx)
+    .bind(&now)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

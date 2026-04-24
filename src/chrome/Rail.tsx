@@ -17,6 +17,7 @@ const ITEMS: RailItem[] = [
   { id: 'people', icon: 'faces', label: 'People' },
   { id: 'cull', icon: 'cull', label: 'Cull' },
   { id: 'cullbin', icon: 'flag', label: 'Cull Bin' },
+  { id: 'map', icon: 'pin', label: 'Map' },
   { id: 'develop', icon: 'brush', label: 'Develop' },
 ];
 
