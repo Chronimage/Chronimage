@@ -47,9 +47,17 @@ describe('CullBinScreen', () => {
 });
 
 describe('CullBinSidePanel', () => {
-  it('toggles active filter on click', () => {
-    render(<CullBinSidePanel />);
-    const nearDupes = screen.getByRole('button', { name: /near-duplicates/i });
+  it('toggles active filter on click', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'cull_bin_summary')
+        return { total_count: 5, total_bytes: 50_000_000, by_reason: [['near_dup', 5]] };
+      return undefined;
+    });
+
+    render(<CullBinSidePanel />, { wrapper });
+
+    const nearDupes = await screen.findByRole('button', { name: /near-duplicates/i });
     fireEvent.click(nearDupes);
     expect(nearDupes).toHaveAttribute('aria-pressed', 'true');
   });
