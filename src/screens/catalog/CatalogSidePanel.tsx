@@ -63,9 +63,7 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
               <span className="ico">
                 <Icon name={a.tag === 'faces' || a.tag === 'people' ? 'faces' : 'tag'} size={13} />
               </span>
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {a.name}
-              </span>
+              <span className="label">{a.name}</span>
               <span className="n">
                 {a.photo_count > 999 ? `${(a.photo_count / 1000).toFixed(1)}K` : a.photo_count}
               </span>
@@ -77,46 +75,22 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
           <span>People</span>
           <span className="ai-badge on">{clusters.length}</span>
         </div>
-        <div style={{ padding: '0 10px 10px' }}>
-          {sidebarClusters.length === 0 ? (
-            <div style={{ fontSize: 11, color: 'var(--fg-mute)', padding: '4px 2px' }}>
-              No face clusters yet. Import photos to populate.
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 4 }}>
-              {sidebarClusters.map((c) => {
-                const hue = (c.id * 47) % 360;
-                const label = c.name?.trim() || `#${c.id}`;
-                return (
-                  <div key={c.id} title={`${label} · ${c.faceCount}`} style={{ textAlign: 'center' }}>
-                    <div
-                      style={{
-                        width: 28,
-                        height: 28,
-                        borderRadius: '50%',
-                        background: `oklch(0.5 0.15 ${hue})`,
-                        border: '1px solid var(--stroke)',
-                      }}
-                    />
-                    <div
-                      style={{
-                        fontSize: 9,
-                        color: 'var(--fg-mute)',
-                        marginTop: 2,
-                        fontFamily: 'var(--mono-font)',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      {label}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        {sidebarClusters.length === 0 ? (
+          <div className="side-empty">No face clusters yet. Import photos to populate.</div>
+        ) : (
+          <div className="people-grid">
+            {sidebarClusters.map((c) => {
+              const hue = (c.id * 47) % 360;
+              const label = c.name?.trim() || `#${c.id}`;
+              return (
+                <div key={c.id} className="person" title={`${label} · ${c.faceCount}`}>
+                  <div className="avatar" style={{ background: `oklch(0.5 0.15 ${hue})` }} />
+                  <div className="name">{label}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         <SourcesPanel />
       </div>
@@ -125,7 +99,16 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
         <button
           type="button"
           className="btn2 ghost"
-          style={{ width: '100%', justifyContent: 'center', fontSize: 12, padding: 7 }}
+          style={{
+            width: '100%',
+            justifyContent: 'center',
+            fontSize: 12,
+            padding: 7,
+            opacity: 0.5,
+            cursor: 'not-allowed',
+          }}
+          disabled
+          title="Coming in Phase 2 — user-defined smart albums"
         >
           <Icon name="plus" size={12} /> New Smart Album
         </button>

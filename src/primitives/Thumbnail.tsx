@@ -14,7 +14,7 @@ export interface ThumbnailProps extends PlaceholderProps {
   alt?: string;
 }
 
-export function Thumbnail({ photoId, sizePx = 320, alt, ...placeholderProps }: ThumbnailProps) {
+export function Thumbnail({ photoId, sizePx = 480, alt, ...placeholderProps }: ThumbnailProps) {
   const { data: url } = useThumbnailUrl(photoId, sizePx);
 
   // Revoke the *previous* blob URL only when the URL changes — not on unmount.

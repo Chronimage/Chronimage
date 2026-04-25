@@ -19,7 +19,7 @@
 //! Every stage is cheap + embarrassingly parallel → `rayon::par_chunks_mut`.
 //! A 2000 px preview under all 8 stages runs in ~50 ms on an i5.
 
-use super::ops::{identity_curve, Curve, Operations};
+use super::ops::{is_identity_curve, Curve, Operations};
 use image::{DynamicImage, RgbImage};
 use rayon::prelude::*;
 
@@ -245,71 +245,113 @@ fn s_curve(x: f32, k: f32) -> f32 {
     y.clamp(0.0, 1.5)
 }
 
-/// Build a 256-entry `u8 -> u8` LUT from a 5-point curve using a
-/// Catmull-Rom spline. The two endpoints at x=0 and x=1 are implicit —
-/// the 5 control points fully specify the curve. Points are assumed to
-/// be in x-sorted order; if the UI violates that, we still return a
-/// valid LUT by clamping to the nearest point at each index.
+/// Build a 256-entry `u8 -> u8` LUT from a variable-length curve using
+/// a Fritsch-Carlson monotone cubic Hermite spline — same interpolant
+/// the frontend CurvesPanel renders, so the preview matches the shipped
+/// photo exactly. Monotone tangents guarantee no overshoot between
+/// control points, which is the idiomatic photo-tone-curve behaviour.
+///
+/// Curves with fewer than 2 points are treated as identity.
 fn bake_lut(curve: &Curve) -> [f32; 256] {
     let mut out = [0.0f32; 256];
-    // Extend with virtual endpoints so the Catmull-Rom spline behaves
-    // at the boundaries. Reflect the neighbour through the endpoint:
-    //   p_virt = 2 * p_end - p_neighbour
-    // This makes the tangent at the endpoint point straight toward
-    // the neighbour — an identity curve stays a straight diagonal.
-    // The earlier `[-p[0], -p[0]]` formula reflected through the
-    // origin and produced a kink on any curve touching (0, 0).
-    let p0 = [
-        2.0 * curve[0][0] - curve[1][0],
-        2.0 * curve[0][1] - curve[1][1],
-    ];
-    let pn = [
-        2.0 * curve[4][0] - curve[3][0],
-        2.0 * curve[4][1] - curve[3][1],
-    ];
-    let pts: [[f32; 2]; 7] = [p0, curve[0], curve[1], curve[2], curve[3], curve[4], pn];
+    if curve.len() < 2 {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = i as f32 / 255.0;
+        }
+        return out;
+    }
+
+    let n = curve.len();
+    let xs: Vec<f32> = curve.iter().map(|p| p[0]).collect();
+    let ys: Vec<f32> = curve.iter().map(|p| p[1]).collect();
+    let tangents = monotone_tangents(&xs, &ys);
 
     for (i, out_slot) in out.iter_mut().enumerate() {
         let x = i as f32 / 255.0;
-        // Find which segment the x falls into. Each segment is between
-        // pts[j+1] and pts[j+2] (j in 0..=4).
-        let mut j = 0usize;
-        for k in 0..5 {
-            if x >= pts[k + 1][0] && x <= pts[k + 2][0] {
-                j = k;
+        let mut k = 0usize;
+        for j in 0..(n - 1) {
+            if x >= xs[j] && x <= xs[j + 1] {
+                k = j;
                 break;
             }
-            if x < pts[k + 1][0] {
-                j = k.saturating_sub(1);
+            if x < xs[j] {
+                k = j.saturating_sub(1);
                 break;
             }
-            if k == 4 {
-                j = 4;
+            if j == n - 2 {
+                k = n - 2;
             }
         }
-        let p_minus = pts[j];
-        let p_a = pts[j + 1];
-        let p_b = pts[j + 2];
-        let p_plus = pts[j + 3];
-
-        let span = (p_b[0] - p_a[0]).max(1e-6);
-        let t = ((x - p_a[0]) / span).clamp(0.0, 1.0);
-        let y = catmull_rom(p_minus[1], p_a[1], p_b[1], p_plus[1], t);
+        let y = hermite(&xs, &ys, &tangents, k, x);
         *out_slot = y.clamp(0.0, 1.0);
     }
     out
 }
 
-/// Catmull-Rom 1D interpolation. `p1` and `p2` are the segment endpoints
-/// for parameter `t ∈ [0, 1]`; `p0` and `p3` are the surrounding points
-/// that shape the tangents.
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+/// Fritsch-Carlson monotone cubic Hermite tangents — the same
+/// algorithm the frontend CurvesPanel uses. Guarantees a monotone
+/// interpolant between control points (no overshoot), which is what
+/// photo editors want from a tone curve.
+fn monotone_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
+    let n = xs.len();
+    let mut m = vec![0.0f32; n];
+    if n < 2 {
+        return m;
+    }
+
+    let mut d = vec![0.0f32; n - 1];
+    for i in 0..(n - 1) {
+        let dx = xs[i + 1] - xs[i];
+        d[i] = if dx > 1e-9 {
+            (ys[i + 1] - ys[i]) / dx
+        } else {
+            0.0
+        };
+    }
+
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..(n - 1) {
+        m[i] = (d[i - 1] + d[i]) / 2.0;
+    }
+
+    for i in 0..(n - 1) {
+        if d[i] == 0.0 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+            continue;
+        }
+        let alpha = m[i] / d[i];
+        let beta = m[i + 1] / d[i];
+        let mag = alpha * alpha + beta * beta;
+        if mag > 9.0 {
+            let tau = 3.0 / mag.sqrt();
+            m[i] = tau * alpha * d[i];
+            m[i + 1] = tau * beta * d[i];
+        }
+    }
+    m
+}
+
+fn hermite(xs: &[f32], ys: &[f32], m: &[f32], k: usize, x: f32) -> f32 {
+    let x0 = xs[k];
+    let x1 = xs[k + 1];
+    let y0 = ys[k];
+    let y1 = ys[k + 1];
+    let m0 = m[k];
+    let m1 = m[k + 1];
+    let h = x1 - x0;
+    if h < 1e-9 {
+        return y0;
+    }
+    let t = (x - x0) / h;
     let t2 = t * t;
     let t3 = t2 * t;
-    0.5 * ((2.0 * p1)
-        + (-p0 + p2) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1
 }
 
 /// Interpolate a LUT at a floating-point input in `[0, 1+ε]`.
@@ -320,16 +362,6 @@ fn lookup_lut(lut: &[f32; 256], x: f32) -> f32 {
     let a = lut[i];
     let b = lut[i.saturating_add(1).min(255)];
     a + (b - a) * frac
-}
-
-fn is_identity_curve(curve: &Curve) -> bool {
-    let ident = identity_curve();
-    for i in 0..5 {
-        if (curve[i][0] - ident[i][0]).abs() > 1e-6 || (curve[i][1] - ident[i][1]).abs() > 1e-6 {
-            return false;
-        }
-    }
-    true
 }
 
 fn apply_clarity(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
@@ -440,7 +472,7 @@ mod tests {
     fn rgb_curve_lifts_midtones() {
         // Pull the mids up: 0.5 → 0.75. Darkens/brightens should follow.
         let mut curves = super::super::ops::Curves::identity();
-        curves.rgb = [
+        curves.rgb = vec![
             [0.0, 0.0],
             [0.25, 0.35],
             [0.5, 0.75],
@@ -463,7 +495,7 @@ mod tests {
 
     #[test]
     fn bake_lut_endpoints_match_identity() {
-        let lut = super::bake_lut(&super::identity_curve());
+        let lut = super::bake_lut(&super::super::ops::identity_curve());
         assert!((lut[0] - 0.0).abs() < 1e-3);
         assert!((lut[255] - 1.0).abs() < 1e-3);
         // Mid sample should be ~0.5.
@@ -476,7 +508,7 @@ mod tests {
         // produced a kink at both endpoints on the identity curve.
         // A straight-line identity must map lut[i] ≈ i / 255 across
         // every sample, not just the endpoints + midpoint.
-        let lut = super::bake_lut(&super::identity_curve());
+        let lut = super::bake_lut(&super::super::ops::identity_curve());
         for (i, &actual) in lut.iter().enumerate() {
             let expected = i as f32 / 255.0;
             assert!(

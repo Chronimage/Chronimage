@@ -9,16 +9,19 @@
 //! - `temp` — Kelvin delta, -50..=50 (UI cue only; pipeline interprets as
 //!   a warm/cool RGB channel shift)
 //!
-//! Curves are fixed at 5 control points per channel (blacks / shadows /
-//! mids / highlights / whites). Each point is `[x, y]` in `[0, 1]`.
-//! Identity = the diagonal `y = x`; the pipeline runs a Catmull-Rom
-//! spline through the 5 points to build a 256-entry LUT. Five channels
-//! are stored — `rgb` (the composite master curve) + `r`/`g`/`b` per-
-//! channel + `l` (luma).
+//! Curves hold between 2 and 16 control points per channel; each point
+//! is `[x, y]` in `[0, 1]`, sorted by x. The 5-point identity (diagonal
+//! `y = x` with stops at blacks / shadows / mids / highlights / whites)
+//! is the default shape, but the UI can insert or remove points
+//! anywhere in the middle. The pipeline runs a **monotone cubic
+//! Hermite** spline (Fritsch-Carlson) through the points to build a
+//! 256-entry LUT — same interpolant used by Lightroom / Capture One.
+//! Five channels are stored: `rgb` (composite master), `r`/`g`/`b`
+//! per-channel, and `l` (luma).
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Operations {
     /// EV stops. Negative = darker.
     #[serde(default)]
@@ -53,14 +56,14 @@ pub struct Operations {
     pub curves: Curves,
 }
 
-/// Fixed-size curve for one channel: 5 control points in `[0,1]^2`.
-/// Order is left-to-right on the x axis. Serialised as a `[[f32; 2]; 5]`
-/// for compact storage + obvious JSON shape.
-pub type Curve = [[f32; 2]; 5];
+/// Variable-length curve for one channel: 2..=16 control points in
+/// `[0,1]^2`, sorted left-to-right on the x axis. The UI lets the user
+/// insert or remove points in the middle; endpoints stay at x=0 and x=1.
+pub type Curve = Vec<[f32; 2]>;
 
 /// Identity curve — the diagonal `y = x` at five evenly spaced x points.
-pub const fn identity_curve() -> Curve {
-    [
+pub fn identity_curve() -> Curve {
+    vec![
         [0.0, 0.0],
         [0.25, 0.25],
         [0.5, 0.5],
@@ -69,8 +72,12 @@ pub const fn identity_curve() -> Curve {
     ]
 }
 
-/// Per-channel tone curves. Each field is a 5-point curve.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Maximum number of control points per channel. Keeps the on-disk JSON
+/// bounded + gives the LUT baker a predictable upper bound on work.
+pub const MAX_CURVE_POINTS: usize = 16;
+
+/// Per-channel tone curves.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Curves {
     #[serde(default = "identity_curve")]
     pub rgb: Curve,
@@ -85,7 +92,7 @@ pub struct Curves {
 }
 
 impl Curves {
-    pub const fn identity() -> Self {
+    pub fn identity() -> Self {
         Self {
             rgb: identity_curve(),
             r: identity_curve(),
@@ -95,17 +102,33 @@ impl Curves {
         }
     }
 
-    /// True iff every channel is the identity (y = x) curve. The pipeline
-    /// skips the whole curves stage when this is true.
+    /// True iff every channel is an identity curve — any variant that
+    /// evaluates to y = x at every x (any length ≥ 2 with all points on
+    /// the diagonal). The pipeline skips the whole curves stage when
+    /// this is true.
     pub fn is_identity(&self) -> bool {
-        *self == Self::identity()
+        is_identity_curve(&self.rgb)
+            && is_identity_curve(&self.r)
+            && is_identity_curve(&self.g)
+            && is_identity_curve(&self.b)
+            && is_identity_curve(&self.l)
     }
 
     fn blend_channel(a: &Curve, b: &Curve, t: f32) -> Curve {
-        let mut out = identity_curve();
-        for i in 0..5 {
-            out[i][0] = a[i][0] + (b[i][0] - a[i][0]) * t;
-            out[i][1] = a[i][1] + (b[i][1] - a[i][1]) * t;
+        // Curve lengths can differ; if they do, fall back to whichever
+        // side has more points (no interpolation). That's the safe
+        // choice — blending between different-shape curves isn't a
+        // supported operation yet; presets define their own.
+        if a.len() != b.len() {
+            return if t < 0.5 { a.clone() } else { b.clone() };
+        }
+        let mut out: Curve = Vec::with_capacity(a.len());
+        for i in 0..a.len() {
+            let ax = a[i][0];
+            let ay = a[i][1];
+            let bx = b[i][0];
+            let by = b[i][1];
+            out.push([ax + (bx - ax) * t, ay + (by - ay) * t]);
         }
         out
     }
@@ -127,6 +150,31 @@ impl Default for Curves {
     }
 }
 
+/// Check whether a curve is effectively `y = x`. Any length ≥ 2 counts
+/// as identity as long as every control point sits on the diagonal.
+pub fn is_identity_curve(curve: &Curve) -> bool {
+    const EPS: f32 = 1e-4;
+    for p in curve {
+        if (p[0] - p[1]).abs() > EPS {
+            return false;
+        }
+    }
+    // Also require the two endpoints sit at the corners so we don't
+    // misclassify a partial 2-point curve like [[0,0],[0.5,0.5]] — the
+    // x=1 side is implicitly the diagonal extension too, so that case
+    // is genuinely identity in the 0..0.5 range but the LUT baker
+    // would extrapolate a flat tail. Keep strict for correctness.
+    if curve.len() < 2 {
+        return false;
+    }
+    let first = curve[0];
+    let last = curve[curve.len() - 1];
+    (first[0]).abs() < EPS
+        && (first[1]).abs() < EPS
+        && (last[0] - 1.0).abs() < EPS
+        && (last[1] - 1.0).abs() < EPS
+}
+
 impl Default for Operations {
     fn default() -> Self {
         Self::identity()
@@ -136,7 +184,7 @@ impl Default for Operations {
 impl Operations {
     /// "As imported" — no edits applied. Every field is 0; curves are
     /// the diagonal; the pipeline returns its input untouched.
-    pub const fn identity() -> Self {
+    pub fn identity() -> Self {
         Self {
             exposure: 0.0,
             contrast: 0.0,

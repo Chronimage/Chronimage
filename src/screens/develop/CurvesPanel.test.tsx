@@ -74,6 +74,56 @@ describe('CurvesPanel', () => {
     expect(setChannel).toHaveBeenCalledWith('r');
   });
 
+  test('click on empty curve area inserts a new control point', () => {
+    stubSvgRect(200, 200);
+    const onChange = vi.fn();
+    const { container } = render(
+      <CurvesPanel value={identityCurves()} onChange={onChange} channel="rgb" setChannel={() => {}} />,
+    );
+    const svg = container.querySelector('svg');
+    if (!svg) throw new Error('svg missing');
+
+    // Click somewhere away from existing control points. Identity stops
+    // sit at x = 0, 0.25, 0.5, 0.75, 1.0 — click at (0.1, 0.1) in normalised
+    // space = (20, 180) pixels (SVG y inverted).
+    fireEvent.pointerDown(svg, { pointerId: 7, clientX: 20, clientY: 180 });
+    fireEvent.pointerUp(svg, { pointerId: 7, clientX: 20, clientY: 180 });
+
+    expect(onChange).toHaveBeenCalled();
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next.rgb.length).toBe(6);
+    // Inserted between idx 0 (x=0) and idx 1 (x=0.25).
+    expect(next.rgb[1][0]).toBeCloseTo(0.1, 2);
+  });
+
+  test('right-click on a midpoint removes it', () => {
+    stubSvgRect(200, 200);
+    const onChange = vi.fn();
+    const { container } = render(
+      <CurvesPanel value={identityCurves()} onChange={onChange} channel="rgb" setChannel={() => {}} />,
+    );
+    const handles = container.querySelectorAll('circle[role="slider"]');
+    // The mid handle at idx=2 (x=0.5, y=0.5). Right-click.
+    fireEvent.contextMenu(handles[2] as Element);
+    expect(onChange).toHaveBeenCalled();
+    const next = onChange.mock.calls.at(-1)?.[0];
+    expect(next.rgb.length).toBe(4);
+    // The midpoint is gone — remaining x values are 0, 0.25, 0.75, 1.
+    expect(next.rgb.map((p: [number, number]) => p[0])).toEqual([0, 0.25, 0.75, 1]);
+  });
+
+  test('right-click on an endpoint is a no-op', () => {
+    stubSvgRect(200, 200);
+    const onChange = vi.fn();
+    const { container } = render(
+      <CurvesPanel value={identityCurves()} onChange={onChange} channel="rgb" setChannel={() => {}} />,
+    );
+    const handles = container.querySelectorAll('circle[role="slider"]');
+    fireEvent.contextMenu(handles[0] as Element); // first endpoint
+    fireEvent.contextMenu(handles[handles.length - 1] as Element); // last endpoint
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   test('reset button restores the identity curve on the active channel', () => {
     stubSvgRect();
     const onChange = vi.fn();

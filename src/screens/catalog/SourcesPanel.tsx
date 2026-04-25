@@ -16,7 +16,7 @@ import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon, type IconName } from '../../primitives/Icon';
 import type { SourceRow } from '../../state/queries';
 import { useDeleteSource, useSourceDeletionPreview, useSources } from '../../state/queries';
-import { AddSourcePopover } from './AddSourcePopover';
+import { AddSourceModal } from './AddSourceModal';
 
 const KIND_ICON: Record<string, IconName> = {
   local: 'disk',
@@ -56,79 +56,50 @@ export function SourcesPanel() {
 
   return (
     <>
-      <div
-        className="section-label"
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
-      >
+      <div className="section-label">
         <span>Sources</span>
         <button
           type="button"
-          className="btn2 ghost"
-          onClick={() => setAdding((v) => !v)}
-          aria-label={adding ? 'Close add-source panel' : 'Add a source'}
-          style={{
-            fontSize: 10,
-            padding: '2px 6px',
-            minWidth: 22,
-            height: 18,
-            lineHeight: 1,
-          }}
+          className="mini-btn"
+          onClick={() => setAdding(true)}
+          aria-label="Add a source"
           title="Add a source"
         >
-          {adding ? '×' : '+'}
+          +
         </button>
       </div>
 
-      {adding && (
-        <div style={{ padding: '0 10px 10px' }}>
-          <AddSourcePopover layout="inline" />
+      {sources.length === 0 ? (
+        <div className="side-empty">
+          No sources yet. Click <strong>+</strong> to add one.
+        </div>
+      ) : (
+        <div className="list">
+          {sources.slice(0, 7).map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className="item"
+              onClick={() => setDisconnectTarget(s)}
+              title={`${s.name} — click to disconnect`}
+            >
+              <span className="ico">
+                <Icon name={kindIcon(s.kind)} size={13} />
+              </span>
+              <span className="label">{s.name.replace(/^.+· /, '')}</span>
+              <span
+                className="source-dot"
+                style={{ background: statusDot(s.status) }}
+                role="img"
+                aria-label={`status: ${s.status}`}
+              />
+            </button>
+          ))}
+          {sources.length > 7 && <div className="mono side-more">+{sources.length - 7} more</div>}
         </div>
       )}
 
-      <div className="list">
-        {sources.length === 0 && !adding && (
-          <div style={{ fontSize: 11, color: 'var(--fg-mute)', padding: '4px 12px 10px' }}>
-            No sources yet. Click <strong>+</strong> to add one.
-          </div>
-        )}
-        {sources.slice(0, 7).map((s) => (
-          <button
-            key={s.id}
-            type="button"
-            className="item"
-            onClick={() => setDisconnectTarget(s)}
-            title={`${s.name} — click to disconnect`}
-          >
-            <span className="ico">
-              <Icon name={kindIcon(s.kind)} size={13} />
-            </span>
-            <span
-              style={{
-                flex: 1,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                fontSize: 12,
-              }}
-            >
-              {s.name.replace(/^.+· /, '')}
-            </span>
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                background: statusDot(s.status),
-              }}
-            />
-          </button>
-        ))}
-        {sources.length > 7 && (
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', padding: '4px 12px' }}>
-            +{sources.length - 7} more
-          </div>
-        )}
-      </div>
+      <AddSourceModal open={adding} onClose={() => setAdding(false)} />
 
       {disconnectTarget && (
         <DisconnectSourceModal source={disconnectTarget} onClose={() => setDisconnectTarget(null)} />

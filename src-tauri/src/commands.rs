@@ -3281,15 +3281,12 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
         let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
         let cache_path_clone = cache_path.clone();
         let task_result = tokio::task::spawn_blocking(move || -> AppResult<f32> {
-            let img = image::open(&path_buf)
-                .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+            let img = crate::ai::image_util::open_any(&path_buf)
+                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
             let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
             let resized = img.thumbnail(320, 320);
-            let mut buf = Vec::with_capacity(32 * 1024);
-            let mut cursor = std::io::Cursor::new(&mut buf);
-            resized
-                .write_to(&mut cursor, image::ImageFormat::Jpeg)
-                .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+            let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
+                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
             std::fs::write(&cache_path_clone, &buf)?;
             Ok(crate::ai::image_util::laplacian_variance(&resized))
         })
@@ -3772,7 +3769,7 @@ async fn generate_thumbnail_bytes(
     size_px: Option<u32>,
     pool: &sqlx::SqlitePool,
 ) -> AppResult<Vec<u8>> {
-    let size = size_px.unwrap_or(320).clamp(64, 2048);
+    let size = size_px.unwrap_or(480).clamp(64, 2048);
 
     // Load photo row with pairing info.
     let (sha256, is_raw, paired_photo_id): (String, bool, Option<i64>) =
@@ -3834,11 +3831,8 @@ async fn generate_thumbnail_bytes(
             .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
         let resized = img.thumbnail(size, size);
-        let mut buf = Vec::with_capacity(64 * 1024);
-        let mut cursor = std::io::Cursor::new(&mut buf);
-        resized
-            .write_to(&mut cursor, image::ImageFormat::Jpeg)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         Ok(buf)
     })
     .await

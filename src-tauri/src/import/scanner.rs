@@ -122,6 +122,20 @@ pub fn scan_dir(opts: &ScanOptions) -> AppResult<Vec<ScanEntry>> {
         if !ext_set.contains(ext_lower.as_str()) {
             continue;
         }
+        // Skip macOS AppleDouble resource-fork shadow files. When a macOS
+        // folder is synced onto Windows (iCloud for Windows, Time Machine
+        // to NAS, any SMB mount), every `Foo.JPG` gets a sibling
+        // `._Foo.JPG` that stores HFS+ metadata. They look like photos
+        // (same extension, small size) but aren't decodable — importing
+        // them leaves ghost placeholders in the grid.
+        if entry
+            .path()
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.starts_with("._"))
+        {
+            continue;
+        }
         let md = match entry.metadata() {
             Ok(m) => m,
             Err(err) => {
@@ -170,6 +184,26 @@ mod tests {
         let mut exts: Vec<_> = entries.iter().map(|e| e.ext_lowercase.as_str()).collect();
         exts.sort();
         assert_eq!(exts, vec!["arw", "heic", "jpg"]);
+    }
+
+    #[test]
+    fn scan_skips_macos_appledouble_resource_forks() {
+        // macOS creates `._Foo.JPG` sidecars for every `Foo.JPG` when
+        // writing to a non-APFS volume. On Windows they show up as
+        // regular files; they must not be imported as ghost photos.
+        let tmp = TempDir::new().expect("tempdir");
+        touch(tmp.path(), "real.jpg");
+        touch(tmp.path(), "._real.jpg");
+        touch(tmp.path(), "nested/._IMG_0001.HEIC");
+        touch(tmp.path(), "nested/IMG_0001.HEIC");
+
+        let entries = scan_dir(&ScanOptions::new(tmp.path())).expect("scan");
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "got {names:?}");
+        assert!(names.iter().all(|n| !n.starts_with("._")));
     }
 
     #[test]

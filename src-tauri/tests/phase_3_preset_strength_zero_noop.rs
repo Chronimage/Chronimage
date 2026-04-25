@@ -54,7 +54,7 @@ async fn preset_at_strength_one_hundred_is_the_preset() {
     // Sanity pair: blend at 100 must equal the preset's own ops.
     let all = builtin_presets();
     for (name, _group, _desc, ops) in all {
-        let blended = Operations::identity().blend(ops, 100);
+        let blended = Operations::identity().blend(ops.clone(), 100);
         assert!(
             (blended.exposure - ops.exposure).abs() < 1e-6,
             "{name}: exposure mismatch"

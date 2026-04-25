@@ -1,21 +1,46 @@
 import { useState } from 'react';
 import { Icon } from '../../primitives/Icon';
+import { useCullBinSummary } from '../../state/queries';
 
-const FILTERS = [
-  { label: 'All rejects', count: 312 },
-  { label: 'Near-duplicates', count: 184 },
-  { label: 'Out of focus', count: 71 },
-  { label: 'Eyes closed', count: 34 },
-  { label: 'Screenshots', count: 23 },
-];
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+const REASON_LABELS: Record<string, string> = {
+  near_dup: 'Near-duplicates',
+  blur: 'Out of focus',
+  eyes_closed: 'Eyes closed',
+  exposure: 'Over/under exp.',
+  user: 'User rejected',
+  flag: 'Flagged',
+  duplicate: 'Duplicates',
+  other: 'Other',
+};
 
 export function CullBinSidePanel() {
+  const { data: summary } = useCullBinSummary();
   const [activeFilter, setActiveFilter] = useState<string>('All rejects');
+
+  const totalCount = summary?.total_count ?? 0;
+  const totalBytes = summary?.total_bytes ?? 0;
+  const byReason: [string, number][] = summary?.by_reason ?? [];
+
+  const filters = [
+    { label: 'All rejects', count: totalCount },
+    ...byReason.map(([reason, count]) => ({
+      label: REASON_LABELS[reason] ?? reason,
+      count,
+    })),
+  ];
+
   return (
     <div className="sidepanel">
       <div className="head">
         <h3>Cull Bin</h3>
-        <span className="count">312 items</span>
+        <span className="count">{totalCount} items</span>
       </div>
 
       <div style={{ padding: '4px 16px 14px' }}>
@@ -26,7 +51,7 @@ export function CullBinSidePanel() {
           RECLAIMABLE
         </div>
         <div className="display" style={{ fontSize: 40, lineHeight: 1 }}>
-          8.2<span style={{ fontSize: 16 }}>GB</span>
+          {totalBytes > 0 ? formatBytes(totalBytes) : '—'}
         </div>
         <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginTop: 4 }}>
           Originals preserved · metadata intact
@@ -37,7 +62,7 @@ export function CullBinSidePanel() {
         <span>Filter</span>
       </div>
       <div className="list">
-        {FILTERS.map((f) => (
+        {filters.map((f) => (
           <button
             key={f.label}
             type="button"

@@ -192,7 +192,13 @@ export function useCreateSource() {
     mutationFn: ({ name, kind, rootPath }: { name: string; kind: string; rootPath?: string }) =>
       createSource(name, kind, rootPath),
     onSuccess: () => {
+      // Sources panel + anything that pivots on source existence (empty
+      // state, default selected album, rediscovery rows) should reflect
+      // the new source immediately — before its import even starts.
       qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['rediscovery'] });
     },
   });
 }
@@ -212,6 +218,8 @@ export function useDeleteSource() {
       qc.invalidateQueries({ queryKey: ['cleanup'] });
       qc.invalidateQueries({ queryKey: ['imports'] });
       qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['rediscovery'] });
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
     },
   });
 }

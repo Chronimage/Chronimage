@@ -13,8 +13,9 @@
  * disk are recycled if the flag is set.
  */
 
+import { useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { create } from 'zustand';
 import {
   IMPORT_PROGRESS_EVENT,
@@ -189,18 +190,58 @@ export function useActiveImports(): ActiveImport[] {
 
 /**
  * Mount this hook ONCE at the React root (not per-screen). It installs a
- * Tauri event listener that feeds every progress tick into the store.
- * Returns no value; unlisten happens on unmount.
+ * Tauri event listener that feeds every progress tick into the store and
+ * (throttled) invalidates catalog queries so the grid, side panel, and
+ * rediscovery rows update live as the import advances.
+ *
+ * Catalog refresh policy:
+ * - Every ~800 ms while an import is in flight, invalidate `photos` +
+ *   `albums` + `rediscovery`. That's enough to stream new rows into the
+ *   grid without thrashing React Query on every per-photo tick.
+ * - On the moment an import crosses done == total, force an immediate
+ *   invalidation (+ invalidate `face-clusters`, since reeval runs at
+ *   that point too).
  */
 export function useImportProgressListener() {
   const applyProgress = useImportStore((s) => s.applyProgress);
+  const qc = useQueryClient();
+  const lastInvalidateAt = useRef<number>(0);
+
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
+
+    function refreshCatalog() {
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['rediscovery'] });
+    }
+
     (async () => {
       try {
         const u = await listen<ImportProgressEvent>(IMPORT_PROGRESS_EVENT, (evt) => {
+          const prev = useImportStore.getState().active.get(evt.payload.import_id);
+          const wasFinished = prev?.finished ?? false;
           applyProgress(evt.payload);
+
+          const nowFinished = evt.payload.done >= evt.payload.total && evt.payload.total > 0;
+
+          // Throttled live refresh while photos stream in.
+          const now = Date.now();
+          if (now - lastInvalidateAt.current >= 800) {
+            lastInvalidateAt.current = now;
+            refreshCatalog();
+          }
+
+          // On the finish transition, force an immediate refresh +
+          // invalidate cluster/face views (post-import reeval_clusters
+          // runs on the backend at this moment).
+          if (!wasFinished && nowFinished) {
+            lastInvalidateAt.current = now;
+            refreshCatalog();
+            qc.invalidateQueries({ queryKey: ['face-clusters'] });
+            qc.invalidateQueries({ queryKey: ['sources'] });
+          }
         });
         if (cancelled) {
           u();
@@ -215,5 +256,5 @@ export function useImportProgressListener() {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [applyProgress]);
+  }, [applyProgress, qc]);
 }

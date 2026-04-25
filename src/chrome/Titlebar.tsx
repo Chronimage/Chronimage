@@ -4,27 +4,26 @@ import { Icon } from '../primitives/Icon';
 import type { Screen } from '../state/ui';
 
 export interface TitlebarProps {
-  screen: Screen;
-  appName: string;
+  readonly screen: Screen;
+  readonly appName: string;
 }
 
 async function handleMaximize() {
   const win = getCurrentWindow();
   const maximized = await win.isMaximized();
-  if (!maximized) {
-    await win.maximize();
-  } else {
+  if (maximized) {
     await win.unmaximize();
     const monitor = await currentMonitor();
     if (monitor) {
       const { width, height } = monitor.size;
       const scaleFactor = monitor.scaleFactor;
-      // Convert physical pixels → logical, then take 3/4
       const logicalW = Math.round((width / scaleFactor) * 0.75);
       const logicalH = Math.round((height / scaleFactor) * 0.75);
       await win.setSize(new LogicalSize(logicalW, logicalH));
       await win.center();
     }
+  } else {
+    await win.maximize();
   }
 }
 
@@ -43,7 +42,7 @@ export function Titlebar({ screen, appName }: TitlebarProps) {
       </div>
       <div className="crumbs mono">
         <span>Catalog</span>
-        <span className="sep">/</span>
+        <span className="sep">›</span>
         <span style={{ color: 'var(--fg)' }}>{screen.label}</span>
       </div>
       <div className="spacer" data-tauri-drag-region />
