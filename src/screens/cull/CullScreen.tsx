@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
-import { Placeholder } from '../../primitives/Placeholder';
+
 import { Seg } from '../../primitives/Seg';
 import { Thumbnail } from '../../primitives/Thumbnail';
 import { useCull } from '../../state/cull';
@@ -53,8 +53,8 @@ function buildPairs(photos: PhotoRow[]): CullPair[] {
 }
 
 interface CullStageProps {
-  pair: CullPair;
-  photosById: Map<number, PhotoRow>;
+  readonly pair: CullPair;
+  readonly photosById: Map<number, PhotoRow>;
 }
 
 function CullCompare({ pair, photosById }: CullStageProps) {
@@ -119,7 +119,7 @@ function CullCompare({ pair, photosById }: CullStageProps) {
   );
 }
 
-function CullGrid({ photos }: { photos: PhotoRow[] }) {
+function CullGrid({ photos }: { readonly photos: PhotoRow[] }) {
   const sample = photos.slice(0, 18);
   return (
     <div style={{ padding: 20, flex: 1, overflow: 'auto' }}>
@@ -325,8 +325,8 @@ export function CullScreen() {
         recordVerdict('reject_b');
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    globalThis.addEventListener('keydown', onKey);
+    return () => globalThis.removeEventListener('keydown', onKey);
   }, [pair, onPrev, onNext, recordVerdict]);
 
   if (isLoading) {
@@ -356,8 +356,7 @@ export function CullScreen() {
             CULL · NO PAIRS DETECTED
           </div>
           <h1 className="page-title">
-            Nothing to cull
-            <em>.</em>
+            Nothing to cull<em>.</em>
           </h1>
           <p style={{ maxWidth: 540, color: 'var(--fg-dim)', fontSize: 13, lineHeight: 1.5 }}>
             Import more photos or adjust the duplicate-similarity threshold in Settings. The backend cull-pair
@@ -412,7 +411,9 @@ export function CullScreen() {
           const isDone = i < idx * 2;
           return (
             <div key={p.id} className={`thumb ${isActive ? 'active' : ''} ${isDone ? 'done' : ''}`}>
-              <Placeholder
+              <Thumbnail
+                photoId={p.id}
+                sizePx={160}
                 photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
                 showLabel={false}
               />

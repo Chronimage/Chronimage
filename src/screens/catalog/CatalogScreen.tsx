@@ -31,7 +31,7 @@ import type { PhotoRow } from '../../tauri/invoke';
 import { ExportSheet } from '../export/ExportSheet';
 import { CatalogEmptyState } from './CatalogEmptyState';
 import { DuplicatesPanel } from './DuplicatesPanel';
-import { MasonryGrid } from './MasonryGrid';
+import { JustifiedGrid } from './JustifiedGrid';
 
 export interface CatalogScreenProps {
   albumId: string;
@@ -494,13 +494,13 @@ function DetailView({
           <Icon name="export" size={13} /> Export
         </button>
       </div>
-      <div className="detail-stage" style={{ overflowY: 'auto' }}>
+      <div className="detail-stage">
         <div className="detail-hero">
           <div
             style={{
               width: '100%',
+              height: '100%',
               maxWidth: 1000,
-              maxHeight: '100%',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -514,70 +514,74 @@ function DetailView({
             />
           </div>
         </div>
-        <div style={{ padding: '14px 24px 8px' }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 6 }}>
-            <div className="display" style={{ fontSize: 24 }}>
-              {photo.filename}
-              <em>.</em>
+        <div className="detail-scroll">
+          <div style={{ padding: '14px 24px 8px' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 6 }}>
+              <div className="display" style={{ fontSize: 24 }}>
+                {photo.filename}
+                <em>.</em>
+              </div>
+              <span className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
+                {photo.captured_at ? new Date(photo.captured_at).toLocaleDateString() : 'Unknown date'}
+              </span>
             </div>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)' }}>
-              {photo.captured_at ? new Date(photo.captured_at).toLocaleDateString() : 'Unknown date'}
-            </span>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+              {photo.is_raw && <Chip variant="solid">RAW</Chip>}
+              {photo.aesthetic_score != null && (
+                <Chip tone="info">aesthetic {photo.aesthetic_score.toFixed(1)}</Chip>
+              )}
+              {photo.paired_photo_id != null && <Chip>paired</Chip>}
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-            {photo.is_raw && <Chip variant="solid">RAW</Chip>}
-            {photo.aesthetic_score != null && (
-              <Chip tone="info">aesthetic {photo.aesthetic_score.toFixed(1)}</Chip>
-            )}
-            {photo.paired_photo_id != null && <Chip>paired</Chip>}
+          <DetailInspector photo={photo} metaParts={metaParts} exifParts={exifParts} />
+          {/* Filmstrip */}
+          <div
+            style={{
+              display: 'flex',
+              gap: 4,
+              padding: '10px 24px 20px',
+              overflowX: 'auto',
+              scrollbarWidth: 'thin',
+            }}
+          >
+            {allPhotos.map((ph, i) => {
+              const phHue = (ph.id * 31) % 360;
+              const isFocused = ph.id === photo.id;
+              return (
+                <button
+                  type="button"
+                  key={ph.id}
+                  onClick={() => onJumpTo(i)}
+                  style={{
+                    flex: '0 0 auto',
+                    width: 72,
+                    aspectRatio: '3/2',
+                    padding: 0,
+                    border: 'none',
+                    cursor: 'pointer',
+                    outline: isFocused ? '2px solid var(--accent)' : '1px solid var(--stroke)',
+                    outlineOffset: isFocused ? -2 : -1,
+                    opacity: isFocused ? 1 : 0.65,
+                    borderRadius: 2,
+                    overflow: 'hidden',
+                  }}
+                  aria-label={ph.filename}
+                  aria-current={isFocused ? 'true' : undefined}
+                >
+                  <Thumbnail
+                    photoId={ph.id}
+                    sizePx={160}
+                    photo={{ hue: phHue, filename: ph.filename, id: String(ph.id) }}
+                    subtle={false}
+                  />
+                </button>
+              );
+            })}
           </div>
         </div>
-        <DetailInspector photo={photo} metaParts={metaParts} exifParts={exifParts} />
-        {/* Filmstrip */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 4,
-            padding: '10px 24px 20px',
-            overflowX: 'auto',
-            scrollbarWidth: 'thin',
-          }}
-        >
-          {allPhotos.map((ph, i) => {
-            const phHue = (ph.id * 31) % 360;
-            const isFocused = ph.id === photo.id;
-            return (
-              <button
-                type="button"
-                key={ph.id}
-                onClick={() => onJumpTo(i)}
-                style={{
-                  flex: '0 0 auto',
-                  width: 72,
-                  aspectRatio: '3/2',
-                  padding: 0,
-                  border: 'none',
-                  cursor: 'pointer',
-                  outline: isFocused ? '2px solid var(--accent)' : '1px solid var(--stroke)',
-                  outlineOffset: isFocused ? -2 : -1,
-                  opacity: isFocused ? 1 : 0.65,
-                  borderRadius: 2,
-                  overflow: 'hidden',
-                }}
-                aria-label={ph.filename}
-                aria-current={isFocused ? 'true' : undefined}
-              >
-                <Thumbnail
-                  photoId={ph.id}
-                  sizePx={160}
-                  photo={{ hue: phHue, filename: ph.filename, id: String(ph.id) }}
-                  subtle={false}
-                />
-              </button>
-            );
-          })}
-        </div>
+        {/* detail-scroll */}
       </div>
+      {/* detail-stage */}
     </div>
   );
 }
@@ -592,22 +596,9 @@ interface RediscoveryRowProps {
 function RediscoveryRow({ title, photos, selected, onToggle }: RediscoveryRowProps) {
   if (photos.length === 0) return null;
   return (
-    <div style={{ marginBottom: 2 }}>
-      <div
-        className="mono"
-        style={{ fontSize: 10, color: 'var(--fg-mute)', letterSpacing: '0.08em', padding: '10px 18px 4px' }}
-      >
-        {title}
-      </div>
-      <div
-        style={{
-          display: 'flex',
-          gap: 3,
-          padding: '0 18px 10px',
-          overflowX: 'auto',
-          scrollbarWidth: 'none',
-        }}
-      >
+    <div className="catalog-section catalog-rediscovery">
+      <div className="rd-label">{title}</div>
+      <div className="rd-strip">
         {photos.map((p) => {
           const hue = (p.id * 31) % 360;
           return (
@@ -649,9 +640,9 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const gridDensity = useUi((s) => s.tweaks.gridDensity);
   const sortBy = useUi((s) => s.tweaks.sortBy);
   const setTweaks = useUi((s) => s.setTweaks);
-  // Density → masonry min-column-width. compact = denser grid (4+ cols on a
-  // standard laptop), spacious = wider cells (fewer cols).
-  const masonryMinWidth = gridDensity === 'spacious' ? 340 : gridDensity === 'compact' ? 180 : 220;
+  // Density → justified-grid target row height. Compact = shorter rows
+  // (more photos per page), spacious = taller rows (photos look bigger).
+  const rowHeightPx = gridDensity === 'spacious' ? 260 : gridDensity === 'compact' ? 160 : 200;
 
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
 
@@ -904,7 +895,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
           <CatalogEmptyState />
         ) : !searching ? (
           <>
-            <div className="catalog-hero">
+            <div className="catalog-section catalog-hero">
               <div>
                 <div
                   className="mono"
@@ -928,7 +919,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               </div>
             </div>
 
-            <div className="facetbar">
+            <div className="catalog-section facetbar">
               {FACETS.map((f) => (
                 <button type="button" key={f} className="btn" style={{ border: '1px solid var(--stroke)' }}>
                   {f}
@@ -960,28 +951,20 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               selected={selected}
               onToggle={toggle}
             />
-            <MasonryGrid
-              photos={photos}
-              selected={selected}
-              onToggle={toggle}
-              onFocus={openDetail}
-              scrollRef={scrollRef}
-              onEndReached={loadMorePhotos}
-              hasMore={hasNextPage}
-              isFetchingMore={isFetchingNextPage}
-              minColumnWidth={masonryMinWidth}
-            />
-            <div
-              style={{
-                padding: '8px 18px 20px',
-                color: 'var(--fg-mute)',
-                fontSize: 11,
-                fontFamily: 'var(--mono-font)',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-              }}
-            >
+            <div className="catalog-section">
+              <JustifiedGrid
+                photos={photos}
+                selected={selected}
+                onToggle={toggle}
+                onFocus={openDetail}
+                scrollRef={scrollRef}
+                onEndReached={loadMorePhotos}
+                hasMore={hasNextPage}
+                isFetchingMore={isFetchingNextPage}
+                targetRowHeight={rowHeightPx}
+              />
+            </div>
+            <div className="catalog-section catalog-footer">
               <span>Click to select · double-click to open detail</span>
               <span>{gridFooter}</span>
             </div>
@@ -1044,13 +1027,13 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                 ))}
               </div>
             ) : (
-              <MasonryGrid
+              <JustifiedGrid
                 photos={photos}
                 selected={selected}
                 onToggle={toggle}
                 onFocus={openDetail}
                 scrollRef={scrollRef}
-                minColumnWidth={masonryMinWidth}
+                targetRowHeight={rowHeightPx}
               />
             )}
           </div>

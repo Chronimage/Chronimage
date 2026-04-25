@@ -24,6 +24,7 @@ import {
   getDiskInfo,
   getThumbnail,
   IMPORT_PROGRESS_EVENT,
+  importDryRun,
   importGoogleTakeout,
   type LiftPlan,
   type LiftReceipt,
@@ -127,6 +128,23 @@ export function useImports(sourceId?: number) {
   });
 }
 
+/**
+ * Dry-run a folder scan (no writes) and return the count / pairs / per-
+ * extension breakdown. Used by the copy-confirmation dialog to tell the
+ * user how many photos are about to be copied before they hit OK.
+ *
+ * `null` root disables the query so the dialog can mount/unmount without
+ * spurious scans.
+ */
+export function useScanPreview(root: string | null) {
+  return useQuery({
+    queryKey: ['scan_preview', root],
+    queryFn: () => importDryRun(root as string),
+    enabled: root !== null,
+    staleTime: 30_000,
+  });
+}
+
 export function useOnThisDay(limit?: number) {
   return useQuery({
     queryKey: ['on_this_day', limit],
@@ -174,7 +192,13 @@ export function useCreateSource() {
     mutationFn: ({ name, kind, rootPath }: { name: string; kind: string; rootPath?: string }) =>
       createSource(name, kind, rootPath),
     onSuccess: () => {
+      // Sources panel + anything that pivots on source existence (empty
+      // state, default selected album, rediscovery rows) should reflect
+      // the new source immediately — before its import even starts.
       qc.invalidateQueries({ queryKey: ['sources'] });
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['rediscovery'] });
     },
   });
 }
@@ -194,6 +218,8 @@ export function useDeleteSource() {
       qc.invalidateQueries({ queryKey: ['cleanup'] });
       qc.invalidateQueries({ queryKey: ['imports'] });
       qc.invalidateQueries({ queryKey: ['albums'] });
+      qc.invalidateQueries({ queryKey: ['rediscovery'] });
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
     },
   });
 }

@@ -14,11 +14,9 @@ use crate::{
     AppError, AppResult,
 };
 use chrono::Utc;
-use image::ImageFormat;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::{
-    io::Write as _,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -379,12 +377,8 @@ async fn execute_pipeline(
                     let resized = img.thumbnail(320, 320);
 
                     if !cache_path.exists() {
-                        let mut buf = Vec::with_capacity(32 * 1024);
-                        let mut cursor = std::io::Cursor::new(&mut buf);
-                        resized
-                            .write_to(&mut cursor, ImageFormat::Jpeg)
-                            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
-                        cursor.flush()?;
+                        let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
+                            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
                         let _ = std::fs::create_dir_all(&thumbs_dir);
                         std::fs::write(&cache_path, &buf)?;
                     }

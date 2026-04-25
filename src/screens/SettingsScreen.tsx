@@ -19,7 +19,7 @@ import {
   useDefaultCatalogPath,
   useDownloadModels,
 } from '../state/queries';
-import { useCatalogHome, useImportMode } from '../state/settings';
+import { useCatalogHome } from '../state/settings';
 import { useUi } from '../state/ui';
 import { DOWNLOAD_PROGRESS_EVENT, type DownloadProgressEvent } from '../tauri/invoke';
 import { debug } from '../util/log';
@@ -780,7 +780,6 @@ export function SettingsScreen() {
   const preferredChannel = useUi((s) => s.tweaks.preferredChannel);
   const setTweaks = useUi((s) => s.setTweaks);
 
-  const [importMode, setImportMode] = useImportMode();
   const [catalogHome, setCatalogHome] = useCatalogHome();
   const { data: defaultCatalogHome } = useDefaultCatalogPath();
   const effectiveHome = catalogHome ?? defaultCatalogHome ?? null;
@@ -978,40 +977,23 @@ export function SettingsScreen() {
               }}
             >
               <div className="lbl" style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, color: 'var(--fg)' }}>Default import mode</div>
+                <div style={{ fontSize: 13, color: 'var(--fg)' }}>Import mode</div>
                 <div style={{ fontSize: 11, color: 'var(--fg-mute)', marginTop: 2 }}>
-                  What happens to files when you add a new source
+                  Every import copies photos into the catalog. The source-delete option lives on the
+                  folder-picker confirmation dialog so you can decide per folder.
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="settings-import-mode"
-                    value="index_in_place"
-                    checked={importMode === 'index_in_place'}
-                    onChange={() => {
-                      setImportMode('index_in_place').catch((err) =>
-                        debug('settings: setImportMode failed', err),
-                      );
-                    }}
-                  />
-                  <span style={{ fontSize: 12 }}>Index in place</span>
-                </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                  <input
-                    type="radio"
-                    name="settings-import-mode"
-                    value="consolidate"
-                    checked={importMode === 'consolidate'}
-                    onChange={() => {
-                      setImportMode('consolidate').catch((err) =>
-                        debug('settings: setImportMode failed', err),
-                      );
-                    }}
-                  />
-                  <span style={{ fontSize: 12 }}>Consolidate</span>
-                </label>
+              <div
+                className="mono"
+                style={{
+                  fontSize: 11,
+                  color: 'var(--fg-dim)',
+                  padding: '4px 10px',
+                  border: '1px solid var(--stroke)',
+                  borderRadius: 4,
+                }}
+              >
+                copy to catalog
               </div>
             </div>
 

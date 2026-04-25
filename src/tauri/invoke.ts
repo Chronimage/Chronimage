@@ -199,6 +199,17 @@ export async function recycleSourceCopies(photoIds: number[]): Promise<RecycleRe
   return tauriInvoke<RecycleReceipt>('recycle_source_copies', { photoIds });
 }
 
+/**
+ * Post-copy auditable recycle: sends every file under `sourceId` to the
+ * OS trash, but only when another verified copy of the same photo exists
+ * on a different source (i.e. the lift-and-shift catalog write has
+ * completed + SHA-matched). Wired to the "Delete originals from source
+ * after copy" checkbox in `AddSourcePopover`'s confirmation dialog.
+ */
+export async function recycleSourceFilesAfterCopy(sourceId: number): Promise<RecycleReceipt> {
+  return tauriInvoke<RecycleReceipt>('recycle_source_files_after_copy', { sourceId });
+}
+
 // ── Import commands ─────────────────────────────────────────────────────────
 
 export interface StartImportResponse {
@@ -989,18 +1000,17 @@ export async function onedriveAuthStatus(): Promise<boolean> {
 
 // ── Phase 3: Develop (non-destructive edits) ──────────────────────────────────
 
-/** A single channel curve as 5 `[x, y]` control points, sorted by x, in
- * `[0, 1]`. The backend bakes a Catmull-Rom spline through these + two
- * virtual endpoints to produce a 256-entry LUT. */
-export type DevelopCurve = [
-  [number, number],
-  [number, number],
-  [number, number],
-  [number, number],
-  [number, number],
-];
+/** A single channel curve as 2..=16 `[x, y]` control points, sorted by
+ * x, in `[0, 1]`. The backend bakes a monotone cubic Hermite spline
+ * (Fritsch-Carlson) through these to produce a 256-entry LUT. Same
+ * interpolant Lightroom / Capture One use. */
+export type DevelopCurve = Array<[number, number]>;
 
-/** Identity (y = x) curve — the no-op shape. */
+/** Maximum control points per channel — matches the Rust `MAX_CURVE_POINTS`. */
+export const MAX_CURVE_POINTS = 16;
+
+/** Identity (y = x) curve — the no-op shape at five evenly spaced stops
+ *  (blacks / shadows / mids / highlights / whites). */
 export function identityCurve(): DevelopCurve {
   return [
     [0.0, 0.0],

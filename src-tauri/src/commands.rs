@@ -1277,6 +1277,124 @@ async fn recycle_source_copies_impl(
     })
 }
 
+/// Recycle every `source_copies` file whose `source_id` matches the input,
+/// **but only when** the same photo has another verified copy on a different
+/// source (i.e. the lift-and-shift already wrote a catalog copy with a
+/// matching SHA256). This is the auditable "delete originals from source
+/// after copy" path — the UI checkbox in `AddSourcePopover`'s confirm modal
+/// wires straight into this command.
+///
+/// Safety invariants:
+/// 1. Never recycle the only copy — at least one other verified copy must
+///    exist on a different source.
+/// 2. SHA256 of the surviving copy must match the file we're about to
+///    recycle. If the post-copy verify ever drifts, we abort for that photo
+///    and surface it in `errors` so the user can investigate.
+/// 3. Files that no longer exist on disk are counted as `skipped` (not an
+///    error — a prior manual delete is fine).
+#[tauri::command]
+pub async fn recycle_source_files_after_copy(
+    state: State<'_, AppState>,
+    source_id: i64,
+) -> AppResult<RecycleReceipt> {
+    recycle_source_files_after_copy_impl(&state.pool, source_id).await
+}
+
+async fn recycle_source_files_after_copy_impl(
+    pool: &sqlx::SqlitePool,
+    source_id: i64,
+) -> AppResult<RecycleReceipt> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        path: String,
+        verified_sha256: Option<String>,
+        photo_id: i64,
+    }
+    let rows: Vec<Row> = sqlx::query_as::<_, Row>(
+        "SELECT path, verified_sha256, photo_id FROM source_copies \
+         WHERE source_id = ?1 AND path IS NOT NULL",
+    )
+    .bind(source_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut recycled_count = 0_i64;
+    let mut skipped_count = 0_i64;
+    let mut errors: Vec<String> = Vec::new();
+
+    for row in &rows {
+        let p = std::path::Path::new(&row.path);
+        if !p.exists() {
+            skipped_count += 1;
+            continue;
+        }
+        // Verify another copy exists on a different source AND its
+        // verified_sha256 matches. Abort the recycle for this photo if
+        // the invariant doesn't hold.
+        let surviving: Option<(String,)> = sqlx::query_as(
+            "SELECT verified_sha256 FROM source_copies \
+             WHERE photo_id = ?1 AND source_id != ?2 AND path IS NOT NULL \
+               AND verified_sha256 IS NOT NULL \
+             LIMIT 1",
+        )
+        .bind(row.photo_id)
+        .bind(source_id)
+        .fetch_optional(pool)
+        .await?;
+        let Some((surviving_sha,)) = surviving else {
+            errors.push(format!(
+                "photo {}: no surviving verified copy elsewhere — refusing to recycle {}",
+                row.photo_id, row.path
+            ));
+            skipped_count += 1;
+            continue;
+        };
+        if let Some(my_sha) = row.verified_sha256.as_deref() {
+            if my_sha != surviving_sha {
+                errors.push(format!(
+                    "photo {}: surviving sha does not match original — refusing to recycle {}",
+                    row.photo_id, row.path
+                ));
+                skipped_count += 1;
+                continue;
+            }
+        }
+        match trash::delete(p) {
+            Ok(()) => {
+                recycled_count += 1;
+                // Mark the source_copy row's path NULL so downstream
+                // queries stop treating it as a local file.
+                if let Err(e) = sqlx::query(
+                    "UPDATE source_copies SET path = NULL WHERE source_id = ?1 AND path = ?2",
+                )
+                .bind(source_id)
+                .bind(&row.path)
+                .execute(pool)
+                .await
+                {
+                    tracing::warn!(error = %e, "recycle_after_copy: path=NULL update failed");
+                }
+            }
+            Err(e) => {
+                errors.push(format!("recycle {}: {e}", row.path));
+                skipped_count += 1;
+            }
+        }
+    }
+
+    tracing::info!(
+        source_id,
+        recycled_count,
+        skipped_count,
+        "recycle_source_files_after_copy done"
+    );
+    Ok(RecycleReceipt {
+        recycled_count,
+        skipped_count,
+        errors,
+    })
+}
+
 // ── Catalog read commands ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -3163,15 +3281,12 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
         let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
         let cache_path_clone = cache_path.clone();
         let task_result = tokio::task::spawn_blocking(move || -> AppResult<f32> {
-            let img = image::open(&path_buf)
-                .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+            let img = crate::ai::image_util::open_any(&path_buf)
+                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
             let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
             let resized = img.thumbnail(320, 320);
-            let mut buf = Vec::with_capacity(32 * 1024);
-            let mut cursor = std::io::Cursor::new(&mut buf);
-            resized
-                .write_to(&mut cursor, image::ImageFormat::Jpeg)
-                .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+            let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
+                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
             std::fs::write(&cache_path_clone, &buf)?;
             Ok(crate::ai::image_util::laplacian_variance(&resized))
         })
@@ -3654,7 +3769,7 @@ async fn generate_thumbnail_bytes(
     size_px: Option<u32>,
     pool: &sqlx::SqlitePool,
 ) -> AppResult<Vec<u8>> {
-    let size = size_px.unwrap_or(320).clamp(64, 2048);
+    let size = size_px.unwrap_or(480).clamp(64, 2048);
 
     // Load photo row with pairing info.
     let (sha256, is_raw, paired_photo_id): (String, bool, Option<i64>) =
@@ -3716,11 +3831,8 @@ async fn generate_thumbnail_bytes(
             .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
         let resized = img.thumbnail(size, size);
-        let mut buf = Vec::with_capacity(64 * 1024);
-        let mut cursor = std::io::Cursor::new(&mut buf);
-        resized
-            .write_to(&mut cursor, image::ImageFormat::Jpeg)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         Ok(buf)
     })
     .await

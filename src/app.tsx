@@ -20,15 +20,20 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
 });
 
+// `useImportProgressListener` depends on `useQueryClient()` to invalidate
+// catalog queries live as an import streams in. Split into its own component
+// so it mounts inside the `<QueryClientProvider>` tree instead of the App
+// body (where the provider isn't in scope yet).
+function ImportProgressBridge() {
+  useImportProgressListener();
+  return null;
+}
+
 export function App() {
   const screen = useUi((s) => s.screen);
   const setScreen = useUi((s) => s.setScreen);
   const tweaks = useUi((s) => s.tweaks);
   const hydrateFromStore = useUi((s) => s.hydrateFromStore);
-
-  // Subscribe once at the root to IMPORT_PROGRESS_EVENT so every screen can
-  // read the global import store without re-mounting the listener.
-  useImportProgressListener();
 
   // Phase 4 §6 — `?` anywhere opens the keyboard shortcut overlay.
   const [shortcutOpen, , closeShortcutOverlay] = useShortcutOverlay();
@@ -90,6 +95,7 @@ export function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
+      <ImportProgressBridge />
       <div
         className="app compact"
         data-theme={tweaks.theme}

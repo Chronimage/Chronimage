@@ -2,16 +2,16 @@ import { Icon } from '../../primitives/Icon';
 import { useCull } from '../../state/cull';
 
 export interface CullSidePanelProps {
-  total: number;
+  readonly total: number;
 }
 
-const ISSUE_FILTERS: { label: string; count: number }[] = [
-  { label: 'Near-duplicates', count: 184 },
-  { label: 'Out of focus', count: 213 },
-  { label: 'Eyes closed', count: 94 },
-  { label: 'Over/under exp.', count: 71 },
-  { label: 'Screenshots', count: 28 },
-  { label: 'Low-res / web', count: 41 },
+const ISSUE_FILTERS: { label: string }[] = [
+  { label: 'Near-duplicates' },
+  { label: 'Out of focus' },
+  { label: 'Eyes closed' },
+  { label: 'Over/under exp.' },
+  { label: 'Screenshots' },
+  { label: 'Low-res / web' },
 ];
 
 export function CullSidePanel({ total }: CullSidePanelProps) {
@@ -100,7 +100,7 @@ export function CullSidePanel({ total }: CullSidePanelProps) {
               <Icon name="flag" size={14} />
             </span>
             <span>{f.label}</span>
-            <span className="n">{f.count}</span>
+            <span className="n">—</span>
           </button>
         ))}
       </div>
