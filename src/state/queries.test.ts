@@ -8,6 +8,10 @@ import {
   useCleanupExecute,
   useCreateSource,
   useDetectIcloudPath,
+  useDevelopCopyEdits,
+  useDevelopPasteEdits,
+  useDevelopPresetApply,
+  useDevelopReset,
   useDuplicates,
   useFirstTimeOnNewCamera,
   useImportGoogleTakeout,
@@ -220,5 +224,54 @@ describe('catalog query hooks', () => {
   it('useThumbnailUrl is disabled when photoId is null', () => {
     const { result } = renderHook(() => useThumbnailUrl(null), { wrapper });
     expect(result.current.fetchStatus).toBe('idle');
+  });
+
+  it('useDevelopReset mutation resolves with reset count', async () => {
+    const { result } = renderHook(() => useDevelopReset(), { wrapper });
+    await act(async () => {
+      const n = await result.current.mutateAsync(1);
+      expect(n).toBe(0);
+    });
+  });
+
+  it('useDevelopCopyEdits mutation resolves with operations object', async () => {
+    const { result } = renderHook(() => useDevelopCopyEdits(), { wrapper });
+    await act(async () => {
+      const ops = await result.current.mutateAsync(1);
+      expect(ops).toMatchObject({ exposure: 0 });
+    });
+  });
+
+  it('useDevelopPasteEdits mutation resolves with pasted count', async () => {
+    const { result } = renderHook(() => useDevelopPasteEdits(), { wrapper });
+    await act(async () => {
+      const receipt = await result.current.mutateAsync({
+        photoIds: [1, 2],
+        operations: {
+          exposure: 0,
+          contrast: 0,
+          highlights: 0,
+          shadows: 0,
+          whites: 0,
+          blacks: 0,
+          temp: 0,
+          tint: 0,
+          vibrance: 0,
+          saturation: 0,
+          clarity: 0,
+          dehaze: 0,
+          curves: { rgb: [], r: [], g: [], b: [], l: [] },
+        },
+      });
+      expect(receipt).toMatchObject({ pasted_photo_count: 1 });
+    });
+  });
+
+  it('useDevelopPresetApply mutation resolves with render receipt', async () => {
+    const { result } = renderHook(() => useDevelopPresetApply(), { wrapper });
+    await act(async () => {
+      const receipt = await result.current.mutateAsync({ photoId: 1, presetId: 3, strength: 50 });
+      expect(receipt).toMatchObject({ elapsed_ms: 0 });
+    });
   });
 });
