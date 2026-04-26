@@ -65,6 +65,7 @@ import {
   unflaggedFavorites,
   unseenPhotos,
 } from '../tauri/invoke';
+import { useSourceDeleteStore } from './sourceDelete';
 
 export type {
   AlbumRow,
@@ -189,8 +190,17 @@ export function useRefreshSmartAlbums() {
 export function useCreateSource() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ name, kind, rootPath }: { name: string; kind: string; rootPath?: string }) =>
-      createSource(name, kind, rootPath),
+    mutationFn: ({
+      name,
+      kind,
+      rootPath,
+      absorbOverlappingChildren,
+    }: {
+      name: string;
+      kind: string;
+      rootPath?: string;
+      absorbOverlappingChildren?: boolean;
+    }) => createSource(name, kind, rootPath, absorbOverlappingChildren),
     onSuccess: () => {
       // Sources panel + anything that pivots on source existence (empty
       // state, default selected album, rediscovery rows) should reflect
@@ -205,14 +215,25 @@ export function useCreateSource() {
 
 export function useDeleteSource() {
   const qc = useQueryClient();
+  const registerDelete = useSourceDeleteStore((s) => s.register);
   return useMutation<
     RemoveReceipt,
     Error,
-    { sourceId: number; recycleFiles?: boolean; removeOrphanPhotos?: boolean }
+    {
+      sourceId: number;
+      sourceName?: string;
+    }
   >({
-    mutationFn: ({ sourceId, recycleFiles, removeOrphanPhotos }) =>
-      deleteSource(sourceId, { recycleFiles, removeOrphanPhotos }),
+    mutationFn: ({ sourceId }) => deleteSource(sourceId),
+    onMutate: ({ sourceId, sourceName }) => {
+      // Surface the disconnect card immediately so the user sees activity
+      // even if the first backend `collecting` event lands a moment later.
+      registerDelete(sourceId, sourceName ?? `Source ${sourceId}`);
+    },
     onSuccess: () => {
+      // The progress listener already invalidates these on `committed`
+      // and `done`. We re-fire on success as a safety net for the case
+      // where the event listener is unmounted (e.g. error in Tauri bridge).
       qc.invalidateQueries({ queryKey: ['sources'] });
       qc.invalidateQueries({ queryKey: ['photos'] });
       qc.invalidateQueries({ queryKey: ['cleanup'] });

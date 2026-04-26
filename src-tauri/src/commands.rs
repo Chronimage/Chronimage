@@ -757,30 +757,251 @@ async fn query_imports(
 
 // ── Source management commands ────────────────────────────────────────────
 
+/// Normalise a filesystem root for prefix-based overlap comparison.
+///
+/// - Replaces `\` with `/` so Windows and Unix-style separators compare equal.
+/// - Lowercases on Windows (its filesystem is case-insensitive — `C:/Photos`
+///   and `c:/photos` must collide).
+/// - Strips trailing `/` so `C:/Photos` and `C:/Photos/` compare equal.
+fn normalise_source_root(s: &str) -> String {
+    let mut out = s.replace('\\', "/");
+    while out.ends_with('/') && out.len() > 1 {
+        out.pop();
+    }
+    #[cfg(windows)]
+    {
+        out = out.to_ascii_lowercase();
+    }
+    out
+}
+
+/// True if `parent` is `child` itself or an ancestor of `child` once both
+/// strings are normalised. Trailing-slash boundary check prevents
+/// `"C:/PhotosArchive"` from being treated as a child of `"C:/Photos"`.
+fn path_contains_path(parent: &str, child: &str) -> bool {
+    if parent == child {
+        return true;
+    }
+    let prefix = format!("{parent}/");
+    child.starts_with(&prefix)
+}
+
+/// One row of overlap data shared with the frontend so it can render
+/// confirmation UI ("the new source will absorb these existing ones").
+#[derive(Debug, Clone, Serialize)]
+pub struct OverlappingSource {
+    pub id: i64,
+    pub name: String,
+    pub root: String,
+    /// True if this is the internal "Chronimage Local" managed catalog
+    /// source. Managed sources are never absorbable — they're app-managed
+    /// storage, not user-imported albums.
+    pub managed: bool,
+}
+
+/// Structured outcome of comparing a requested root against every existing
+/// source root. Three buckets:
+///   - `blocking_parent` — an existing source contains (or equals) the
+///     requested root. Always a hard reject; no clean absorb direction.
+///   - `blocking_managed` — managed catalog source overlaps in either
+///     direction. Always a hard reject (can't fold the catalog into a user
+///     source, can't add a subdir of the catalog as an external album).
+///   - `absorbable_children` — non-managed sources that sit inside the
+///     requested root. These can be merged into the new parent in one
+///     transaction (their `source_copies` and `imports` rows reattribute
+///     to the new source_id, then the child source rows are deleted).
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceOverlapInfo {
+    pub blocking_parent: Option<OverlappingSource>,
+    pub blocking_managed: Vec<OverlappingSource>,
+    pub absorbable_children: Vec<OverlappingSource>,
+}
+
+async fn compute_source_overlap(
+    pool: &sqlx::SqlitePool,
+    requested_root: &str,
+) -> AppResult<SourceOverlapInfo> {
+    let normalised_requested = normalise_source_root(requested_root);
+
+    // (id, name, root, managed_flag)
+    let existing: Vec<(i64, String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT id, name,
+                json_extract(config_json, '$.root')    AS root,
+                json_extract(config_json, '$.managed') AS managed
+         FROM sources
+         WHERE json_extract(config_json, '$.root') IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut info = SourceOverlapInfo {
+        blocking_parent: None,
+        blocking_managed: Vec::new(),
+        absorbable_children: Vec::new(),
+    };
+
+    for (id, name, root, managed) in existing {
+        let Some(root) = root else { continue };
+        let managed = managed.unwrap_or(0) != 0;
+        let normalised_existing = normalise_source_root(&root);
+        let new_inside_existing = path_contains_path(&normalised_existing, &normalised_requested);
+        let existing_inside_new = path_contains_path(&normalised_requested, &normalised_existing);
+        if !new_inside_existing && !existing_inside_new {
+            continue;
+        }
+        let row = OverlappingSource {
+            id,
+            name,
+            root,
+            managed,
+        };
+        if managed {
+            // Managed catalog source — overlap in either direction is a
+            // hard reject. Never absorb it.
+            info.blocking_managed.push(row);
+        } else if new_inside_existing {
+            // Existing source contains us (incl. equal). No clean absorb.
+            info.blocking_parent = Some(row);
+        } else {
+            // We contain the existing source — absorbable.
+            info.absorbable_children.push(row);
+        }
+    }
+
+    Ok(info)
+}
+
+/// Inspect overlap between a candidate source root and all existing sources.
+/// Frontend calls this before `create_source` to decide whether to prompt
+/// the user about absorbing an inner source into a new parent.
+#[tauri::command]
+pub async fn check_source_overlap(
+    state: State<'_, AppState>,
+    root_path: String,
+) -> AppResult<SourceOverlapInfo> {
+    compute_source_overlap(&state.pool, &root_path).await
+}
+
 /// Create a new source row and return it with a zeroed photo_count.
+///
+/// `absorb_overlapping_children = true` opts into folding any non-managed
+/// sources whose root is inside `root_path` into the new source. Their
+/// `source_copies` rows reattribute to the new source_id and their source
+/// rows are deleted, all in the same transaction as the insert. The
+/// frontend should only set this after surfacing the affected sources to
+/// the user — this function will not silently absorb if the caller didn't
+/// opt in (it returns InvalidInput naming the children).
 #[tauri::command]
 pub async fn create_source(
     state: State<'_, AppState>,
     name: String,
     kind: String,
     root_path: Option<String>,
+    absorb_overlapping_children: Option<bool>,
 ) -> AppResult<SourceRow> {
+    create_source_impl(
+        &state.pool,
+        &name,
+        &kind,
+        root_path.as_deref(),
+        absorb_overlapping_children.unwrap_or(false),
+    )
+    .await
+}
+
+async fn create_source_impl(
+    pool: &sqlx::SqlitePool,
+    name: &str,
+    kind: &str,
+    root_path: Option<&str>,
+    absorb: bool,
+) -> AppResult<SourceRow> {
+    let overlap = match root_path {
+        Some(root) => Some(compute_source_overlap(pool, root).await?),
+        None => None,
+    };
+
+    if let Some(overlap) = &overlap {
+        if let Some(blocker) = &overlap.blocking_parent {
+            return Err(AppError::InvalidInput(format!(
+                "{} is inside existing source '{}' (id {}, root {}). Remove that source first if you want to re-add it under a different scope.",
+                root_path.unwrap_or(""),
+                blocker.name,
+                blocker.id,
+                blocker.root,
+            )));
+        }
+        if let Some(blocker) = overlap.blocking_managed.first() {
+            return Err(AppError::InvalidInput(format!(
+                "{} overlaps the catalog folder ('{}', root {}). Pick a folder outside the catalog.",
+                root_path.unwrap_or(""),
+                blocker.name,
+                blocker.root,
+            )));
+        }
+        if !overlap.absorbable_children.is_empty() && !absorb {
+            let names: Vec<String> = overlap
+                .absorbable_children
+                .iter()
+                .map(|s| format!("'{}'", s.name))
+                .collect();
+            return Err(AppError::InvalidInput(format!(
+                "this folder contains {} existing source(s): {}. Confirm absorption before retrying.",
+                overlap.absorbable_children.len(),
+                names.join(", "),
+            )));
+        }
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
-    let config = match &root_path {
+    let config = match root_path {
         Some(p) => serde_json::json!({ "root": p }).to_string(),
         None => "{}".to_string(),
     };
+
+    let mut tx = pool.begin().await?;
 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO sources (name, kind, status, config_json, created_at) \
          VALUES (?1, ?2, 'idle', ?3, ?4) RETURNING id",
     )
-    .bind(&name)
-    .bind(&kind)
+    .bind(name)
+    .bind(kind)
     .bind(&config)
     .bind(&now)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    // Absorb any inner sources: reattribute their source_copies + imports
+    // to the new parent, then drop the now-empty child source rows. All
+    // happens in the same transaction as the parent insert so a partial
+    // absorb is impossible.
+    if let Some(overlap) = overlap.as_ref() {
+        for child in &overlap.absorbable_children {
+            sqlx::query("UPDATE source_copies SET source_id = ?1 WHERE source_id = ?2")
+                .bind(id)
+                .bind(child.id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE imports SET source_id = ?1 WHERE source_id = ?2")
+                .bind(id)
+                .bind(child.id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM sources WHERE id = ?1")
+                .bind(child.id)
+                .execute(&mut *tx)
+                .await?;
+            tracing::info!(
+                absorbed_source_id = child.id,
+                absorbed_name = %child.name,
+                new_source_id = id,
+                "absorbed overlapping source into new parent"
+            );
+        }
+    }
+
+    tx.commit().await?;
 
     let row = sqlx::query_as::<_, SourceRow>(
         "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at, \
@@ -789,7 +1010,7 @@ pub async fn create_source(
          WHERE s.id = ?1 GROUP BY s.id",
     )
     .bind(id)
-    .fetch_one(&state.pool)
+    .fetch_one(pool)
     .await?;
 
     tracing::info!(source_id = id, kind, "source created");
@@ -858,15 +1079,20 @@ async fn source_deletion_preview_impl(
     .fetch_one(pool)
     .await?;
 
-    // Orphans: photos whose ONLY source_copy is this source.
+    // Orphans: photos whose only remaining non-managed source is this one.
+    // The managed catalog source ("Chronimage Local") is the storage backend
+    // for consolidation — disconnecting an album means the photo leaves the
+    // catalog even though the bytes happen to live under the catalog folder.
     let orphan_photos: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM (
-           SELECT photo_id FROM source_copies WHERE source_id = ?1
-           GROUP BY photo_id
-           HAVING COUNT(*) = (
-             SELECT COUNT(*) FROM source_copies sc2 WHERE sc2.photo_id = source_copies.photo_id
-           )
-         )",
+        "SELECT COUNT(DISTINCT sc.photo_id) FROM source_copies sc
+         WHERE sc.source_id = ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM source_copies sc2
+             JOIN sources s2 ON s2.id = sc2.source_id
+             WHERE sc2.photo_id = sc.photo_id
+               AND sc2.source_id != ?1
+               AND COALESCE(json_extract(s2.config_json, '$.managed'), 0) = 0
+           )",
     )
     .bind(source_id)
     .fetch_one(pool)
@@ -881,7 +1107,10 @@ async fn source_deletion_preview_impl(
            AND sc.path IS NOT NULL
            AND NOT EXISTS (
              SELECT 1 FROM source_copies sc2
-             WHERE sc2.photo_id = sc.photo_id AND sc2.source_id != ?1
+             JOIN sources s2 ON s2.id = sc2.source_id
+             WHERE sc2.photo_id = sc.photo_id
+               AND sc2.source_id != ?1
+               AND COALESCE(json_extract(s2.config_json, '$.managed'), 0) = 0
            )",
     )
     .bind(source_id)
@@ -902,65 +1131,129 @@ async fn source_deletion_preview_impl(
     })
 }
 
-/// Disconnect a source, cascade orphan-photo cleanup, and optionally recycle
-/// the orphan files on disk.
+/// Disconnect a source: remove every photo whose only album-of-origin was
+/// this source, send both their original-source files AND their catalog
+/// copies to the Recycle Bin, and clean up the thumbnail cache.
 ///
-/// Runs in a single transaction so the catalog is never partially-updated on
-/// error. Orphan photos (no remaining `source_copies` after this source's
-/// `source_copies` are deleted) are removed; `ON DELETE CASCADE` cleans up
-/// tags, faces, embeddings, views. The sqlite-vec virtual tables do NOT
-/// participate in FK cascade, so we delete from them explicitly by rowid.
+/// Mental model: a source is an identifier for an imported album. When the
+/// album is disconnected, every photo that belonged to it leaves the
+/// catalog — including the consolidated copy under the catalog folder. The
+/// only photos kept are those that ALSO came from another (non-managed)
+/// source, in which case they stay attached to that other album.
 ///
-/// `recycle_files` = true routes orphan local paths through the Windows
-/// Recycle Bin via the `trash` crate. File deletion is best-effort and
-/// happens OUTSIDE the DB transaction so a trash failure does not roll back
-/// the catalog update.
+/// Runs the DB mutation in a single transaction so the catalog is never
+/// partially-updated on error. `ON DELETE CASCADE` cleans up tags, faces,
+/// embeddings, views; sqlite-vec virtual tables don't participate in FK
+/// cascade so we delete from them explicitly by rowid.
+///
+/// Recycle-bin and thumbnail-cache cleanup happen OUTSIDE the transaction
+/// so a `trash::delete` failure can't roll back the catalog update.
+///
+/// Event channel for source-disconnect progress.
+pub const SOURCE_DELETE_PROGRESS_EVENT: &str = "chronimage://source-delete-progress";
+
+/// Phase markers emitted on `SOURCE_DELETE_PROGRESS_EVENT`. The frontend uses
+/// `committed` as the trigger to invalidate `photos`-keyed queries (DB rows
+/// for orphan photos are gone at that point) and `done` to clear the active
+/// progress card.
+#[derive(Debug, Clone, Serialize)]
+pub struct SourceDeleteProgress {
+    pub source_id: i64,
+    /// "collecting" | "deleting" | "committed" | "thumb_cleanup" | "recycling" | "done"
+    pub phase: &'static str,
+    pub total: i64,
+    pub done: i64,
+}
+
+type SourceDeleteCallback = std::sync::Arc<dyn Fn(SourceDeleteProgress) + Send + Sync>;
+
+#[cfg(test)]
+fn noop_source_delete_callback() -> SourceDeleteCallback {
+    std::sync::Arc::new(|_| {})
+}
+
 #[tauri::command]
-pub async fn delete_source(
+pub async fn delete_source<R: tauri::Runtime>(
     state: State<'_, AppState>,
+    app_handle: tauri::AppHandle<R>,
     source_id: i64,
-    recycle_files: bool,
-    remove_orphan_photos: bool,
 ) -> AppResult<RemoveReceipt> {
-    delete_source_impl(&state.pool, source_id, recycle_files, remove_orphan_photos).await
+    use tauri::Emitter;
+    let on_progress: SourceDeleteCallback = std::sync::Arc::new(move |p: SourceDeleteProgress| {
+        let _ = app_handle.emit(SOURCE_DELETE_PROGRESS_EVENT, &p);
+    });
+    delete_source_impl(&state.pool, source_id, &on_progress).await
 }
 
 async fn delete_source_impl(
     pool: &sqlx::SqlitePool,
     source_id: i64,
-    recycle_files: bool,
-    remove_orphan_photos: bool,
+    on_progress: &SourceDeleteCallback,
 ) -> AppResult<RemoveReceipt> {
-    // Collect orphan paths BEFORE we mutate, so we can recycle them after.
-    let orphan_paths: Vec<String> = if recycle_files {
-        sqlx::query_scalar::<_, String>(
-            "SELECT sc.path FROM source_copies sc
-             WHERE sc.source_id = ?1
-               AND sc.path IS NOT NULL
-               AND NOT EXISTS (
-                 SELECT 1 FROM source_copies sc2
-                 WHERE sc2.photo_id = sc.photo_id AND sc2.source_id != ?1
-               )",
-        )
-        .bind(source_id)
-        .fetch_all(pool)
-        .await?
-    } else {
-        Vec::new()
+    let emit = |phase: &'static str, done: i64, total: i64| {
+        on_progress(SourceDeleteProgress {
+            source_id,
+            phase,
+            done,
+            total,
+        });
     };
+
+    emit("collecting", 0, 0);
+    // Collect orphan original-source paths BEFORE we mutate, so we can
+    // recycle them after. "Orphan" here ignores the managed catalog source —
+    // a photo whose only remaining non-managed source is this one is gone
+    // from the catalog regardless of where the consolidated bytes live.
+    let orphan_paths: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT sc.path FROM source_copies sc
+         WHERE sc.source_id = ?1
+           AND sc.path IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM source_copies sc2
+             JOIN sources s2 ON s2.id = sc2.source_id
+             WHERE sc2.photo_id = sc.photo_id
+               AND sc2.source_id != ?1
+               AND COALESCE(json_extract(s2.config_json, '$.managed'), 0) = 0
+           )",
+    )
+    .bind(source_id)
+    .fetch_all(pool)
+    .await?;
 
     // Collect orphan photo ids + sha256 so we can nuke their thumb-cache files
     // and sqlite-vec rowids after the transaction commits.
-    let orphan_meta: Vec<(i64, String)> = if remove_orphan_photos {
-        sqlx::query_as::<_, (i64, String)>(
-            "SELECT p.id, p.sha256
-             FROM photos p
-             WHERE EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id AND sc.source_id = ?1)
-               AND NOT EXISTS (
-                 SELECT 1 FROM source_copies sc2 WHERE sc2.photo_id = p.id AND sc2.source_id != ?1
-               )",
-        )
-        .bind(source_id)
+    let orphan_meta: Vec<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
+        "SELECT p.id, p.sha256
+         FROM photos p
+         WHERE EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id AND sc.source_id = ?1)
+           AND NOT EXISTS (
+             SELECT 1 FROM source_copies sc2
+             JOIN sources s2 ON s2.id = sc2.source_id
+             WHERE sc2.photo_id = p.id
+               AND sc2.source_id != ?1
+               AND COALESCE(json_extract(s2.config_json, '$.managed'), 0) = 0
+           )",
+    )
+    .bind(source_id)
+    .fetch_all(pool)
+    .await?;
+
+    // Collect catalog-copy paths for orphan photos so we can recycle them
+    // after the DB transaction commits. App-managed storage; cleaning these
+    // up keeps the catalog folder from leaking files every disconnect.
+    let catalog_copy_paths: Vec<String> = if !orphan_meta.is_empty() {
+        let id_list = orphan_meta
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        sqlx::query_scalar::<_, String>(&format!(
+            "SELECT sc.path FROM source_copies sc
+             JOIN sources s ON s.id = sc.source_id
+             WHERE sc.photo_id IN ({id_list})
+               AND sc.path IS NOT NULL
+               AND COALESCE(json_extract(s.config_json, '$.managed'), 0) = 1"
+        ))
         .fetch_all(pool)
         .await?
     } else {
@@ -983,8 +1276,14 @@ async fn delete_source_impl(
         .await?;
 
     let mut removed_photos = 0_i64;
-    if remove_orphan_photos {
-        for (pid, _sha) in &orphan_meta {
+    let orphan_total = orphan_meta.len() as i64;
+    if !orphan_meta.is_empty() {
+        emit("deleting", 0, orphan_total);
+        // Per-orphan progress is throttled — emitting every iteration on a
+        // 10k-photo album would spam the event bus and stall the UI thread.
+        // Emit at most every 64 photos plus the final tick.
+        let progress_step = (orphan_total / 64).max(1) as usize;
+        for (i, (pid, _sha)) in orphan_meta.iter().enumerate() {
             // Issue contentless FTS5 delete command with the CURRENT row state
             // (filename + concatenated tags). Must run before the photo row
             // and its tags are gone, so we have the values to pass.
@@ -1006,54 +1305,106 @@ async fn delete_source_impl(
                 .bind(pid)
                 .execute(&mut *tx)
                 .await;
+            if (i + 1) % progress_step == 0 {
+                emit("deleting", (i + 1) as i64, orphan_total);
+            }
         }
-        // Delete photos rows — FK cascade handles tags, faces, embeddings, views, source_copies.
-        let res = sqlx::query(
-            "DELETE FROM photos
-             WHERE id IN (SELECT id FROM photos p
-                          WHERE NOT EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id))",
-        )
-        .execute(&mut *tx)
-        .await?;
+        // Delete photo rows by id from `orphan_meta`. FK cascade cleans up
+        // tags, faces, embeddings, views, and any remaining source_copies
+        // rows — including the managed catalog row, which is intentionally
+        // not removed by the up-front `DELETE FROM source_copies WHERE
+        // source_id = ?1` (that only touched the disconnected source).
+        let id_list = orphan_meta
+            .iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let res = sqlx::query(&format!("DELETE FROM photos WHERE id IN ({id_list})"))
+            .execute(&mut *tx)
+            .await?;
         removed_photos = res.rows_affected() as i64;
     }
 
     tx.commit().await?;
 
+    // The DB is now consistent — this is the trigger the frontend uses to
+    // invalidate `photos`-keyed queries so the grid empties immediately,
+    // even if thumb cleanup + recycle-bin work below takes longer.
+    emit("committed", removed_photos, orphan_total);
+
     // Best-effort post-commit cleanup (cache files + recycle bin).
     let mut errors: Vec<String> = Vec::new();
     let mut removed_thumbnails = 0_i64;
-    if remove_orphan_photos {
+    if !orphan_meta.is_empty() {
+        emit("thumb_cleanup", 0, orphan_total);
         if let Ok(thumbs_dir) = crate::util::paths::thumbnails_dir() {
-            for (_pid, sha) in &orphan_meta {
-                let cache_path = thumbs_dir.join(format!("{sha}_320.jpg"));
-                if cache_path.exists() {
-                    match std::fs::remove_file(&cache_path) {
-                        Ok(()) => removed_thumbnails += 1,
-                        Err(e) => errors.push(format!("thumb-cache {}: {e}", cache_path.display())),
+            // Cache layout is `{sha256}_{size}.jpg` (image_util::legacy_thumbnail_cache_path).
+            // We don't know which sizes were generated, so scan the dir once and
+            // drop every variant whose prefix matches an orphan sha. Single pass
+            // beats repeated file-exists probes per (sha, size) combination.
+            let orphan_shas: std::collections::HashSet<&str> =
+                orphan_meta.iter().map(|(_, s)| s.as_str()).collect();
+            match std::fs::read_dir(&thumbs_dir) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let Some(name) = name.to_str() else { continue };
+                        let Some(stripped) = name.strip_suffix(".jpg") else {
+                            continue;
+                        };
+                        let Some((sha, _size)) = stripped.rsplit_once('_') else {
+                            continue;
+                        };
+                        if !orphan_shas.contains(sha) {
+                            continue;
+                        }
+                        let path = entry.path();
+                        match std::fs::remove_file(&path) {
+                            Ok(()) => removed_thumbnails += 1,
+                            Err(e) => errors.push(format!("thumb-cache {}: {e}", path.display())),
+                        }
                     }
                 }
+                Err(e) => errors.push(format!(
+                    "thumb-cache read_dir {}: {e}",
+                    thumbs_dir.display()
+                )),
+            }
+        }
+        emit("thumb_cleanup", removed_thumbnails, orphan_total);
+    }
+
+    // Recycle every physical file tied to an orphan photo: the original
+    // album path AND the consolidated catalog copy. Disconnect = the photo
+    // leaves the catalog completely, including its bytes on disk.
+    let mut recycle_targets: Vec<&str> = catalog_copy_paths.iter().map(String::as_str).collect();
+    recycle_targets.extend(orphan_paths.iter().map(String::as_str));
+
+    if !recycle_targets.is_empty() {
+        let recycle_total = recycle_targets.len() as i64;
+        emit("recycling", 0, recycle_total);
+        let recycle_step = (recycle_total / 64).max(1) as usize;
+        for (i, path) in recycle_targets.iter().enumerate() {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                if let Err(e) = trash::delete(p) {
+                    errors.push(format!("recycle {path}: {e}"));
+                }
+            }
+            if (i + 1) % recycle_step == 0 {
+                emit("recycling", (i + 1) as i64, recycle_total);
             }
         }
     }
 
-    if recycle_files {
-        for path in &orphan_paths {
-            let p = std::path::Path::new(path);
-            if !p.exists() {
-                continue;
-            }
-            if let Err(e) = trash::delete(p) {
-                errors.push(format!("recycle {path}: {e}"));
-            }
-        }
-    }
+    emit("done", removed_photos, orphan_total);
 
     tracing::info!(
         source_id,
         removed_photos,
         removed_thumbnails,
-        recycled_files = orphan_paths.len(),
+        recycled_originals = orphan_paths.len(),
+        recycled_catalog_copies = catalog_copy_paths.len(),
         "source deleted"
     );
 
@@ -1586,7 +1937,12 @@ pub struct SourceRow {
     pub photo_count: i64,
 }
 
-/// List sources with derived photo count (distinct photos via source_copies).
+/// List user-visible sources with derived photo count.
+///
+/// Hides the internal "Chronimage Local" managed source — that row exists
+/// only to track where lift-and-shift wrote the catalog copies, not as an
+/// album the user thinks of. Marker is `config_json.managed = true` (set by
+/// `lift_and_shift::ensure_chronimage_local_source`).
 #[tauri::command]
 pub async fn list_sources(state: State<'_, AppState>) -> AppResult<Vec<SourceRow>> {
     let rows = sqlx::query_as::<_, SourceRow>(
@@ -1594,6 +1950,7 @@ pub async fn list_sources(state: State<'_, AppState>) -> AppResult<Vec<SourceRow
          COUNT(DISTINCT sc.photo_id) AS photo_count \
          FROM sources s \
          LEFT JOIN source_copies sc ON sc.source_id = s.id \
+         WHERE COALESCE(json_extract(s.config_json, '$.managed'), 0) = 0 \
          GROUP BY s.id ORDER BY s.id",
     )
     .fetch_all(&state.pool)
@@ -3256,7 +3613,7 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
     let mut failed = 0_i64;
 
     for (photo_id, sha, orientation) in &rows {
-        let cache_path = thumbs_dir.join(format!("{sha}_320.jpg"));
+        let cache_path = crate::ai::image_util::legacy_thumbnail_cache_path(&thumbs_dir, sha, 320);
         let _ = std::fs::remove_file(&cache_path);
 
         // Resolve any local path for this photo (prefer is_primary DESC).
@@ -3278,7 +3635,21 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
             continue;
         }
 
-        let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
+        let stored_orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
+        let metadata_orientation_u32 = crate::ai::image_util::effective_orientation_for_path(
+            &path_buf,
+            stored_orientation_u32,
+        );
+        let orientation_u32 =
+            crate::ai::image_util::orientation_for_decoded_path(&path_buf, stored_orientation_u32);
+        let recovered_orientation = if crate::ai::image_util::is_heif_extension(&path_buf)
+            && stored_orientation_u32.unwrap_or(1) == 1
+            && metadata_orientation_u32.unwrap_or(1) != 1
+        {
+            metadata_orientation_u32
+        } else {
+            None
+        };
         let cache_path_clone = cache_path.clone();
         let task_result = tokio::task::spawn_blocking(move || -> AppResult<f32> {
             let img = crate::ai::image_util::open_any(&path_buf)
@@ -3301,6 +3672,13 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
                     .bind(photo_id)
                     .execute(&state.pool)
                     .await;
+                if let Some(orientation) = recovered_orientation {
+                    let _ = sqlx::query("UPDATE photos SET orientation = ?1 WHERE id = ?2")
+                        .bind(orientation as i64)
+                        .bind(photo_id)
+                        .execute(&state.pool)
+                        .await;
+                }
             }
             _ => {
                 failed += 1;
@@ -3772,19 +4150,18 @@ async fn generate_thumbnail_bytes(
     let size = size_px.unwrap_or(480).clamp(64, 2048);
 
     // Load photo row with pairing info.
-    let (sha256, is_raw, paired_photo_id): (String, bool, Option<i64>) =
-        sqlx::query_as("SELECT sha256, is_raw, paired_photo_id FROM photos WHERE id = ?1")
-            .bind(photo_id)
-            .fetch_optional(pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
-
-    // Fast-cache hit.
-    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
-    let cache_path = thumbs_dir.join(format!("{sha256}_{size}.jpg"));
-    if let Ok(bytes) = std::fs::read(&cache_path) {
-        return Ok(bytes);
-    }
+    let (sha256, is_raw, paired_photo_id, stored_orientation): (
+        String,
+        bool,
+        Option<i64>,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "SELECT sha256, is_raw, paired_photo_id, orientation FROM photos WHERE id = ?1",
+    )
+    .bind(photo_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
 
     // Resolve the source photo to read: a RAW photo prefers its paired JPG;
     // non-RAW uses its own primary local copy.
@@ -3792,6 +4169,14 @@ async fn generate_thumbnail_bytes(
         (true, Some(pid)) => pid,
         _ => photo_id,
     };
+    let stored_orientation_u32 = stored_orientation.and_then(|v| u32::try_from(v).ok());
+
+    // Fast-cache hit.
+    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
+    let cache_path = crate::ai::image_util::legacy_thumbnail_cache_path(&thumbs_dir, &sha256, size);
+    if let Ok(bytes) = std::fs::read(&cache_path) {
+        return Ok(bytes);
+    }
 
     let source_path: Option<String> = sqlx::query_scalar(
         "SELECT path FROM source_copies \
@@ -3816,15 +4201,50 @@ async fn generate_thumbnail_bytes(
             "photo {photo_id}: file not on disk: {path}"
         )));
     }
+    let is_heif_source = crate::ai::image_util::is_heif_extension(&path_buf);
 
     // Look up the stored EXIF orientation (1–8) so we can rotate before
     // resizing. Missing / unset column defaults to 1 (no rotation).
-    let orientation: Option<i64> =
-        sqlx::query_scalar("SELECT orientation FROM photos WHERE id = ?1")
+    let source_stored_orientation_u32 = if source_photo_id == photo_id {
+        stored_orientation_u32
+    } else {
+        let orientation: Option<i64> =
+            sqlx::query_scalar("SELECT orientation FROM photos WHERE id = ?1")
+                .bind(source_photo_id)
+                .fetch_optional(pool)
+                .await?;
+        orientation.and_then(|v| u32::try_from(v).ok())
+    };
+    let metadata_orientation_u32 = crate::ai::image_util::effective_orientation_for_path(
+        &path_buf,
+        source_stored_orientation_u32,
+    );
+    let orientation_u32 = crate::ai::image_util::orientation_for_decoded_path(
+        &path_buf,
+        source_stored_orientation_u32,
+    );
+    let recovered_heif_orientation = if is_heif_source
+        && source_stored_orientation_u32.unwrap_or(1) == 1
+        && metadata_orientation_u32.unwrap_or(1) != 1
+    {
+        metadata_orientation_u32
+    } else {
+        None
+    };
+
+    if let Some(orientation) = recovered_heif_orientation {
+        tracing::info!(
+            photo_id,
+            source_photo_id,
+            orientation,
+            "thumbnail: refreshing HEIF cache after recovering orientation metadata"
+        );
+        let _ = sqlx::query("UPDATE photos SET orientation = ?1 WHERE id = ?2")
+            .bind(orientation as i64)
             .bind(source_photo_id)
-            .fetch_optional(pool)
-            .await?;
-    let orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
+            .execute(pool)
+            .await;
+    }
 
     let bytes = tokio::task::spawn_blocking(move || -> AppResult<Vec<u8>> {
         let img = crate::ai::image_util::open_any(&path_buf)
@@ -4578,8 +4998,26 @@ pub async fn shortcuts_set(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "lock_thumbs_env() returns a std mutex guard held across awaits to \
+              serialize tests touching CHRONIMAGE_THUMBNAILS_DIR. Tests run on \
+              the current-thread tokio runtime, so this can't deadlock — it's \
+              the canonical pattern for env-var-based test isolation."
+)]
 mod tests {
     use super::*;
+
+    /// Process-wide guard for tests that mutate `CHRONIMAGE_THUMBNAILS_DIR`.
+    /// `std::env::set_var` writes a global, so without this lock parallel
+    /// tests racily read each other's values (and `read_dir` ends up looking
+    /// at a tempdir that's already been dropped). Acquire it at the top of
+    /// any test that calls into code paths reading the var.
+    static THUMBS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_thumbs_env() -> std::sync::MutexGuard<'static, ()> {
+        THUMBS_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     #[test]
     fn ping_returns_pong() {
@@ -4681,6 +5119,212 @@ mod tests {
 
         let v: serde_json::Value = serde_json::from_str(&config).expect("valid json");
         assert_eq!(v["root"], "/iCloud");
+    }
+
+    // ── Source root overlap tests ─────────────────────────────────────────────
+
+    #[test]
+    fn normalise_source_root_handles_separators_and_trailing_slash() {
+        // Forward/back slash equivalence + trailing-slash stripping.
+        assert_eq!(
+            normalise_source_root("D:/Photos"),
+            normalise_source_root("D:\\Photos")
+        );
+        assert_eq!(
+            normalise_source_root("D:/Photos/"),
+            normalise_source_root("D:/Photos")
+        );
+        assert_eq!(
+            normalise_source_root("/home/jay/pics/"),
+            normalise_source_root("/home/jay/pics")
+        );
+    }
+
+    #[test]
+    fn path_contains_path_respects_segment_boundaries() {
+        // Identical paths.
+        assert!(path_contains_path("d:/photos", "d:/photos"));
+        // Real ancestor / descendant.
+        assert!(path_contains_path("d:/photos", "d:/photos/2023"));
+        assert!(!path_contains_path("d:/photos/2023", "d:/photos"));
+        // Lookalike sibling — must NOT match.
+        assert!(!path_contains_path("d:/photos", "d:/photosarchive"));
+        assert!(!path_contains_path("d:/photos", "d:/photos2"));
+        // Sibling subdirs — neither contains the other.
+        assert!(!path_contains_path("d:/photos/2023", "d:/photos/2024"));
+    }
+
+    async fn insert_root_source(pool: &sqlx::SqlitePool, name: &str, root: &str) -> i64 {
+        let config = serde_json::json!({ "root": root }).to_string();
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO sources (name, kind, status, config_json, created_at)
+             VALUES (?1, 'local', 'idle', ?2, ?3) RETURNING id",
+        )
+        .bind(name)
+        .bind(&config)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .fetch_one(pool)
+        .await
+        .expect("insert")
+    }
+
+    #[tokio::test]
+    async fn compute_source_overlap_disjoint_root_returns_empty() {
+        let pool = test_pool().await;
+        insert_root_source(&pool, "A", "D:/Photos").await;
+        let info = compute_source_overlap(&pool, "E:/OtherPhotos")
+            .await
+            .expect("compute");
+        assert!(info.blocking_parent.is_none());
+        assert!(info.blocking_managed.is_empty());
+        assert!(info.absorbable_children.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compute_source_overlap_classifies_child_as_blocking_parent() {
+        let pool = test_pool().await;
+        let parent_id = insert_root_source(&pool, "Photos", "D:/Photos").await;
+
+        let info = compute_source_overlap(&pool, "D:/Photos/2023")
+            .await
+            .expect("compute");
+        let parent = info.blocking_parent.expect("parent must block");
+        assert_eq!(parent.id, parent_id);
+        assert_eq!(parent.name, "Photos");
+        assert!(info.absorbable_children.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compute_source_overlap_classifies_existing_child_as_absorbable() {
+        let pool = test_pool().await;
+        let child_id = insert_root_source(&pool, "A2023", "D:/Photos/2023").await;
+
+        let info = compute_source_overlap(&pool, "D:/Photos")
+            .await
+            .expect("compute");
+        assert!(info.blocking_parent.is_none());
+        assert_eq!(info.absorbable_children.len(), 1);
+        assert_eq!(info.absorbable_children[0].id, child_id);
+        assert!(!info.absorbable_children[0].managed);
+    }
+
+    #[tokio::test]
+    async fn compute_source_overlap_treats_identical_root_as_blocking_parent() {
+        let pool = test_pool().await;
+        // Root has backslashes + no trailing slash; query uses forward
+        // slashes + trailing slash. Normalisation must collapse them.
+        insert_root_source(&pool, "A", "D:\\Photos").await;
+        let info = compute_source_overlap(&pool, "D:/Photos/")
+            .await
+            .expect("compute");
+        assert!(info.blocking_parent.is_some());
+    }
+
+    #[tokio::test]
+    async fn compute_source_overlap_routes_managed_overlap_to_blocking_managed() {
+        // Managed source must never appear in absorbable_children — it's
+        // app-managed storage, not a user album.
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO sources (name, kind, status, config_json, created_at)
+             VALUES ('Chronimage Local', 'local', 'ready',
+                     '{\"root\":\"D:/Catalog\",\"managed\":true}', ?1)",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .expect("insert");
+
+        let info = compute_source_overlap(&pool, "D:/Catalog/Album1")
+            .await
+            .expect("compute");
+        assert_eq!(info.blocking_managed.len(), 1);
+        assert!(info.blocking_managed[0].managed);
+        assert!(info.absorbable_children.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_source_with_absorb_migrates_child_source_copies_and_deletes_child() {
+        let pool = test_pool().await;
+        let child_id = insert_root_source(&pool, "Photos2023", "D:/Photos/2023").await;
+
+        // Seed a photo + source_copies row attached to the child source.
+        let photo_id = insert_photo(&pool, "absorb_sha", 100).await;
+        insert_source_copy(
+            &pool,
+            photo_id,
+            child_id,
+            Some("D:/Photos/2023/IMG_1.jpg"),
+            "absorb_sha",
+        )
+        .await;
+        // Plus an imports row tied to the child.
+        sqlx::query(
+            "INSERT INTO imports (source_id, started_at, total_files, imported_count, error_count)
+             VALUES (?1, ?2, 1, 1, 0)",
+        )
+        .bind(child_id)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .expect("insert import");
+
+        // Without absorb=true, must reject.
+        let err = create_source_impl(&pool, "Photos", "local", Some("D:/Photos"), false)
+            .await
+            .expect_err("must reject without absorb opt-in");
+        assert!(matches!(err, AppError::InvalidInput(_)));
+
+        // With absorb=true, must succeed and migrate.
+        let row = create_source_impl(&pool, "Photos", "local", Some("D:/Photos"), true)
+            .await
+            .expect("absorb create");
+        assert_eq!(row.name, "Photos");
+        assert_eq!(
+            row.photo_count, 1,
+            "absorbed source_copies must count toward new parent"
+        );
+
+        // Child source row gone.
+        let child_remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sources WHERE id = ?1")
+            .bind(child_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(child_remaining, 0);
+
+        // source_copies and imports reattributed to new parent.
+        let sc_owner: i64 =
+            sqlx::query_scalar("SELECT source_id FROM source_copies WHERE photo_id = ?1")
+                .bind(photo_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sc_owner, row.id);
+        let imp_owner: i64 = sqlx::query_scalar("SELECT source_id FROM imports LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(imp_owner, row.id);
+    }
+
+    #[tokio::test]
+    async fn compute_source_overlap_skips_cloud_sources_with_no_root() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO sources (name, kind, status, config_json, created_at)
+             VALUES ('Google Photos', 'google_photos', 'idle', '{}', ?1)",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .expect("insert");
+
+        let info = compute_source_overlap(&pool, "D:/Photos")
+            .await
+            .expect("compute");
+        assert!(info.blocking_parent.is_none());
+        assert!(info.absorbable_children.is_empty());
     }
 
     // ── Catalog read command tests ─────────────────────────────────────────────
@@ -6194,6 +6838,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_thumbnail_missing_photo_returns_not_found() {
+        let _guard = lock_thumbs_env();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         // Point cache at tempdir so we don't pollute the real data dir.
         std::env::set_var("CHRONIMAGE_THUMBNAILS_DIR", tmp.path());
@@ -6209,6 +6854,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_thumbnail_returns_jpeg_bytes_and_caches() {
+        let _guard = lock_thumbs_env();
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let cache_dir = tmp.path().join("cache");
         std::fs::create_dir_all(&cache_dir).unwrap();
@@ -6337,6 +6983,21 @@ mod tests {
         .expect("insert source")
     }
 
+    async fn insert_managed_source(pool: &sqlx::SqlitePool, name: &str, root: &str) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        let config = serde_json::json!({ "root": root, "managed": true }).to_string();
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO sources (name, kind, status, config_json, created_at)
+             VALUES (?1, 'local', 'ready', ?2, ?3) RETURNING id",
+        )
+        .bind(name)
+        .bind(&config)
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("insert managed source")
+    }
+
     async fn insert_photo(pool: &sqlx::SqlitePool, sha: &str, size: i64) -> i64 {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query_scalar::<_, i64>(
@@ -6423,7 +7084,7 @@ mod tests {
         insert_source_copy(&pool, p_shared, src_a, None, "shared").await;
         insert_source_copy(&pool, p_shared, src_b, None, "shared").await;
 
-        let receipt = delete_source_impl(&pool, src_a, false, true)
+        let receipt = delete_source_impl(&pool, src_a, &noop_source_delete_callback())
             .await
             .expect("delete");
         assert_eq!(receipt.removed_photos, 1, "orphan photo removed");
@@ -6455,16 +7116,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_source_without_orphan_cleanup_leaves_orphan_photos() {
+    async fn delete_source_clears_all_thumbnail_size_variants_for_orphans() {
+        // Regression: cleanup used to only remove the `_320.jpg` variant,
+        // leaving `_640.jpg` / `_1280.jpg` thumbnails orphaned in the cache
+        // when the source was disconnected.
+        let _guard = lock_thumbs_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let cache_dir = tmp.path().join("thumbs");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::env::set_var("CHRONIMAGE_THUMBNAILS_DIR", &cache_dir);
+
+        let pool = test_pool().await;
+        let src_a = insert_source(&pool, "A", "local").await;
+        let src_b = insert_source(&pool, "B", "local").await;
+
+        let p_orphan = insert_photo(&pool, "orphansha", 100).await;
+        insert_source_copy(&pool, p_orphan, src_a, None, "orphansha").await;
+
+        let p_shared = insert_photo(&pool, "sharedsha", 200).await;
+        insert_source_copy(&pool, p_shared, src_a, None, "sharedsha").await;
+        insert_source_copy(&pool, p_shared, src_b, None, "sharedsha").await;
+
+        // Seed the cache: every documented size for both photos.
+        let mut all_files: Vec<std::path::PathBuf> = Vec::new();
+        for sha in ["orphansha", "sharedsha"] {
+            for size in [128u32, 320, 640, 1280] {
+                let p = cache_dir.join(format!("{sha}_{size}.jpg"));
+                std::fs::write(&p, b"fake-thumb").unwrap();
+                all_files.push(p);
+            }
+        }
+        // An unrelated cache entry must survive.
+        let unrelated = cache_dir.join("otherSha_320.jpg");
+        std::fs::write(&unrelated, b"fake-thumb").unwrap();
+
+        let receipt = delete_source_impl(&pool, src_a, &noop_source_delete_callback())
+            .await
+            .expect("delete");
+        assert_eq!(receipt.removed_photos, 1);
+        assert_eq!(
+            receipt.removed_thumbnails, 4,
+            "all 4 size variants for the orphan should be cleared"
+        );
+        assert!(
+            receipt.errors.is_empty(),
+            "no cleanup errors expected: {:?}",
+            receipt.errors
+        );
+
+        for size in [128u32, 320, 640, 1280] {
+            let p = cache_dir.join(format!("orphansha_{size}.jpg"));
+            assert!(!p.exists(), "orphan thumb {} should be gone", p.display());
+            let p = cache_dir.join(format!("sharedsha_{size}.jpg"));
+            assert!(p.exists(), "shared thumb {} should be kept", p.display());
+        }
+        assert!(unrelated.exists(), "unrelated thumb must not be touched");
+    }
+
+    #[tokio::test]
+    async fn delete_source_always_removes_orphan_photos() {
+        // Disconnect = the album leaves the catalog. Orphan photos go too,
+        // unconditionally (no opt-out flag any more).
         let pool = test_pool().await;
         let src = insert_source(&pool, "A", "local").await;
         let p = insert_photo(&pool, "lonely", 42).await;
         insert_source_copy(&pool, p, src, None, "lonely").await;
 
-        let receipt = delete_source_impl(&pool, src, false, false)
+        let receipt = delete_source_impl(&pool, src, &noop_source_delete_callback())
             .await
             .expect("delete");
-        assert_eq!(receipt.removed_photos, 0, "orphan NOT removed");
+        assert_eq!(receipt.removed_photos, 1, "orphan must be removed");
 
         let photo_still_there: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM photos WHERE id = ?1")
@@ -6472,7 +7193,155 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(photo_still_there, 1, "photo row remains");
+        assert_eq!(photo_still_there, 0, "photo row must be gone");
+    }
+
+    #[tokio::test]
+    async fn delete_source_recycles_both_original_and_catalog_copy() {
+        // Consolidated-album scenario: photo lives in an original Google
+        // Photos source AND in the managed Chronimage Local source. The user
+        // disconnects the Google Photos source. The photo must leave the
+        // catalog (the managed copy is just storage, not a peer source) and
+        // both the original file AND the catalog copy must go to the Recycle
+        // Bin — disconnect = the photo's bytes leave the catalog completely.
+        let _guard = lock_thumbs_env();
+        let thumbs_tmp = tempfile::TempDir::new().expect("thumbs tmp");
+        std::env::set_var("CHRONIMAGE_THUMBNAILS_DIR", thumbs_tmp.path());
+
+        let pool = test_pool().await;
+        let original_root = tempfile::TempDir::new().expect("orig tmp");
+        let catalog_root = tempfile::TempDir::new().expect("catalog tmp");
+
+        let original_file = original_root.path().join("IMG_001.jpg");
+        let catalog_file = catalog_root.path().join("IMG_001.jpg");
+        std::fs::write(&original_file, b"jpg-bytes").unwrap();
+        std::fs::write(&catalog_file, b"jpg-bytes").unwrap();
+
+        let original_src = insert_source(&pool, "Google Photos", "google_photos").await;
+        let catalog_src = insert_managed_source(
+            &pool,
+            "Chronimage Local",
+            catalog_root.path().to_str().unwrap(),
+        )
+        .await;
+
+        let photo_id = insert_photo(&pool, "consol_sha", 100).await;
+        insert_source_copy(
+            &pool,
+            photo_id,
+            original_src,
+            Some(original_file.to_str().unwrap()),
+            "consol_sha",
+        )
+        .await;
+        insert_source_copy(
+            &pool,
+            photo_id,
+            catalog_src,
+            Some(catalog_file.to_str().unwrap()),
+            "consol_sha",
+        )
+        .await;
+
+        // Preview must report the photo as orphan even though a managed copy exists.
+        let preview = source_deletion_preview_impl(&pool, original_src)
+            .await
+            .expect("preview");
+        assert_eq!(preview.photos_total, 1);
+        assert_eq!(
+            preview.orphan_photos, 1,
+            "managed catalog copy must NOT save the photo from orphan status"
+        );
+
+        let receipt = delete_source_impl(&pool, original_src, &noop_source_delete_callback())
+            .await
+            .expect("delete");
+        assert_eq!(receipt.removed_photos, 1, "orphan photo must be removed");
+
+        let photos_remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM photos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(photos_remaining, 0, "no photos should remain in catalog");
+
+        assert!(!catalog_file.exists(), "catalog copy must be recycled");
+        assert!(
+            !original_file.exists(),
+            "original source file must be recycled too"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sources_hides_managed_catalog_source() {
+        let pool = test_pool().await;
+        let _gphotos = insert_source(&pool, "Google Photos", "google_photos").await;
+        let _managed = insert_managed_source(&pool, "Chronimage Local", "/tmp/cat").await;
+
+        let rows = sqlx::query_as::<_, SourceRow>(
+            "SELECT s.id, s.name, s.kind, s.status, s.last_scan_at,
+             COUNT(DISTINCT sc.photo_id) AS photo_count
+             FROM sources s
+             LEFT JOIN source_copies sc ON sc.source_id = s.id
+             WHERE COALESCE(json_extract(s.config_json, '$.managed'), 0) = 0
+             GROUP BY s.id ORDER BY s.id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list_sources query");
+
+        assert_eq!(rows.len(), 1, "managed source must be filtered out");
+        assert_eq!(rows[0].name, "Google Photos");
+    }
+
+    #[tokio::test]
+    async fn delete_source_emits_phase_sequence_and_committed_carries_removed_count() {
+        let pool = test_pool().await;
+        let src_a = insert_source(&pool, "A", "local").await;
+
+        let p1 = insert_photo(&pool, "psha1", 100).await;
+        insert_source_copy(&pool, p1, src_a, None, "psha1").await;
+        let p2 = insert_photo(&pool, "psha2", 200).await;
+        insert_source_copy(&pool, p2, src_a, None, "psha2").await;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, i64, i64)>::new()));
+        let captured_clone = std::sync::Arc::clone(&captured);
+        let cb: SourceDeleteCallback = std::sync::Arc::new(move |p: SourceDeleteProgress| {
+            captured_clone
+                .lock()
+                .unwrap()
+                .push((p.phase.to_string(), p.done, p.total));
+        });
+
+        delete_source_impl(&pool, src_a, &cb).await.expect("delete");
+
+        let events = captured.lock().unwrap().clone();
+        let phases: Vec<&str> = events.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(phases.first(), Some(&"collecting"));
+        assert_eq!(phases.last(), Some(&"done"));
+        assert!(
+            phases.contains(&"deleting"),
+            "missing 'deleting' phase: {phases:?}"
+        );
+        assert!(
+            phases.contains(&"committed"),
+            "missing 'committed' phase: {phases:?}"
+        );
+        assert!(
+            phases.contains(&"thumb_cleanup"),
+            "missing 'thumb_cleanup' phase: {phases:?}"
+        );
+        // Recycle phase must NOT fire when recycle_files=false.
+        assert!(
+            !phases.contains(&"recycling"),
+            "unexpected 'recycling' phase when recycle_files=false: {phases:?}"
+        );
+
+        let committed = events
+            .iter()
+            .find(|(p, _, _)| p == "committed")
+            .expect("committed event present");
+        assert_eq!(committed.1, 2, "committed.done should equal removed_photos");
+        assert_eq!(committed.2, 2, "committed.total should equal orphan total");
     }
 
     #[tokio::test]

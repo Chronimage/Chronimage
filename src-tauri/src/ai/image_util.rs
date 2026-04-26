@@ -116,10 +116,9 @@ pub fn is_raw_extension(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// HEIC / HEIF extensions — the `image` crate can't decode these without
-/// the optional `heif` feature (which pulls in libheif, a C dep). Instead
-/// we rely on `scan_embedded_jpeg` below to pull the preview out of the
-/// `iprp` / `Exif` box that iPhone etc. always write.
+/// HEIC / HEIF extensions. The `image` crate cannot decode these by itself;
+/// `open_any` routes them through platform/optional HEIF decoders before
+/// trying the embedded-JPEG scanner.
 const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif", "avif"];
 
 /// Does this path look like a HEIF container? Case-insensitive.
@@ -131,51 +130,155 @@ pub fn is_heif_extension(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Open an image file. Pure-Rust, no system deps. The decode cascade:
+/// Return a display orientation for `path`, using platform metadata readers for
+/// formats that `kamadak-exif` cannot parse as a plain EXIF container.
+pub fn orientation_for_path(path: &std::path::Path) -> Option<u32> {
+    if !is_heif_extension(path) {
+        return None;
+    }
+
+    #[cfg(windows)]
+    {
+        match wic_orientation_for_path(path) {
+            Ok(Some(orientation)) => return Some(orientation),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "wic: orientation metadata read failed"
+                );
+            }
+        }
+
+        match shell_orientation_for_path(path) {
+            Ok(orientation) => orientation,
+            Err(e) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "shell: orientation metadata read failed"
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Prefer stored EXIF orientation, but treat a default `1` on HEIF files as
+/// provisional because the regular EXIF reader often cannot see HEIF metadata.
+pub fn effective_orientation_for_path(
+    path: &std::path::Path,
+    stored_orientation: Option<u32>,
+) -> Option<u32> {
+    let stored_orientation = stored_orientation.filter(|v| (1..=8).contains(v));
+    if is_heif_extension(path) && stored_orientation.unwrap_or(1) == 1 {
+        orientation_for_path(path).or(stored_orientation)
+    } else {
+        stored_orientation
+    }
+}
+
+/// Some platform decoders return HEIF pixels already transformed into display
+/// orientation. Callers that rotate after `open_any` should skip EXIF rotation
+/// for those paths to avoid turning portrait HEICs sideways.
+pub fn orientation_for_decoded_path(
+    path: &std::path::Path,
+    stored_orientation: Option<u32>,
+) -> Option<u32> {
+    if decoded_pixels_are_display_oriented(path) {
+        Some(1)
+    } else {
+        effective_orientation_for_path(path, stored_orientation)
+    }
+}
+
+/// Whether `open_any` returns display-oriented pixels for this path.
+pub fn decoded_pixels_are_display_oriented(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        is_heif_extension(path)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+pub fn legacy_thumbnail_cache_path(
+    thumbs_dir: &std::path::Path,
+    sha256: &str,
+    size: u32,
+) -> std::path::PathBuf {
+    thumbs_dir.join(format!("{sha256}_{size}.jpg"))
+}
+
+/// Open an image file. The decoder picked depends on the extension:
 ///
-/// 1. `image::open` (JPEG/PNG/TIFF/WebP/GIF/BMP — the common case).
-/// 2. `rawler` preview for RAW extensions (ARW/CR2/CR3/NEF/DNG/…) —
-///    pulls the embedded JPEG preview.
-/// 3. Last-resort **embedded-JPEG scan** — every modern camera RAW and
-///    every iPhone HEIC writes at least one full JPEG (SOI `FF D8 FF`
-///    through EOI `FF D9`) somewhere inside the container. The `image`
-///    crate ignores trailing data, so if we find a valid SOI we can hand
-///    that slice straight to the JPEG decoder. Catches HEIC (no libheif
-///    needed) + any RAW whose format ID rawler doesn't recognise.
+/// - **JPEG/PNG/TIFF/WebP/GIF/BMP** → `image` crate (pure-Rust, fast path).
+///   This step is skipped for HEIF/RAW extensions because the `image`
+///   crate has no decoder for either, so attempting it would just produce
+///   a misleading "couldn't decode" log on every HEIC/RAW import.
+/// - **RAW** (ARW/CR2/CR3/NEF/DNG/…) → `rawler` preview (embedded JPEG).
+/// - **HEIF/HEIC/AVIF/HIF** → platform/optional HEIF decode. On Windows
+///   the WIC HEIF Image Extension is the standard path (Microsoft's
+///   licensed HEVC codec); `--features heic` enables libheif as an
+///   additional cross-platform decoder.
+/// - Anything else falls through to a last-resort **embedded-JPEG scan**
+///   (SOI `FF D8 FF` through EOI `FF D9`). Many RAW and HEIF containers
+///   carry an embedded JPEG preview; finding it gives us at least a small
+///   thumbnail when the dedicated decoder fails.
 ///
 /// Each failure is logged via `tracing::warn!` so the on-disk reason
 /// shows up in Loki — the old code swallowed rawler errors silently and
 /// the user saw purple placeholders with no diagnostic.
 pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
-    // Fast path — JPEG/PNG/TIFF/WebP/etc. handled by `image`.
-    match image::open(path) {
-        Ok(img) => return Ok(img),
-        Err(e) => {
-            tracing::debug!(
-                path = %path.display(),
-                error = %e,
-                "open_any: image crate couldn't decode, trying fallbacks"
-            );
-        }
-    }
+    // Skip the `image` crate entirely for known HEIF/RAW extensions —
+    // it has no decoder for either format, so attempting it just emits a
+    // misleading "couldn't decode" log on every HEIC/RAW import. The
+    // dedicated decoders below are the only ones that work for these.
+    let skip_image_crate = is_heif_extension(path) || is_raw_extension(path);
 
-    // Lenient retry — `image::ImageReader::with_guessed_format` sniffs
-    // the magic bytes instead of trusting the extension, so it picks up
-    // JPEGs wearing a `.HEIC` suffix (screenshots), MPO dual-stream
-    // iPhone JPEGs, and TIFFs served with odd extensions. This is the
-    // difference between `image::open` (strict) and the content-aware
-    // path.
-    if let Ok(f) = std::fs::File::open(path) {
-        let reader = std::io::BufReader::new(f);
-        if let Ok(sniffed) = image::ImageReader::new(reader).with_guessed_format() {
-            if let Ok(img) = sniffed.decode() {
-                tracing::info!(
+    if !skip_image_crate {
+        // Fast path — JPEG/PNG/TIFF/WebP/etc. handled by `image`.
+        match image::open(path) {
+            Ok(img) => return Ok(img),
+            Err(e) => {
+                tracing::debug!(
                     path = %path.display(),
-                    "open_any: decoded via sniffed-format fallback ({}×{})",
-                    img.width(),
-                    img.height()
+                    error = %e,
+                    "open_any: image crate couldn't decode, trying fallbacks"
                 );
-                return Ok(img);
+            }
+        }
+
+        // Lenient retry — `image::ImageReader::with_guessed_format` sniffs
+        // the magic bytes instead of trusting the extension, so it picks up
+        // JPEGs wearing a `.HEIC` suffix (screenshots), MPO dual-stream
+        // iPhone JPEGs, and TIFFs served with odd extensions. This is the
+        // difference between `image::open` (strict) and the content-aware
+        // path. We skip this for confirmed HEIF/RAW above because the
+        // sniffer doesn't recognise either format anyway.
+        if let Ok(f) = std::fs::File::open(path) {
+            let reader = std::io::BufReader::new(f);
+            if let Ok(sniffed) = image::ImageReader::new(reader).with_guessed_format() {
+                if let Ok(img) = sniffed.decode() {
+                    tracing::info!(
+                        path = %path.display(),
+                        "open_any: decoded via sniffed-format fallback ({}×{})",
+                        img.width(),
+                        img.height()
+                    );
+                    return Ok(img);
+                }
             }
         }
     }
@@ -225,9 +328,10 @@ pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
         }
     }
 
-    // HEIC fast path via libheif (when the `heic` cargo feature is on).
-    // This is the only robust way to decode iPhone HEIC files — the
-    // main image is HEVC-encoded and can't be extracted by scanning.
+    // HEIC / HEIF fast paths. The primary image in iPhone HEIC is HEVC-
+    // encoded, so byte-scanning usually cannot recover it. On Windows we
+    // ask WIC to use the installed HEIF/HEVC codecs; optional libheif covers
+    // builds where that cargo feature is enabled.
     #[cfg(feature = "heic")]
     if is_heif_extension(path) {
         match decode_heif_via_libheif(path) {
@@ -244,6 +348,26 @@ pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
                 path = %path.display(),
                 error = %e,
                 "libheif: decode failed, falling through to byte scan"
+            ),
+        }
+    }
+
+    #[cfg(windows)]
+    if is_heif_extension(path) {
+        match decode_heif_via_wic(path) {
+            Ok(img) => {
+                tracing::info!(
+                    path = %path.display(),
+                    "open_any: decoded via Windows WIC ({}x{})",
+                    img.width(),
+                    img.height()
+                );
+                return Ok(img);
+            }
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "wic: HEIF decode failed, falling through to byte scan"
             ),
         }
     }
@@ -278,7 +402,7 @@ pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
 
     if is_heif_extension(path) {
         return Err(format!(
-            "open_any: {} — HEIF container has no extractable preview. Full HEVC decoding requires libheif — rebuild with `cargo build --features heic` after `vcpkg install libheif` (Windows) / `apt install libheif-dev` (Linux)",
+            "open_any: {} — HEIF container has no extractable preview. Full HEVC decoding requires an installed Windows HEIF/HEVC codec or libheif via `cargo build --features heic` after `vcpkg install libheif` (Windows) / `apt install libheif-dev` (Linux)",
             path.display()
         ));
     }
@@ -325,6 +449,300 @@ fn decode_heif_via_libheif(path: &std::path::Path) -> Result<DynamicImage, Strin
     }
     let buf = image::RgbImage::from_raw(w, h, packed)
         .ok_or_else(|| "libheif: RgbImage::from_raw size mismatch".to_string())?;
+    Ok(DynamicImage::ImageRgb8(buf))
+}
+
+/// HEIF decoder via Windows Imaging Component. This uses the OS codec stack
+/// (HEIF Image Extensions / HEVC decoder) and keeps default Windows builds
+/// free of libheif's native build dependency.
+#[cfg(windows)]
+fn wic_orientation_for_path(path: &std::path::Path) -> Result<Option<u32>, String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{GENERIC_READ, RPC_E_CHANGED_MODE},
+            Graphics::Imaging::{
+                CLSID_WICImagingFactory, IWICImagingFactory, WICDecodeMetadataCacheOnDemand,
+            },
+            System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize,
+                StructuredStorage::{
+                    PropVariantClear, PropVariantToString, PropVariantToUInt16,
+                    PropVariantToUInt32, PROPVARIANT,
+                },
+                CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+            },
+        },
+    };
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    fn read_orientation_value(value: &PROPVARIANT) -> Option<u32> {
+        let numeric = unsafe {
+            PropVariantToUInt16(value as *const PROPVARIANT)
+                .map(u32::from)
+                .or_else(|_| PropVariantToUInt32(value as *const PROPVARIANT))
+        };
+        if let Ok(v) = numeric {
+            return (1..=8).contains(&v).then_some(v);
+        }
+
+        let mut text = [0u16; 32];
+        if unsafe { PropVariantToString(value as *const PROPVARIANT, &mut text) }.is_ok() {
+            let end = text.iter().position(|&c| c == 0).unwrap_or(text.len());
+            let s = String::from_utf16_lossy(&text[..end]);
+            if let Ok(v) = s.trim().parse::<u32>() {
+                return (1..=8).contains(&v).then_some(v);
+            }
+        }
+        None
+    }
+
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let _com_guard = if init == RPC_E_CHANGED_MODE {
+        ComGuard(false)
+    } else {
+        init.ok()
+            .map_err(|e| format!("wic: CoInitializeEx failed: {e}"))?;
+        ComGuard(true)
+    };
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let factory: IWICImagingFactory = unsafe {
+        CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("wic: CoCreateInstance WIC factory: {e}"))?
+    };
+    let decoder = unsafe {
+        factory.CreateDecoderFromFilename(
+            PCWSTR(wide_path.as_ptr()),
+            None,
+            GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand,
+        )
+    }
+    .map_err(|e| format!("wic: CreateDecoderFromFilename {}: {e}", path.display()))?;
+    let frame = unsafe { decoder.GetFrame(0) }
+        .map_err(|e| format!("wic: GetFrame(0) {}: {e}", path.display()))?;
+    let reader = unsafe { frame.GetMetadataQueryReader() }
+        .map_err(|e| format!("wic: GetMetadataQueryReader {}: {e}", path.display()))?;
+
+    for query in [
+        "/ifd/{ushort=274}",
+        "/app1/ifd/{ushort=274}",
+        "/ifd/exif/{ushort=274}",
+        "/xmp/tiff:Orientation",
+    ] {
+        let wide_query: Vec<u16> = query.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut value = PROPVARIANT::default();
+        let read_result =
+            unsafe { reader.GetMetadataByName(PCWSTR(wide_query.as_ptr()), &mut value) };
+        if read_result.is_err() {
+            continue;
+        }
+
+        let orientation = read_orientation_value(&value);
+        let _ = unsafe { PropVariantClear(&mut value as *mut PROPVARIANT) };
+        if let Some(orientation) = orientation {
+            tracing::debug!(
+                path = %path.display(),
+                query,
+                orientation,
+                "wic: found HEIF orientation metadata"
+            );
+            return Ok(Some(orientation));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(windows)]
+fn shell_orientation_for_path(path: &std::path::Path) -> Result<Option<u32>, String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::RPC_E_CHANGED_MODE,
+            Storage::EnhancedStorage::PKEY_Photo_Orientation,
+            System::Com::{CoInitializeEx, CoUninitialize, IBindCtx, COINIT_MULTITHREADED},
+            UI::Shell::{IShellItem2, SHCreateItemFromParsingName},
+        },
+    };
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let _com_guard = if init == RPC_E_CHANGED_MODE {
+        ComGuard(false)
+    } else {
+        init.ok()
+            .map_err(|e| format!("shell: CoInitializeEx failed: {e}"))?;
+        ComGuard(true)
+    };
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let item: IShellItem2 =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(wide_path.as_ptr()), None::<&IBindCtx>) }
+            .map_err(|e| format!("shell: SHCreateItemFromParsingName {}: {e}", path.display()))?;
+
+    let orientation = unsafe { item.GetUInt32(&PKEY_Photo_Orientation as *const _) }
+        .map_err(|e| format!("shell: GetUInt32(PKEY_Photo_Orientation): {e}"))?;
+    Ok((1..=8).contains(&orientation).then_some(orientation))
+}
+
+/// True for the WIC errors that are worth retrying once with a brief
+/// delay rather than dropping straight to the byte-scan fallback.
+///
+/// Microsoft's HEIF Image Extension is fronted by Media Foundation's HEVC
+/// decoder, whose internal MFT pool can return `WAIT_TIMEOUT` (`0x80070102`)
+/// under concurrent decode load. The codec is flaky-not-broken: a short
+/// pause + retry almost always succeeds. Serializing all callers behind a
+/// mutex would also avoid the timeout, but at the cost of 4× slower import
+/// throughput on iPhone HEIC libraries — retry-on-timeout keeps the
+/// 4-way parallelism the import pipeline relies on.
+#[cfg(windows)]
+fn is_transient_wic_failure(err: &str) -> bool {
+    err.contains("0x80070102")
+        || err
+            .to_ascii_lowercase()
+            .contains("wait operation timed out")
+}
+
+#[cfg(windows)]
+fn decode_heif_via_wic(path: &std::path::Path) -> Result<DynamicImage, String> {
+    match decode_heif_via_wic_attempt(path) {
+        Ok(img) => Ok(img),
+        Err(e) if is_transient_wic_failure(&e) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "wic: transient HEIF timeout, retrying after 50ms"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            decode_heif_via_wic_attempt(path)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(windows)]
+fn decode_heif_via_wic_attempt(path: &std::path::Path) -> Result<DynamicImage, String> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{GENERIC_READ, RPC_E_CHANGED_MODE},
+            Graphics::Imaging::{
+                CLSID_WICImagingFactory, GUID_WICPixelFormat24bppRGB, IWICImagingFactory,
+                WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom,
+                WICDecodeMetadataCacheOnDemand,
+            },
+            System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_MULTITHREADED,
+            },
+        },
+    };
+
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let _com_guard = if init == RPC_E_CHANGED_MODE {
+        ComGuard(false)
+    } else {
+        init.ok()
+            .map_err(|e| format!("wic: CoInitializeEx failed: {e}"))?;
+        ComGuard(true)
+    };
+
+    let wide_path: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let factory: IWICImagingFactory = unsafe {
+        CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("wic: CoCreateInstance WIC factory: {e}"))?
+    };
+    let decoder = unsafe {
+        factory.CreateDecoderFromFilename(
+            PCWSTR(wide_path.as_ptr()),
+            None,
+            GENERIC_READ,
+            WICDecodeMetadataCacheOnDemand,
+        )
+    }
+    .map_err(|e| format!("wic: CreateDecoderFromFilename {}: {e}", path.display()))?;
+    let frame = unsafe { decoder.GetFrame(0) }
+        .map_err(|e| format!("wic: GetFrame(0) {}: {e}", path.display()))?;
+    let converter = unsafe { factory.CreateFormatConverter() }
+        .map_err(|e| format!("wic: CreateFormatConverter: {e}"))?;
+
+    unsafe {
+        converter.Initialize(
+            &frame,
+            &GUID_WICPixelFormat24bppRGB,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )
+    }
+    .map_err(|e| format!("wic: convert to 24bpp RGB: {e}"))?;
+
+    let mut width = 0u32;
+    let mut height = 0u32;
+    unsafe { converter.GetSize(&mut width, &mut height) }
+        .map_err(|e| format!("wic: GetSize: {e}"))?;
+    if width == 0 || height == 0 {
+        return Err("wic: decoded image has zero dimensions".to_string());
+    }
+
+    let stride = width
+        .checked_mul(3)
+        .ok_or_else(|| format!("wic: stride overflow for {}x{}", width, height))?;
+    let len = stride
+        .checked_mul(height)
+        .ok_or_else(|| format!("wic: buffer overflow for {}x{}", width, height))?;
+    let mut pixels = vec![0u8; len as usize];
+    unsafe { converter.CopyPixels(std::ptr::null(), stride, &mut pixels) }
+        .map_err(|e| format!("wic: CopyPixels: {e}"))?;
+
+    let buf = image::RgbImage::from_raw(width, height, pixels)
+        .ok_or_else(|| "wic: RgbImage::from_raw size mismatch".to_string())?;
     Ok(DynamicImage::ImageRgb8(buf))
 }
 
@@ -383,6 +801,29 @@ pub fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
+
+    #[cfg(windows)]
+    #[test]
+    fn is_transient_wic_failure_matches_real_codepaths() {
+        // Exact format the windows crate emits — must match for retry.
+        assert!(is_transient_wic_failure(
+            "wic: CopyPixels: The wait operation timed out. (0x80070102)"
+        ));
+        // HRESULT-only form (defensive — if a future windows-rs error
+        // formatting drops the human-readable prefix, the hex is enough).
+        assert!(is_transient_wic_failure("error 0x80070102"));
+        // Lowercase variant — match should be case-insensitive on the
+        // text path, since Windows API error messages don't always come
+        // through with consistent casing.
+        assert!(is_transient_wic_failure("Wait Operation Timed Out"));
+        // Other failures must NOT trigger retry — e.g. a real codec error.
+        assert!(!is_transient_wic_failure(
+            "wic: CreateDecoderFromFilename: codec not found (0x80070002)"
+        ));
+        assert!(!is_transient_wic_failure(
+            "wic: convert to 24bpp RGB: invalid format"
+        ));
+    }
 
     fn solid(w: u32, h: u32, rgb: [u8; 3]) -> DynamicImage {
         let buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |_, _| Rgb(rgb));
@@ -522,6 +963,48 @@ mod tests {
         assert!(!is_raw_extension(Path::new("photo.jpg")));
         assert!(!is_raw_extension(Path::new("scan.tif")));
         assert!(!is_raw_extension(Path::new("noext")));
+    }
+
+    #[test]
+    fn is_heif_extension_recognises_common_formats() {
+        use std::path::Path;
+        assert!(is_heif_extension(Path::new("IMG_0001.HEIC")));
+        assert!(is_heif_extension(Path::new("clip.heif")));
+        assert!(is_heif_extension(Path::new("photo.hif")));
+        assert!(is_heif_extension(Path::new("render.avif")));
+        assert!(!is_heif_extension(Path::new("photo.jpg")));
+        assert!(!is_heif_extension(Path::new("noext")));
+    }
+
+    #[test]
+    fn legacy_thumbnail_cache_path_matches_cache_contract() {
+        use std::path::Path;
+        let root = Path::new("thumbs");
+        assert_eq!(
+            legacy_thumbnail_cache_path(root, "abc", 480),
+            root.join("abc_480.jpg")
+        );
+    }
+
+    #[test]
+    fn orientation_for_decoded_path_skips_windows_heif_rotation() {
+        use std::path::Path;
+        assert_eq!(
+            orientation_for_decoded_path(Path::new("photo.jpg"), Some(6)),
+            Some(6)
+        );
+
+        #[cfg(windows)]
+        assert_eq!(
+            orientation_for_decoded_path(Path::new("IMG_0001.HEIC"), Some(6)),
+            Some(1)
+        );
+
+        #[cfg(not(windows))]
+        assert_eq!(
+            orientation_for_decoded_path(Path::new("IMG_0001.HEIC"), Some(6)),
+            Some(6)
+        );
     }
 
     #[test]

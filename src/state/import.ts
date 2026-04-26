@@ -80,11 +80,14 @@ export const useImportStore = create<ImportState>((set) => ({
     set((s) => {
       const existing = s.active.get(e.import_id);
       const wasFinished = existing?.finished ?? false;
-      // Side-effect: once an import flips to finished, kick off the
-      // post-import auto-chain (lift-shift + optional source recycle).
-      // Done via setTimeout so we don't fire inside a Zustand set().
-      const nowFinished = e.done >= e.total && e.total > 0;
+      // The backend tags its final tick with `finished: true`. Don't try
+      // to infer "done" from `done == total` — empty imports legitimately
+      // end with `done=0, total=0`, which is also the initial state.
+      const nowFinished = e.finished;
       if (!wasFinished && nowFinished) {
+        // Side-effect: once an import flips to finished, kick off the
+        // post-import auto-chain (lift-shift + optional source recycle).
+        // Done via setTimeout so we don't fire inside a Zustand set().
         schedulePostImportChain(existing?.sourceId ?? e.source_id, existing?.deleteAfterCopy ?? false);
       }
       if (!existing) {
@@ -101,7 +104,7 @@ export const useImportStore = create<ImportState>((set) => ({
           done: e.done,
           currentFile: e.current_file,
           etaSeconds: e.eta_seconds ?? null,
-          finished: e.done >= e.total && e.total > 0,
+          finished: nowFinished,
         });
         return { active: next };
       }
@@ -112,7 +115,7 @@ export const useImportStore = create<ImportState>((set) => ({
         done: e.done,
         currentFile: e.current_file,
         etaSeconds: e.eta_seconds ?? null,
-        finished: e.done >= e.total && e.total > 0,
+        finished: nowFinished,
       });
       return { active: next };
     }),
@@ -224,7 +227,7 @@ export function useImportProgressListener() {
           const wasFinished = prev?.finished ?? false;
           applyProgress(evt.payload);
 
-          const nowFinished = evt.payload.done >= evt.payload.total && evt.payload.total > 0;
+          const nowFinished = evt.payload.finished;
 
           // Throttled live refresh while photos stream in.
           const now = Date.now();

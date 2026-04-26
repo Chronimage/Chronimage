@@ -105,6 +105,25 @@ describe('invoke wrappers', () => {
       name: 'Local D:',
       kind: 'local',
       rootPath: 'D:/Photos',
+      absorbOverlappingChildren: false,
+    });
+  });
+
+  it('createSource forwards absorbOverlappingChildren=true when caller opts in', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      id: 3,
+      name: 'Photos',
+      kind: 'local',
+      status: 'idle',
+      last_scan_at: null,
+      photo_count: 0,
+    });
+    await createSource('Photos', 'local', 'D:/Photos', true);
+    expect(tauriInvoke).toHaveBeenCalledWith('create_source', {
+      name: 'Photos',
+      kind: 'local',
+      rootPath: 'D:/Photos',
+      absorbOverlappingChildren: true,
     });
   });
 
@@ -122,6 +141,7 @@ describe('invoke wrappers', () => {
       name: 'iCloud',
       kind: 'icloud',
       rootPath: null,
+      absorbOverlappingChildren: false,
     });
   });
 
@@ -213,32 +233,14 @@ describe('invoke wrappers', () => {
     expect(tauriInvoke).toHaveBeenCalledWith('list_imports', { sourceId: 3 });
   });
 
-  it('deleteSource calls delete_source with source + deletion options', async () => {
+  it('deleteSource calls delete_source with just the source id', async () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce({
       removed_photos: 0,
       removed_thumbnails: 0,
       errors: [],
     });
     await deleteSource(7);
-    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', {
-      sourceId: 7,
-      recycleFiles: false,
-      removeOrphanPhotos: true,
-    });
-  });
-
-  it('deleteSource forwards opts when provided', async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce({
-      removed_photos: 0,
-      removed_thumbnails: 0,
-      errors: [],
-    });
-    await deleteSource(9, { recycleFiles: true, removeOrphanPhotos: false });
-    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', {
-      sourceId: 9,
-      recycleFiles: true,
-      removeOrphanPhotos: false,
-    });
+    expect(tauriInvoke).toHaveBeenCalledWith('delete_source', { sourceId: 7 });
   });
 
   // ── Phase 2 §6: Cloud upload adapters ───────────────────────────────────────

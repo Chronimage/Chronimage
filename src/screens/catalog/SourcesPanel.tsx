@@ -117,17 +117,8 @@ function DisconnectSourceModal({ source, onClose }: DisconnectSourceModalProps) 
   const preview = useSourceDeletionPreview(source.id);
   const deleteMut = useDeleteSource();
 
-  function onConfirm(selected: Set<string>) {
-    deleteMut.mutate(
-      {
-        sourceId: source.id,
-        removeOrphanPhotos: selected.has('orphans'),
-        recycleFiles: selected.has('recycle'),
-      },
-      {
-        onSettled: () => onClose(),
-      },
-    );
+  function onConfirm() {
+    deleteMut.mutate({ sourceId: source.id, sourceName: source.name }, { onSettled: () => onClose() });
   }
 
   const p = preview.data;
@@ -138,49 +129,17 @@ function DisconnectSourceModal({ source, onClose }: DisconnectSourceModalProps) 
   ) : p ? (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div>
-        <strong>{p.photos_total}</strong> photos are linked to this source.
+        <strong>{p.orphan_photos}</strong> of {p.photos_total} photos will be removed from the catalog. Photos
+        that also live in another source stay attached to that source.
       </div>
-      {p.orphan_photos > 0 ? (
-        <div>
-          <strong>{p.orphan_photos}</strong> would become orphans (they don&rsquo;t exist in any other
-          source).
-        </div>
-      ) : (
-        <div>No photos would be orphaned — each photo exists in another source too.</div>
-      )}
       {p.local_files > 0 && (
         <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-mute)' }}>
-          {p.local_files} local files · {formatBytes(p.total_bytes)}
+          {p.local_files} local files ({formatBytes(p.total_bytes)}) will be moved to the Recycle Bin
           {p.cloud_only > 0 && ` · ${p.cloud_only} cloud-only`}
         </div>
       )}
     </div>
   ) : null;
-
-  const options = p
-    ? [
-        ...(p.orphan_photos > 0
-          ? [
-              {
-                id: 'orphans',
-                label: `Also remove ${p.orphan_photos} orphan photos from catalog`,
-                description: 'Photos that only exist in this source will be deleted from Chronimage.',
-                defaultChecked: true,
-              },
-            ]
-          : []),
-        ...(p.local_files > 0
-          ? [
-              {
-                id: 'recycle',
-                label: `Also move ${p.local_files} local files to Recycle Bin (${formatBytes(p.total_bytes)})`,
-                description: 'Files can be restored from the Recycle Bin if you change your mind.',
-                defaultChecked: false,
-              },
-            ]
-          : []),
-      ]
-    : [];
 
   return (
     <ConfirmDialog
@@ -189,7 +148,7 @@ function DisconnectSourceModal({ source, onClose }: DisconnectSourceModalProps) 
       description={description}
       confirmLabel="Disconnect source"
       confirmTone="danger"
-      options={options}
+      options={[]}
       busy={deleteMut.isPending || preview.isLoading}
       onCancel={onClose}
       onConfirm={onConfirm}

@@ -21,6 +21,7 @@
 
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useCallback, useState } from 'react';
+import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon } from '../../primitives/Icon';
 import { useImportStore } from '../../state/import';
 import {
@@ -32,6 +33,7 @@ import {
 } from '../../state/queries';
 import { useCatalogHome } from '../../state/settings';
 import { useUi } from '../../state/ui';
+import { checkSourceOverlap, type OverlappingSource } from '../../tauri/invoke';
 import { debug, errorMessage } from '../../util/log';
 
 interface AddSourcePopoverProps {
@@ -58,6 +60,10 @@ export function AddSourcePopover({ layout = 'block' }: AddSourcePopoverProps) {
   const [deleteAfterCopy, setDeleteAfterCopy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when the user has confirmed copy but the chosen folder contains
+  // existing sources. Holds those children so the second confirmation
+  // dialog can list them. Resolved on absorb-confirm or absorb-cancel.
+  const [absorbPending, setAbsorbPending] = useState<OverlappingSource[] | null>(null);
 
   const effectiveHome = catalogHome ?? defaultCatalogHome ?? null;
   const canAct = !busy;
@@ -67,21 +73,24 @@ export function AddSourcePopover({ layout = 'block' }: AddSourcePopoverProps) {
   const closeConfirm = useCallback(() => {
     setPending(null);
     setDeleteAfterCopy(false);
+    setAbsorbPending(null);
   }, []);
 
-  const confirmImport = useCallback(async () => {
-    if (!pending) return;
-    setBusy(true);
-    setError(null);
-    try {
+  // Stage 2 (separated from stage 1 so absorb confirmation can interleave):
+  // actually create the source + kick off the import. Called either directly
+  // when there are no overlaps, or after the user confirms absorbing inner
+  // sources.
+  const runCreateAndImport = useCallback(
+    async (pick: PendingPick, absorb: boolean) => {
       const source = await createSource.mutateAsync({
-        name: pending.defaultSourceName,
-        kind: pending.sourceKind,
-        rootPath: pending.root,
+        name: pick.defaultSourceName,
+        kind: pick.sourceKind,
+        rootPath: pick.root,
+        absorbOverlappingChildren: absorb,
       });
       const resp = await startImport.mutateAsync({
         sourceId: source.id,
-        root: pending.root,
+        root: pick.root,
       });
       registerImport({
         importId: resp.import_id,
@@ -90,6 +99,39 @@ export function AddSourcePopover({ layout = 'block' }: AddSourcePopoverProps) {
         mode: 'consolidate',
         deleteAfterCopy,
       });
+    },
+    [createSource, deleteAfterCopy, registerImport, startImport],
+  );
+
+  const confirmImport = useCallback(async () => {
+    if (!pending) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Probe for overlap with existing sources. Hard rejects (subfolder of
+      // an existing source, or any overlap with the catalog folder) bail
+      // here. Absorbable inner sources route through the second confirmation
+      // dialog before we touch the catalog.
+      const overlap = await checkSourceOverlap(pending.root);
+      if (overlap.blocking_parent) {
+        const p = overlap.blocking_parent;
+        setError(
+          `${pending.root} is inside existing source "${p.name}" (${p.root}). Remove that source first if you want to re-add it under a different scope.`,
+        );
+        return;
+      }
+      const managed = overlap.blocking_managed[0];
+      if (managed) {
+        setError(
+          `${pending.root} overlaps the catalog folder ("${managed.name}" at ${managed.root}). Pick a folder outside the catalog.`,
+        );
+        return;
+      }
+      if (overlap.absorbable_children.length > 0) {
+        setAbsorbPending(overlap.absorbable_children);
+        return;
+      }
+      await runCreateAndImport(pending, false);
       closeConfirm();
     } catch (err) {
       debug('AddSourcePopover: confirm import failed', err);
@@ -97,7 +139,28 @@ export function AddSourcePopover({ layout = 'block' }: AddSourcePopoverProps) {
     } finally {
       setBusy(false);
     }
-  }, [closeConfirm, createSource, deleteAfterCopy, pending, registerImport, startImport]);
+  }, [closeConfirm, pending, runCreateAndImport]);
+
+  const confirmAbsorb = useCallback(async () => {
+    if (!pending || !absorbPending) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await runCreateAndImport(pending, true);
+      closeConfirm();
+    } catch (err) {
+      debug('AddSourcePopover: absorb + import failed', err);
+      setError(errorMessage(err));
+      setAbsorbPending(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [absorbPending, closeConfirm, pending, runCreateAndImport]);
+
+  const cancelAbsorb = useCallback(() => {
+    setAbsorbPending(null);
+    setBusy(false);
+  }, []);
 
   async function runLocalFolder() {
     setError(null);
@@ -200,7 +263,7 @@ export function AddSourcePopover({ layout = 'block' }: AddSourcePopoverProps) {
         </div>
       )}
 
-      {pending && (
+      {pending && !absorbPending && (
         <CopyConfirmModal
           pending={pending}
           catalogRoot={effectiveHome}
@@ -213,6 +276,45 @@ export function AddSourcePopover({ layout = 'block' }: AddSourcePopoverProps) {
           busy={busy}
         />
       )}
+
+      <ConfirmDialog
+        open={absorbPending !== null}
+        title="Merge existing sources?"
+        description={
+          absorbPending && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div>
+                This folder contains {absorbPending.length} existing source
+                {absorbPending.length === 1 ? '' : 's'}. They will be merged into the new source — photos stay
+                in your catalog, but the inner source label
+                {absorbPending.length === 1 ? '' : 's'} will be replaced by the new one.
+              </div>
+              <ul
+                style={{
+                  margin: 0,
+                  paddingLeft: 18,
+                  fontSize: 12,
+                  color: 'var(--fg-mute)',
+                }}
+              >
+                {absorbPending.map((s) => (
+                  <li key={s.id}>
+                    {s.name}{' '}
+                    <span className="mono" style={{ fontSize: 11 }}>
+                      ({s.root})
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        }
+        confirmLabel={`Merge and import`}
+        confirmTone="default"
+        busy={busy}
+        onCancel={cancelAbsorb}
+        onConfirm={confirmAbsorb}
+      />
     </div>
   );
 }

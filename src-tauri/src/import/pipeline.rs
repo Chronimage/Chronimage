@@ -29,6 +29,11 @@ use tokio::sync::Semaphore;
 // ── Public types ─────────────────────────────────────────────────────────────
 
 /// Live progress event emitted on `"chronimage://import-progress"`.
+///
+/// `finished` is the authoritative end-of-pipeline signal. The frontend
+/// can't infer "done" from `done == total` alone — an empty import (scan
+/// finds zero files) ends with `done=0, total=0` which is also the
+/// initial registered state, so it would otherwise stay visible forever.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportProgress {
     pub source_id: i64,
@@ -37,6 +42,7 @@ pub struct ImportProgress {
     pub done: usize,
     pub current_file: String,
     pub eta_seconds: Option<u64>,
+    pub finished: bool,
 }
 
 /// Summary returned by [`run_pipeline`].
@@ -294,7 +300,11 @@ async fn execute_pipeline(
                 let meta_start = Instant::now();
                 let meta_path = path.clone();
                 let (exif, phash) = match tokio::task::spawn_blocking(move || {
-                    let exif = crate::import::exif::read(&meta_path);
+                    let mut exif = crate::import::exif::read(&meta_path);
+                    exif.orientation = crate::ai::image_util::effective_orientation_for_path(
+                        &meta_path,
+                        exif.orientation,
+                    );
                     let phash = crate::dedupe::phash::compute(&meta_path);
                     (exif, phash)
                 })
@@ -366,7 +376,15 @@ async fn execute_pipeline(
                 let thumb_orientation = exif.orientation;
                 let thumb_task = tokio::task::spawn_blocking(move || -> AppResult<Option<f32>> {
                     let thumbs_dir = crate::util::paths::thumbnails_dir()?;
-                    let cache_path = thumbs_dir.join(format!("{thumb_sha}_320.jpg"));
+                    let cache_path = crate::ai::image_util::legacy_thumbnail_cache_path(
+                        &thumbs_dir,
+                        &thumb_sha,
+                        320,
+                    );
+                    let thumb_orientation = crate::ai::image_util::orientation_for_decoded_path(
+                        &thumb_path,
+                        thumb_orientation,
+                    );
                     // Always decode + compute sharpness; skip re-writing the
                     // thumb file if it already exists.
                     let img = crate::ai::image_util::open_any(&thumb_path)
@@ -437,6 +455,7 @@ async fn execute_pipeline(
                 done: finished,
                 current_file: filename,
                 eta_seconds: eta,
+                finished: false,
             });
 
             Ok::<(PathBuf, String, i64, bool), AppError>((path, hash, photo_id, rows_affected > 0))
@@ -846,7 +865,9 @@ async fn execute_pipeline(
     .execute(&pool)
     .await?;
 
-    // Final progress event (done == total).
+    // Final progress event. `finished: true` is the authoritative end-of-
+    // pipeline signal — the frontend listener uses it (not `done == total`)
+    // because an empty import legitimately ends with `done=0, total=0`.
     on_progress(ImportProgress {
         source_id,
         import_id,
@@ -854,6 +875,7 @@ async fn execute_pipeline(
         done: total,
         current_file: String::new(),
         eta_seconds: Some(0),
+        finished: true,
     });
 
     // Refresh smart album counts so the UI reflects newly imported photos.

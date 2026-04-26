@@ -20,7 +20,7 @@ describe('useImportStore', () => {
     expect(row?.finished).toBe(false);
   });
 
-  it('applyProgress updates counts + marks finished at done==total', () => {
+  it('applyProgress updates counts + marks finished only on the backend finished tick', () => {
     useImportStore.getState().register({
       importId: 2,
       sourceId: 20,
@@ -35,6 +35,7 @@ describe('useImportStore', () => {
       done: 3,
       current_file: 'IMG_0003.JPG',
       eta_seconds: 42,
+      finished: false,
     });
     const mid = useImportStore.getState().active.get(2);
     expect(mid?.done).toBe(3);
@@ -49,8 +50,34 @@ describe('useImportStore', () => {
       done: 10,
       current_file: '',
       eta_seconds: 0,
+      finished: true,
     });
     expect(useImportStore.getState().active.get(2)?.finished).toBe(true);
+  });
+
+  it('applyProgress flips finished=true even when scan found zero files', () => {
+    // Regression: re-importing a folder whose files were just recycled by
+    // a source disconnect ends with done=0,total=0. The card used to stick
+    // around forever because finished was inferred from `done >= total &&
+    // total > 0`. With the explicit `finished` flag from the backend it
+    // clears immediately.
+    useImportStore.getState().register({
+      importId: 4,
+      sourceId: 40,
+      sourceName: 'EmptySrc',
+      mode: 'consolidate',
+      deleteAfterCopy: false,
+    });
+    useImportStore.getState().applyProgress({
+      import_id: 4,
+      source_id: 40,
+      total: 0,
+      done: 0,
+      current_file: '',
+      eta_seconds: 0,
+      finished: true,
+    });
+    expect(useImportStore.getState().active.get(4)?.finished).toBe(true);
   });
 
   it('applyProgress synthesises a row if register was never called', () => {
@@ -61,6 +88,7 @@ describe('useImportStore', () => {
       done: 1,
       current_file: 'x',
       eta_seconds: 10,
+      finished: false,
     });
     const row = useImportStore.getState().active.get(99);
     expect(row).toBeDefined();
