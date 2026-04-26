@@ -12,6 +12,7 @@ import { MapScreen } from './screens/map/MapScreen';
 import { PeopleScreen } from './screens/PeopleScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { useImportProgressListener } from './state/import';
+import { useSourceDeleteProgressListener } from './state/sourceDelete';
 import { useUi } from './state/ui';
 import { appVersion, currentChannel } from './tauri/invoke';
 import { error as logError } from './util/log';
@@ -24,8 +25,12 @@ const queryClient = new QueryClient({
 // catalog queries live as an import streams in. Split into its own component
 // so it mounts inside the `<QueryClientProvider>` tree instead of the App
 // body (where the provider isn't in scope yet).
+//
+// The source-disconnect listener rides in the same bridge — it has the same
+// QueryClient dependency and the same root-mount-once requirement.
 function ImportProgressBridge() {
   useImportProgressListener();
+  useSourceDeleteProgressListener();
   return null;
 }
 

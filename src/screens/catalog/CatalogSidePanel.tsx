@@ -1,6 +1,7 @@
 import { Icon } from '../../primitives/Icon';
 import { useAlbums, useFaceClusters, useSources } from '../../state/queries';
 import { ImportProgressCard } from './ImportProgressCard';
+import { SourceDeleteProgressCard } from './SourceDeleteProgressCard';
 import { SourcesPanel } from './SourcesPanel';
 
 export interface CatalogSidePanelProps {
@@ -32,6 +33,7 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
 
       <div className="sidepanel-body">
         <ImportProgressCard />
+        <SourceDeleteProgressCard />
 
         <div className="section-label">
           <span>Smart Albums</span>

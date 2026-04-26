@@ -137,12 +137,35 @@ export async function listSources(): Promise<SourceRow[]> {
   return tauriInvoke<SourceRow[]>('list_sources');
 }
 
-export async function createSource(name: string, kind: string, rootPath?: string): Promise<SourceRow> {
+export async function createSource(
+  name: string,
+  kind: string,
+  rootPath?: string,
+  absorbOverlappingChildren?: boolean,
+): Promise<SourceRow> {
   return tauriInvoke<SourceRow>('create_source', {
     name,
     kind,
     rootPath: rootPath ?? null,
+    absorbOverlappingChildren: absorbOverlappingChildren ?? false,
   });
+}
+
+export interface OverlappingSource {
+  id: number;
+  name: string;
+  root: string;
+  managed: boolean;
+}
+
+export interface SourceOverlapInfo {
+  blocking_parent: OverlappingSource | null;
+  blocking_managed: OverlappingSource[];
+  absorbable_children: OverlappingSource[];
+}
+
+export async function checkSourceOverlap(rootPath: string): Promise<SourceOverlapInfo> {
+  return tauriInvoke<SourceOverlapInfo>('check_source_overlap', { rootPath });
 }
 
 export interface RemoveReceipt {
@@ -172,15 +195,8 @@ export interface RemovePreview {
   total_bytes: number;
 }
 
-export async function deleteSource(
-  sourceId: number,
-  opts?: { recycleFiles?: boolean; removeOrphanPhotos?: boolean },
-): Promise<RemoveReceipt> {
-  return tauriInvoke<RemoveReceipt>('delete_source', {
-    sourceId,
-    recycleFiles: opts?.recycleFiles ?? false,
-    removeOrphanPhotos: opts?.removeOrphanPhotos ?? true,
-  });
+export async function deleteSource(sourceId: number): Promise<RemoveReceipt> {
+  return tauriInvoke<RemoveReceipt>('delete_source', { sourceId });
 }
 
 export async function sourceDeletionPreview(sourceId: number): Promise<SourceDeletionPlan> {
@@ -340,9 +356,32 @@ export interface ImportProgressEvent {
   done: number;
   current_file: string;
   eta_seconds: number | null;
+  /** Authoritative end-of-pipeline signal. The frontend can't infer this
+   *  from `done == total` because an empty import legitimately ends with
+   *  `done=0, total=0` which is also the initial registered state. */
+  finished: boolean;
 }
 
 export const IMPORT_PROGRESS_EVENT = 'chronimage://import-progress';
+
+// ── Source-disconnect progress event ────────────────────────────────────────
+
+export type SourceDeletePhase =
+  | 'collecting'
+  | 'deleting'
+  | 'committed'
+  | 'thumb_cleanup'
+  | 'recycling'
+  | 'done';
+
+export interface SourceDeleteProgressEvent {
+  source_id: number;
+  phase: SourceDeletePhase;
+  total: number;
+  done: number;
+}
+
+export const SOURCE_DELETE_PROGRESS_EVENT = 'chronimage://source-delete-progress';
 
 // ── Dedupe ─────────────────────────────────────────────────────────────────
 

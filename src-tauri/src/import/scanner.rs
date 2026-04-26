@@ -16,10 +16,9 @@ use std::{
 };
 
 const DEFAULT_EXTENSIONS: &[&str] = &[
-    // raster
-    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", // heic/apple
-    "heic", "heif", "avif", // raw
-    "arw", "cr2", "cr3", "nef", "nrw", "raf", "rw2", "orf", "dng", "pef", "srw",
+    // Raster, HEIF/AVIF, and RAW formats handled by the import pipeline.
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tif", "tiff", "heic", "heif", "hif", "avif", "arw",
+    "cr2", "cr3", "nef", "nrw", "raf", "rw2", "orf", "dng", "pef", "srw",
 ];
 
 #[derive(Debug, Clone)]
@@ -177,13 +176,14 @@ mod tests {
         touch(tmp.path(), "a.jpg");
         touch(tmp.path(), "nested/b.ARW");
         touch(tmp.path(), "nested/c.heic");
+        touch(tmp.path(), "nested/d.HIF");
         touch(tmp.path(), "ignored.txt");
         touch(tmp.path(), "no-ext");
 
         let entries = scan_dir(&ScanOptions::new(tmp.path())).expect("scan");
         let mut exts: Vec<_> = entries.iter().map(|e| e.ext_lowercase.as_str()).collect();
         exts.sort();
-        assert_eq!(exts, vec!["arw", "heic", "jpg"]);
+        assert_eq!(exts, vec!["arw", "heic", "hif", "jpg"]);
     }
 
     #[test]
