@@ -3,22 +3,23 @@
  *
  * Presets come from the `presets` table (seeded on boot by
  * `develop::presets::seed_builtins`). The user clicks a card → we call
- * `develop_preset_apply(photo_id, preset_id, strength)` which returns a
- * RenderReceipt; we push the preview URL into `useDevelopUi` so the
- * sibling DevelopScreen swaps its stage image.
+ * `develop_apply(photo_id, operations)` with locally blended preset
+ * operations; we push the preview URL + operations into `useDevelopUi`
+ * so the sibling DevelopScreen swaps its stage image and saves the same
+ * values the preview shows.
  *
- * Strength is per-preset (Map<presetId, strength>) with a live slider for
- * the most-recently-applied one. The old hardcoded PRESETS list was
- * replaced with live query data.
+ * Strength is per-preset with a live slider for the most-recently-applied
+ * one. The old hardcoded PRESETS list was replaced with live query data.
  */
 
 import { useCallback, useMemo, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { useDevelopUi } from '../../state/develop';
-import { useDevelopPresetApply, usePresets } from '../../state/queries';
+import { useDevelopApply, usePresets } from '../../state/queries';
+import type { DevelopOperations } from '../../tauri/invoke';
 import { warn } from '../../util/log';
-import type { PresetCategory } from './types';
+import { blendOperations, normaliseOperations, type PresetCategory, parseOperationsJson } from './types';
 
 const CATEGORIES: { id: PresetCategory; label: string }[] = [
   { id: 'face', label: 'Face' },
@@ -35,15 +36,22 @@ const CAT_TO_GROUP: Record<Exclude<PresetCategory, 'custom'>, string> = {
   style: 'Style',
 };
 
+interface ActivePreset {
+  strength: number;
+  baseOperations: DevelopOperations;
+}
+
 export function DevelopSidePanel() {
   const [category, setCategory] = useState<PresetCategory>('face');
-  const [activePresets, setActivePresets] = useState<Map<number, number>>(() => new Map());
+  const [activePresets, setActivePresets] = useState<Map<number, ActivePreset>>(() => new Map());
 
   const focusedPhotoId = useDevelopUi((s) => s.focusedPhotoId);
   const setPreview = useDevelopUi((s) => s.setPreview);
+  const currentOperations = useDevelopUi((s) => s.operations);
+  const setOperations = useDevelopUi((s) => s.setOperations);
 
   const { data: allPresets = [] } = usePresets();
-  const applyPreset = useDevelopPresetApply();
+  const applyPreset = useDevelopApply();
 
   const filtered = useMemo(() => {
     if (category === 'custom') {
@@ -54,48 +62,58 @@ export function DevelopSidePanel() {
   }, [allPresets, category]);
 
   const pushApply = useCallback(
-    (presetId: number, strength: number) => {
+    (presetId: number, strength: number, baseOperations: DevelopOperations) => {
       if (focusedPhotoId == null) return;
+      const preset = allPresets.find((p) => p.id === presetId);
+      if (!preset) return;
+      const presetOperations = parseOperationsJson(preset.operations_json);
+      if (!presetOperations) {
+        warn('develop preset operations parse failed', preset.operations_json);
+        return;
+      }
+      const operations = blendOperations(baseOperations, presetOperations, strength);
+      setOperations(operations, 'sidepanel');
       applyPreset.mutate(
-        { photoId: focusedPhotoId, presetId, strength },
+        { photoId: focusedPhotoId, operations },
         {
-          onSuccess: (r) => setPreview(r.preview_data_url),
-          onError: (e) => warn('develop_preset_apply failed', e),
+          onSuccess: (r) => {
+            setPreview(r.preview_data_url);
+          },
+          onError: (e) => warn('develop preset apply failed', e),
         },
       );
     },
-    [applyPreset, focusedPhotoId, setPreview],
+    [allPresets, applyPreset, focusedPhotoId, setOperations, setPreview],
   );
 
   const onPresetClick = useCallback(
     (presetId: number) => {
-      setActivePresets((prev) => {
-        const next = new Map(prev);
-        if (next.has(presetId)) {
-          next.delete(presetId);
-          // Revert to identity/current-saved when un-applying.
-          pushApply(presetId, 0);
-        } else {
-          next.set(presetId, 75);
-          pushApply(presetId, 75);
-        }
-        return next;
-      });
+      const existing = activePresets.get(presetId);
+      const next = new Map(activePresets);
+      if (existing) {
+        next.delete(presetId);
+        setActivePresets(next);
+        pushApply(presetId, 0, existing.baseOperations);
+        return;
+      }
+      const baseOperations = normaliseOperations(currentOperations);
+      next.set(presetId, { strength: 75, baseOperations });
+      setActivePresets(next);
+      pushApply(presetId, 75, baseOperations);
     },
-    [pushApply],
+    [activePresets, currentOperations, pushApply],
   );
 
   const onPresetStrength = useCallback(
     (presetId: number, strength: number) => {
-      setActivePresets((prev) => {
-        if (!prev.has(presetId)) return prev;
-        const next = new Map(prev);
-        next.set(presetId, strength);
-        return next;
-      });
-      pushApply(presetId, strength);
+      const existing = activePresets.get(presetId);
+      if (!existing) return;
+      const next = new Map(activePresets);
+      next.set(presetId, { ...existing, strength });
+      setActivePresets(next);
+      pushApply(presetId, strength, existing.baseOperations);
     },
-    [pushApply],
+    [activePresets, pushApply],
   );
 
   const activeEntries = [...activePresets.entries()];
@@ -114,23 +132,23 @@ export function DevelopSidePanel() {
           <div className="lbl mono">Active · {primaryPreset.name}</div>
           <div className="main">
             <span>Strength</span>
-            <span className="val mono">{primaryEntry[1]}</span>
+            <span className="val mono">{primaryEntry[1].strength}</span>
           </div>
           <input
             type="range"
             min="0"
             max="100"
-            value={primaryEntry[1]}
+            value={primaryEntry[1].strength}
             onChange={(e) => onPresetStrength(primaryEntry[0], Number(e.target.value))}
             aria-label={`${primaryPreset.name} strength`}
           />
           <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-            {activeEntries.map(([id, strength], i) => {
+            {activeEntries.map(([id, activePreset], i) => {
               const meta = allPresets.find((p) => p.id === id);
               if (!meta) return null;
               return (
                 <Chip key={id} variant={i === 0 ? 'solid' : undefined} onClose={() => onPresetClick(id)}>
-                  {meta.name} · {strength}
+                  {meta.name} · {activePreset.strength}
                 </Chip>
               );
             })}
@@ -183,7 +201,7 @@ export function DevelopSidePanel() {
         ) : (
           filtered.map((p, i) => {
             const active = activePresets.has(p.id);
-            const strength = activePresets.get(p.id);
+            const strength = activePresets.get(p.id)?.strength;
             return (
               <button
                 key={p.id}

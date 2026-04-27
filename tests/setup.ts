@@ -137,6 +137,66 @@ vi.mock('@tauri-apps/api/core', () => ({
         // jsdom Blob construction tolerates plain arrays; return empty bytes
         // so the hook resolves to undefined path (falls back to Placeholder).
         throw new Error('thumbnail unavailable in tests');
+      case 'develop_open':
+        return {
+          photo_id: 1,
+          operations: {
+            exposure: 0,
+            contrast: 0,
+            highlights: 0,
+            shadows: 0,
+            whites: 0,
+            blacks: 0,
+            temp: 0,
+            tint: 0,
+            vibrance: 0,
+            saturation: 0,
+            clarity: 0,
+            dehaze: 0,
+            curves: {
+              rgb: [
+                [0, 0],
+                [0.25, 0.25],
+                [0.5, 0.5],
+                [0.75, 0.75],
+                [1, 1],
+              ],
+              r: [
+                [0, 0],
+                [0.25, 0.25],
+                [0.5, 0.5],
+                [0.75, 0.75],
+                [1, 1],
+              ],
+              g: [
+                [0, 0],
+                [0.25, 0.25],
+                [0.5, 0.5],
+                [0.75, 0.75],
+                [1, 1],
+              ],
+              b: [
+                [0, 0],
+                [0.25, 0.25],
+                [0.5, 0.5],
+                [0.75, 0.75],
+                [1, 1],
+              ],
+              l: [
+                [0, 0],
+                [0.25, 0.25],
+                [0.5, 0.5],
+                [0.75, 0.75],
+                [1, 1],
+              ],
+            },
+          },
+          preview_data_url: 'data:image/jpeg;base64,test',
+        };
+      case 'develop_apply':
+        return { photo_id: 1, preview_data_url: 'data:image/jpeg;base64,test', elapsed_ms: 0 };
+      case 'develop_save':
+        return 1;
       case 'develop_reset':
         return 0;
       case 'develop_copy_edits':
@@ -159,6 +219,8 @@ vi.mock('@tauri-apps/api/core', () => ({
         return { pasted_photo_count: 1, skipped: [] };
       case 'develop_preset_apply':
         return { photo_id: 1, preview_data_url: '', elapsed_ms: 0 };
+      case 'presets_list':
+        return [];
       case 'ai_reindex':
         return 0;
       case 'ai_models_status':
