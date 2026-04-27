@@ -63,6 +63,8 @@ describe('invoke wrappers', () => {
       offset: null,
       albumId: null,
       sortBy: null,
+      facet: null,
+      randomSeed: null,
     });
   });
 
@@ -74,6 +76,8 @@ describe('invoke wrappers', () => {
       offset: 200,
       albumId: null,
       sortBy: null,
+      facet: null,
+      randomSeed: null,
     });
   });
 
@@ -85,6 +89,21 @@ describe('invoke wrappers', () => {
       offset: null,
       albumId: 3,
       sortBy: null,
+      facet: null,
+      randomSeed: null,
+    });
+  });
+
+  it('listPhotos forwards facet and randomSeed', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await listPhotos({ sortBy: 'random', facet: 'people', randomSeed: 12345 });
+    expect(tauriInvoke).toHaveBeenCalledWith('list_photos', {
+      limit: null,
+      offset: null,
+      albumId: null,
+      sortBy: 'random',
+      facet: 'people',
+      randomSeed: 12345,
     });
   });
 

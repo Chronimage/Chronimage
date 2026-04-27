@@ -1,11 +1,11 @@
-//! Preset library — 4 built-in presets (hard-coded) + user-saved presets
+//! Preset library — built-in presets (hard-coded) + user-saved presets
 //! (`presets` table).
 //!
-//! Built-in scope for the MVP pass: only scalar-slider presets. Mask-
-//! dependent presets ("Beautify lips", "Remove background", etc.) land
-//! with the SAM2 mask engine in Phase 3 week 2+.
+//! Built-in presets stay scalar-slider only so every preset can render
+//! through the Phase 3 CPU pipeline. Mask-assisted presets in the UI use
+//! the prompt/SAM2 path and still feed scalar operations into the preview.
 
-use super::ops::Operations;
+use super::ops::{Curves, Operations};
 use crate::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
@@ -30,7 +30,25 @@ impl Preset {
     }
 }
 
-/// The 4 built-in presets that survive without a mask engine. Returns
+fn curve(points: [[f32; 2]; 5]) -> Vec<[f32; 2]> {
+    points.to_vec()
+}
+
+fn master_curve(points: [[f32; 2]; 5]) -> Curves {
+    Curves {
+        rgb: curve(points),
+        ..Curves::identity()
+    }
+}
+
+fn luma_curve(points: [[f32; 2]; 5]) -> Curves {
+    Curves {
+        l: curve(points),
+        ..Curves::identity()
+    }
+}
+
+/// The built-in presets available in the Develop side panel. Returns
 /// `(name, group, description, ops)` tuples; the seed step materialises
 /// them into the `presets` table at startup.
 pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Operations)> {
@@ -56,6 +74,52 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
             },
         ),
         (
+            "Whiten teeth",
+            "Face",
+            "Small white-point lift with reduced yellow saturation.",
+            Operations {
+                exposure: 0.05,
+                contrast: 4.0,
+                highlights: 12.0,
+                shadows: 0.0,
+                whites: 24.0,
+                blacks: 0.0,
+                temp: -8.0,
+                tint: 0.0,
+                vibrance: -4.0,
+                saturation: -18.0,
+                clarity: 4.0,
+                dehaze: 0.0,
+                curves: luma_curve([
+                    [0.0, 0.0],
+                    [0.25, 0.27],
+                    [0.5, 0.55],
+                    [0.75, 0.82],
+                    [1.0, 1.0],
+                ]),
+            },
+        ),
+        (
+            "Eye pop",
+            "Face",
+            "Crisp iris detail and controlled contrast.",
+            Operations {
+                exposure: 0.0,
+                contrast: 10.0,
+                highlights: -8.0,
+                shadows: 8.0,
+                whites: 10.0,
+                blacks: -4.0,
+                temp: 0.0,
+                tint: 2.0,
+                vibrance: 16.0,
+                saturation: 4.0,
+                clarity: 28.0,
+                dehaze: 4.0,
+                curves: Curves::identity(),
+            },
+        ),
+        (
             "Enhance sky",
             "Scene",
             "Deeper blues, crisper clouds, more pop in highlights.",
@@ -76,6 +140,58 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
             },
         ),
         (
+            "Golden hour",
+            "Scene",
+            "Warm highlights with open shadows and soft contrast.",
+            Operations {
+                exposure: 0.12,
+                contrast: 6.0,
+                highlights: -24.0,
+                shadows: 24.0,
+                whites: 4.0,
+                blacks: -6.0,
+                temp: 24.0,
+                tint: 6.0,
+                vibrance: 18.0,
+                saturation: 6.0,
+                clarity: 4.0,
+                dehaze: -2.0,
+                curves: master_curve([
+                    [0.0, 0.03],
+                    [0.25, 0.28],
+                    [0.5, 0.54],
+                    [0.75, 0.78],
+                    [1.0, 1.0],
+                ]),
+            },
+        ),
+        (
+            "Urban night",
+            "Scene",
+            "Cool shadows, protected highlights, neon color pop.",
+            Operations {
+                exposure: -0.1,
+                contrast: 24.0,
+                highlights: -38.0,
+                shadows: 18.0,
+                whites: 8.0,
+                blacks: 18.0,
+                temp: -18.0,
+                tint: 10.0,
+                vibrance: 32.0,
+                saturation: 8.0,
+                clarity: 18.0,
+                dehaze: 18.0,
+                curves: master_curve([
+                    [0.0, 0.0],
+                    [0.25, 0.2],
+                    [0.5, 0.5],
+                    [0.75, 0.82],
+                    [1.0, 1.0],
+                ]),
+            },
+        ),
+        (
             "Portrait relight",
             "Face",
             "Fill shadows, reign in highlights, warm skin.",
@@ -93,6 +209,104 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 clarity: 5.0,
                 dehaze: 0.0,
                 curves: crate::develop::ops::Curves::identity(),
+            },
+        ),
+        (
+            "Denoise low-light",
+            "Quality",
+            "Preview-friendly smoothing for noisy high-ISO files.",
+            Operations {
+                exposure: 0.05,
+                contrast: -12.0,
+                highlights: -18.0,
+                shadows: 18.0,
+                whites: -4.0,
+                blacks: -6.0,
+                temp: 0.0,
+                tint: 0.0,
+                vibrance: -2.0,
+                saturation: -6.0,
+                clarity: -36.0,
+                dehaze: -8.0,
+                curves: Curves::identity(),
+            },
+        ),
+        (
+            "Recover shadows",
+            "Quality",
+            "Lift blocked dark regions while holding bright detail.",
+            Operations {
+                exposure: 0.18,
+                contrast: -8.0,
+                highlights: -44.0,
+                shadows: 62.0,
+                whites: -8.0,
+                blacks: -12.0,
+                temp: 2.0,
+                tint: 0.0,
+                vibrance: 8.0,
+                saturation: 0.0,
+                clarity: 6.0,
+                dehaze: 2.0,
+                curves: luma_curve([
+                    [0.0, 0.04],
+                    [0.25, 0.34],
+                    [0.5, 0.56],
+                    [0.75, 0.78],
+                    [1.0, 1.0],
+                ]),
+            },
+        ),
+        (
+            "Moody portrait",
+            "Style",
+            "Lower saturation, deeper blacks, cinematic contrast.",
+            Operations {
+                exposure: -0.06,
+                contrast: 20.0,
+                highlights: -24.0,
+                shadows: 10.0,
+                whites: -4.0,
+                blacks: 18.0,
+                temp: 6.0,
+                tint: 2.0,
+                vibrance: -8.0,
+                saturation: -18.0,
+                clarity: 10.0,
+                dehaze: 8.0,
+                curves: master_curve([
+                    [0.0, 0.0],
+                    [0.25, 0.2],
+                    [0.5, 0.48],
+                    [0.75, 0.8],
+                    [1.0, 1.0],
+                ]),
+            },
+        ),
+        (
+            "Faded film",
+            "Style",
+            "Lifted blacks with muted color and a soft shoulder.",
+            Operations {
+                exposure: 0.0,
+                contrast: -8.0,
+                highlights: -20.0,
+                shadows: 18.0,
+                whites: -8.0,
+                blacks: -28.0,
+                temp: 6.0,
+                tint: 4.0,
+                vibrance: 8.0,
+                saturation: -18.0,
+                clarity: -4.0,
+                dehaze: -6.0,
+                curves: master_curve([
+                    [0.0, 0.08],
+                    [0.25, 0.28],
+                    [0.5, 0.52],
+                    [0.75, 0.75],
+                    [1.0, 0.95],
+                ]),
             },
         ),
         (
@@ -221,7 +435,7 @@ mod tests {
         seed_builtins(&pool).await.unwrap();
         seed_builtins(&pool).await.unwrap();
         let all = list(&pool, None).await.unwrap();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 12);
     }
 
     #[tokio::test]
@@ -231,8 +445,12 @@ mod tests {
             .unwrap();
         seed_builtins(&pool).await.unwrap();
         let face = list(&pool, Some("Face")).await.unwrap();
-        assert_eq!(face.len(), 2, "Clean up face + Portrait relight");
+        assert_eq!(face.len(), 4, "Face presets should all be seeded");
         assert!(face.iter().all(|p| p.group_name == "Face"));
+
+        let quality = list(&pool, Some("Quality")).await.unwrap();
+        assert_eq!(quality.len(), 2, "Quality presets should be live");
+        assert!(quality.iter().all(|p| p.group_name == "Quality"));
     }
 
     #[tokio::test]

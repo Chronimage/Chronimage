@@ -113,11 +113,16 @@ export type PhotoSortBy =
   | 'aesthetic_desc'
   | 'random';
 
+export type CatalogFacet = 'people' | 'place' | 'object' | 'event' | 'color' | 'camera';
+
 export interface ListPhotosParams {
   limit?: number;
   offset?: number;
   albumId?: number | null;
   sortBy?: PhotoSortBy | null;
+  facet?: CatalogFacet | null;
+  /** Stable seed for `sortBy: 'random'` so paginated calls don't duplicate. */
+  randomSeed?: number | null;
 }
 
 export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]> {
@@ -126,6 +131,8 @@ export async function listPhotos(params?: ListPhotosParams): Promise<PhotoRow[]>
     offset: params?.offset ?? null,
     albumId: params?.albumId ?? null,
     sortBy: params?.sortBy ?? null,
+    facet: params?.facet ?? null,
+    randomSeed: params?.randomSeed ?? null,
   });
 }
 

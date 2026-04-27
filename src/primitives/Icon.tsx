@@ -45,7 +45,8 @@ export type IconName =
   | 'faces'
   | 'ai'
   | 'compare'
-  | 'pin';
+  | 'pin'
+  | 'cards';
 
 export interface IconProps {
   name: IconName;
@@ -263,6 +264,14 @@ const PATHS: Record<IconName, React.ReactElement> = {
     <>
       <path d="M12 21c4-5 7-8.5 7-12a7 7 0 0 0-14 0c0 3.5 3 7 7 12z" />
       <circle cx="12" cy="9" r="2.5" />
+    </>
+  ),
+  // Two side-by-side cards — sits visually between `grid` (4 small squares)
+  // and `layers` (one big stack), used as the medium-density toolbar option.
+  cards: (
+    <>
+      <rect x="3" y="4" width="8" height="16" rx="1" />
+      <rect x="13" y="4" width="8" height="16" rx="1" />
     </>
   ),
 };
