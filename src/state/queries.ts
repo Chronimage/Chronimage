@@ -862,6 +862,8 @@ import {
   type DevelopHistoryRow,
   type DevelopMask,
   type DevelopMaskCreateRequest,
+  type DevelopMaskGenerateReceipt,
+  type DevelopMaskGenerateRequest,
   type DevelopMaskUpdateRequest,
   type DevelopOpenResponse,
   type DevelopOperations,
@@ -873,6 +875,7 @@ import {
   developMaskApplyPreview,
   developMaskCreate,
   developMaskDelete,
+  developMaskGenerate,
   developMasksList,
   developMaskUpdate,
   developOpen,
@@ -1010,6 +1013,23 @@ export function useDevelopMaskCreate() {
     onSuccess: (_id, req) => {
       qc.invalidateQueries({ queryKey: ['develop_masks', req.photo_id] });
       qc.invalidateQueries({ queryKey: ['develop_open', req.photo_id] });
+    },
+  });
+}
+
+export function useDevelopMaskGenerate() {
+  const qc = useQueryClient();
+  return useMutation<DevelopMaskGenerateReceipt, Error, DevelopMaskGenerateRequest>({
+    mutationFn: (req) => developMaskGenerate(req),
+    onSuccess: (receipt, req) => {
+      qc.invalidateQueries({ queryKey: ['develop_masks', req.photo_id] });
+      qc.invalidateQueries({ queryKey: ['develop_open', req.photo_id] });
+      qc.setQueryData<DevelopMask[]>(['develop_masks', req.photo_id], (current) => {
+        const rows = current ?? [];
+        return [...rows.filter((mask) => mask.id !== receipt.mask.id), receipt.mask].sort(
+          (a, b) => a.order_index - b.order_index || a.id - b.id,
+        );
+      });
     },
   });
 }

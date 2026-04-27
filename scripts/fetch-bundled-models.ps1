@@ -1,12 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Download the four Phase-1 bundled ONNX models into src-tauri/models/bundled/.
+    Download bundled ONNX models into src-tauri/models/bundled/.
 
 .DESCRIPTION
-    Fetches siglip2-b16-image.onnx, nima.onnx, det_10g.onnx, and w600k_r50.onnx
-    from their upstream URLs and verifies SHA256 hashes before writing to the
-    destination directory.
+    Fetches catalog models plus the SAM2.1 mask model bundle from upstream URLs
+    and verifies SHA256 hashes before writing to the destination directory.
 
     buffalo_l.zip (InsightFace) is downloaded once and both SCRFD + ArcFace files
     are extracted before the zip is deleted.
@@ -75,6 +74,18 @@ $Models = @(
         Url       = 'https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip'
         Sha256    = '4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43'
         ZipEntry  = 'buffalo_l/w600k_r50.onnx'
+    },
+    [PSCustomObject]@{
+        Filename  = 'sam2.1_hiera_large.encoder.onnx'
+        Url       = 'https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models/resolve/main/sam2.1_hiera_large_20260221.zip'
+        Sha256    = 'tbd'
+        ZipEntry  = 'sam2.1_hiera_large.encoder.onnx'
+    },
+    [PSCustomObject]@{
+        Filename  = 'sam2.1_hiera_large.decoder.onnx'
+        Url       = 'https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models/resolve/main/sam2.1_hiera_large_20260221.zip'
+        Sha256    = 'tbd'
+        ZipEntry  = 'sam2.1_hiera_large.decoder.onnx'
     }
 )
 
@@ -99,7 +110,7 @@ function Format-Bytes {
 # ---------------------------------------------------------------------------
 $BuffaloZipUrl = 'https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip'
 $BuffaloZipPath = Join-Path $BundledDir 'buffalo_l.zip.tmp'
-$NeedBuffalo = $Models | Where-Object { $_.ZipEntry -ne $null } |
+$NeedBuffalo = $Models | Where-Object { $_.ZipEntry -ne $null -and $_.Url -eq $BuffaloZipUrl } |
     Where-Object { -not (Test-Path (Join-Path $BundledDir $_.Filename)) }
 
 if ($NeedBuffalo) {
@@ -143,7 +154,19 @@ foreach ($m in $Models) {
         # Extract from the already-downloaded buffalo_l.zip.
         try {
             Add-Type -AssemblyName System.IO.Compression.FileSystem
-            $zip = [System.IO.Compression.ZipFile]::OpenRead($BuffaloZipPath)
+            $archiveName = Split-Path -Leaf ([System.Uri]$m.Url).AbsolutePath
+            $archivePath = if ($m.Url -eq $BuffaloZipUrl) {
+                $BuffaloZipPath
+            } else {
+                Join-Path $BundledDir ($archiveName + '.tmp')
+            }
+            if (-not (Test-Path $archivePath)) {
+                Write-Host "Downloading $archiveName..."
+                $wc = [System.Net.WebClient]::new()
+                $wc.DownloadFile($m.Url, $archivePath)
+                $wc.Dispose()
+            }
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
             # Match by basename rather than full path — InsightFace's zip
             # layout has shifted across v0.7 asset uploads (sometimes
             # prefixed with `buffalo_l/`, sometimes root-level). Fall back
@@ -158,7 +181,7 @@ foreach ($m in $Models) {
             if (-not $entry) {
                 $available = ($zip.Entries | ForEach-Object { $_.FullName }) -join ', '
                 $zip.Dispose()
-                throw "Entry matching '$expectedBase' not found in buffalo_l.zip (available: $available)"
+                throw "Entry matching '$expectedBase' not found in $archiveName (available: $available)"
             }
             $stream = $entry.Open()
             $tmp = $Dest + '.extract.tmp'
@@ -208,6 +231,7 @@ foreach ($m in $Models) {
 if (Test-Path $BuffaloZipPath) {
     Remove-Item $BuffaloZipPath -Force
 }
+Get-ChildItem -Path $BundledDir -Filter '*.zip.tmp' -ErrorAction SilentlyContinue | Remove-Item -Force
 
 if ($Failures -gt 0) {
     Write-Host "$Failures model(s) failed — see above"

@@ -37,6 +37,7 @@ models/
 !src-tauri/models/bundled/
 !src-tauri/models/bundled/.gitkeep
 src-tauri/models/bundled/*.onnx
+src-tauri/models/bundled/*.onnx.data
 src-tauri/models/bundled/*.gguf
 src-tauri/models/bundled/*.json
 **/catalog.db

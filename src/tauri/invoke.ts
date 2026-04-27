@@ -1254,6 +1254,20 @@ export interface DevelopMaskCreateRequest {
   confidence?: number | null;
 }
 
+export interface DevelopMaskGenerateRequest {
+  photo_id: number;
+  name?: string | null;
+  source: string;
+  mode?: string | null;
+  operations: DevelopOperations;
+}
+
+export interface DevelopMaskGenerateReceipt {
+  mask: DevelopMask;
+  preview_data_url: string;
+  elapsed_ms: number;
+}
+
 export interface DevelopMaskUpdateRequest {
   mask_id: number;
   name?: string | null;
@@ -1374,6 +1388,12 @@ export async function developMasksList(photoId: number): Promise<DevelopMask[]> 
 
 export async function developMaskCreate(req: DevelopMaskCreateRequest): Promise<number> {
   return tauriInvoke<number>('develop_mask_create', { req });
+}
+
+export async function developMaskGenerate(
+  req: DevelopMaskGenerateRequest,
+): Promise<DevelopMaskGenerateReceipt> {
+  return tauriInvoke<DevelopMaskGenerateReceipt>('develop_mask_generate', { req });
 }
 
 export async function developMaskUpdate(req: DevelopMaskUpdateRequest): Promise<DevelopMask> {

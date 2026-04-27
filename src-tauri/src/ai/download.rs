@@ -160,6 +160,111 @@ pub static KNOWN_MODELS: &[ModelSpec] = &[
         filename: "w600k_r50.onnx",
         bundled: true,
     },
+    // Default Develop AI masks: SAM 2.1 Hiera-Large ONNX export. The encoder
+    // runs once per image and the decoder handles Lightroom-style point/box
+    // prompts for Subject, Sky, Object, Person, Foreground, and Background.
+    ModelSpec {
+        name: "sam2.1-hiera-large",
+        kind: "mask-runtime",
+        version: "2.1.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models/resolve/main/sam2.1_hiera_large_20260221.zip",
+        sha256: "tbd",
+        size_bytes: 900_000_000,
+        filename: "sam2.1_hiera_large.encoder.onnx",
+        bundled: true,
+    },
+    ModelSpec {
+        name: "sam2.1-hiera-large-decoder",
+        kind: "mask-runtime-component",
+        version: "2.1.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models/resolve/main/sam2.1_hiera_large_20260221.zip",
+        sha256: "tbd",
+        size_bytes: 900_000_000,
+        filename: "sam2.1_hiera_large.decoder.onnx",
+        bundled: true,
+    },
+    ModelSpec {
+        name: "sam2.1-hiera-tiny",
+        kind: "mask-runtime-component",
+        version: "2.1.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models/resolve/main/sam2.1_hiera_tiny_20260221.zip",
+        sha256: "tbd",
+        size_bytes: 180_000_000,
+        filename: "sam2.1_hiera_tiny.encoder.onnx",
+        bundled: false,
+    },
+    ModelSpec {
+        name: "sam2.1-hiera-tiny-decoder",
+        kind: "mask-runtime-component",
+        version: "2.1.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-2.1-onnx-models/resolve/main/sam2.1_hiera_tiny_20260221.zip",
+        sha256: "tbd",
+        size_bytes: 180_000_000,
+        filename: "sam2.1_hiera_tiny.decoder.onnx",
+        bundled: false,
+    },
+    // Optional SAM3 switch target from Settings. SAM3 adds text-prompt masks
+    // ("red car", "person with hat") but is too large for the default path.
+    ModelSpec {
+        name: "sam3-vith-image-encoder",
+        kind: "mask-runtime-component",
+        version: "3.0.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-3-onnx-models/resolve/main/sam3_vit_h.zip",
+        sha256: "tbd",
+        size_bytes: 1_900_000_000,
+        filename: "sam3_image_encoder.onnx",
+        bundled: false,
+    },
+    ModelSpec {
+        name: "sam3-vith-image-encoder-data",
+        kind: "mask-runtime-component",
+        version: "3.0.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-3-onnx-models/resolve/main/sam3_vit_h.zip",
+        sha256: "tbd",
+        size_bytes: 1_900_000_000,
+        filename: "sam3_image_encoder.onnx.data",
+        bundled: false,
+    },
+    ModelSpec {
+        name: "sam3-vith-language-encoder",
+        kind: "mask-runtime-component",
+        version: "3.0.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-3-onnx-models/resolve/main/sam3_vit_h.zip",
+        sha256: "tbd",
+        size_bytes: 1_700_000_000,
+        filename: "sam3_language_encoder.onnx",
+        bundled: false,
+    },
+    ModelSpec {
+        name: "sam3-vith-language-encoder-data",
+        kind: "mask-runtime-component",
+        version: "3.0.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-3-onnx-models/resolve/main/sam3_vit_h.zip",
+        sha256: "tbd",
+        size_bytes: 1_700_000_000,
+        filename: "sam3_language_encoder.onnx.data",
+        bundled: false,
+    },
+    ModelSpec {
+        name: "sam3-vith-decoder",
+        kind: "mask-runtime-component",
+        version: "3.0.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-3-onnx-models/resolve/main/sam3_vit_h.zip",
+        sha256: "tbd",
+        size_bytes: 150_000_000,
+        filename: "sam3_decoder.onnx",
+        bundled: false,
+    },
+    ModelSpec {
+        name: "sam3-vith-decoder-data",
+        kind: "mask-runtime-component",
+        version: "3.0.0",
+        url: "https://huggingface.co/vietanhdev/segment-anything-3-onnx-models/resolve/main/sam3_vit_h.zip",
+        sha256: "tbd",
+        size_bytes: 150_000_000,
+        filename: "sam3_decoder.onnx.data",
+        bundled: false,
+    },
     // Caption: Moondream2 (1.9B, Apache 2.0) — purpose-built for "describe this photo"
     // prompts, runs on CPU at ~1s/image. Community GGUF quantization.
     //
@@ -415,13 +520,14 @@ mod tests {
                 "model {} has empty filename",
                 m.name
             );
-            // GGUF, ONNX, and JSON (tokenizers) are valid extensions.
+            // GGUF, ONNX, ONNX external-data, and JSON tokenizers are valid.
             let valid_ext = m.filename.ends_with(".onnx")
+                || m.filename.ends_with(".onnx.data")
                 || m.filename.ends_with(".gguf")
                 || m.filename.ends_with(".json");
             assert!(
                 valid_ext,
-                "model {} filename should end with .onnx, .gguf, or .json",
+                "model {} filename should end with .onnx, .onnx.data, .gguf, or .json",
                 m.name
             );
         }
@@ -454,7 +560,13 @@ mod tests {
             .filter(|m| m.bundled)
             .map(|m| m.kind)
             .collect();
-        for required_bundled in &["embedding", "aesthetic", "face-detect", "face-embed"] {
+        for required_bundled in &[
+            "embedding",
+            "aesthetic",
+            "face-detect",
+            "face-embed",
+            "mask-runtime",
+        ] {
             assert!(
                 bundled_kinds.contains(required_bundled),
                 "phase-1 kind {:?} must have bundled=true",
@@ -499,7 +611,12 @@ mod tests {
         // "tbd" is only permitted for kinds that have explicit TODO comments in
         // KNOWN_MODELS (currently: "tokenizer" and "embedding-text" pending a
         // verified first-run download). All other entries must carry locked hashes.
-        const TBD_PERMITTED_KINDS: &[&str] = &["tokenizer", "embedding-text"];
+        const TBD_PERMITTED_KINDS: &[&str] = &[
+            "tokenizer",
+            "embedding-text",
+            "mask-runtime",
+            "mask-runtime-component",
+        ];
         for m in KNOWN_MODELS {
             if TBD_PERMITTED_KINDS.contains(&m.kind) && m.sha256 == "tbd" {
                 // Pending hash lock — acceptable until CI downloads and verifies.

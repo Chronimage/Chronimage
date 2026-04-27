@@ -77,6 +77,8 @@ export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
   curves: identityCurves(),
 };
 
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
 export function defaultDevelopValues(): DevelopValues {
   return operationsToValues(identityOperations());
 }
@@ -85,6 +87,12 @@ export function defaultDevelopValues(): DevelopValues {
  * `exposure` at -100..=100; backend expects EV stops (roughly -4..=4).
  * Empirical map: UI slider × 0.04 = EV. Everything else passes through. */
 export function valuesToOperations(v: DevelopValues): DevelopOperations {
+  const cropW = clamp(v.cropW / 100, 0.05, 1);
+  const cropH = clamp(v.cropH / 100, 0.05, 1);
+  const cropX = clamp(v.cropX / 100, 0, 1 - cropW);
+  const cropY = clamp(v.cropY / 100, 0, 1 - cropH);
+  const focusNear = clamp(v.lensBlurFocusNear / 100, 0, 1);
+  const focusFar = clamp(v.lensBlurFocusFar / 100, 0, 1);
   return {
     exposure: v.exp * 0.04,
     contrast: v.con,
@@ -98,10 +106,10 @@ export function valuesToOperations(v: DevelopValues): DevelopOperations {
     saturation: v.sat,
     clarity: v.clarity,
     dehaze: v.dehaze,
-    crop_x: v.cropX / 100,
-    crop_y: v.cropY / 100,
-    crop_w: v.cropW / 100,
-    crop_h: v.cropH / 100,
+    crop_x: cropX,
+    crop_y: cropY,
+    crop_w: cropW,
+    crop_h: cropH,
     rotation: v.rotation,
     straighten: v.straighten,
     transform_h: v.transformH,
@@ -110,11 +118,11 @@ export function valuesToOperations(v: DevelopValues): DevelopOperations {
     lens_vignette: v.lensVignette,
     chromatic_aberration: v.chromaticAberration,
     spot_heal_count: v.spotHealCount,
-    lens_blur_amount: v.lensBlurAmount,
-    lens_blur_focus_near: v.lensBlurFocusNear / 100,
-    lens_blur_focus_far: v.lensBlurFocusFar / 100,
-    lens_blur_bokeh_boost: v.lensBlurBokehBoost,
-    lens_blur_cat_eye: v.lensBlurCatEye,
+    lens_blur_amount: clamp(v.lensBlurAmount, 0, 100),
+    lens_blur_focus_near: Math.min(focusNear, focusFar),
+    lens_blur_focus_far: Math.max(focusNear, focusFar),
+    lens_blur_bokeh_boost: clamp(v.lensBlurBokehBoost, 0, 100),
+    lens_blur_cat_eye: clamp(v.lensBlurCatEye, 0, 100),
     curves: v.curves,
   };
 }

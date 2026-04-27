@@ -18,6 +18,8 @@ pub mod masks;
 pub mod ops;
 pub mod pipeline;
 pub mod presets;
+pub mod sam;
+pub mod segmentation;
 
 pub use masks::{DevelopMask, DevelopMaskCreateRequest, DevelopMaskUpdateRequest};
 pub use ops::{Operations, PastedReceipt, RenderReceipt};
