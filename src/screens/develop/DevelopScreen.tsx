@@ -68,6 +68,7 @@ export function DevelopScreen() {
   const setSharedFocus = useDevelopUi((s) => s.setFocusedPhotoId);
   const setSharedPreview = useDevelopUi((s) => s.setPreview);
   const setSharedOperations = useDevelopUi((s) => s.setOperations);
+  const setSharedMask = useDevelopUi((s) => s.setActiveMask);
   const sharedPreview = useDevelopUi((s) => s.preview);
   const sharedOperations = useDevelopUi((s) => s.operations);
   const operationSource = useDevelopUi((s) => s.operationSource);
@@ -82,8 +83,9 @@ export function DevelopScreen() {
     setSharedFocus(focusedPhotoId);
     setSharedPreview(null);
     setSharedOperations(null, 'screen');
+    setSharedMask(null);
     setPreview(null);
-  }, [focusedPhotoId, setSharedFocus, setSharedOperations, setSharedPreview]);
+  }, [focusedPhotoId, setSharedFocus, setSharedMask, setSharedOperations, setSharedPreview]);
 
   // Load the photo's current edit state + baseline preview ONCE per photo.
   // Re-fetching `opened` on every render would wipe unsaved slider
@@ -337,7 +339,7 @@ export function DevelopScreen() {
         saving={saveMut.isPending}
       />
 
-      {tab !== 'prompt' ? (
+      {tab === 'develop' ? (
         <DevelopStageSplit
           photo={photo}
           photos={photos}
@@ -354,6 +356,8 @@ export function DevelopScreen() {
           canPaste={!!copiedOps && !pasteMut.isPending}
           preview={preview}
         />
+      ) : tab === 'mask' ? (
+        <MaskStage photo={photo} stageAspect={stageAspect} preview={preview} />
       ) : (
         <PromptStage
           photo={photo}
@@ -593,6 +597,200 @@ function DevelopStageSplit({
   );
 }
 
+const MASK_PRESETS = [
+  { id: 'subject', label: 'Subject', prompt: 'the main subject', icon: 'faces' as const },
+  { id: 'sky', label: 'Sky', prompt: 'the sky', icon: 'cloud' as const },
+  { id: 'person', label: 'Person', prompt: 'the person', icon: 'faces' as const },
+  { id: 'face', label: 'Face', prompt: 'the face', icon: 'brush' as const },
+  { id: 'foreground', label: 'Foreground', prompt: 'the foreground', icon: 'layers' as const },
+  { id: 'background', label: 'Background', prompt: 'the background', icon: 'grid' as const },
+];
+
+interface MaskStageProps {
+  photo: PhotoRow;
+  stageAspect: string;
+  preview: string | null;
+}
+
+function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
+  const [status, setStatus] = useState<SidecarStatus | null>(null);
+  const [masking, setMasking] = useState(false);
+  const [maskError, setMaskError] = useState<string | null>(null);
+  const [customPrompt, setCustomPrompt] = useState('the main subject');
+  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const activeMask = useDevelopUi((s) => s.activeMask);
+  const setActiveMask = useDevelopUi((s) => s.setActiveMask);
+
+  useEffect(() => {
+    let cancelled = false;
+    promptSidecarPing()
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          warn('mask sidecar ping failed', e);
+          setStatus({ configured: false, url: null, reachable: false, model: null, error: String(e) });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const canMask = !!status?.configured && status.reachable && !masking;
+  const statusLabel = !status
+    ? 'Checking sidecar'
+    : status.configured && status.reachable
+      ? `Connected${status.model ? ` · ${status.model}` : ''}`
+      : status.configured
+        ? 'Unreachable'
+        : 'No sidecar configured';
+
+  const runMask = async (prompt: string, presetId: string | null) => {
+    const trimmed = prompt.trim();
+    if (!trimmed || !canMask) return;
+    const photoId = photo.id;
+    setActivePresetId(presetId);
+    setMasking(true);
+    setMaskError(null);
+    try {
+      const result = await maskFromPrompt({ photo_id: photoId, prompt: trimmed });
+      if (useDevelopUi.getState().focusedPhotoId !== photoId) return;
+      setActiveMask({
+        prompt: trimmed,
+        maskB64: result.mask_b64,
+        confidence: result.confidence,
+        latencyMs: result.latency_ms,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      setMaskError(String(e));
+    } finally {
+      setMasking(false);
+    }
+  };
+
+  const maskSrc = activeMask ? `data:image/png;base64,${activeMask.maskB64}` : null;
+
+  return (
+    <div className="mask-stage">
+      <div className="mask-main">
+        <div className="mask-canvas-wrap">
+          <div className="mask-canvas" style={{ aspectRatio: stageAspect }}>
+            {preview ? (
+              <img src={preview} alt={photo.filename} className="mask-base" />
+            ) : (
+              <Thumbnail
+                photoId={photo.id}
+                sizePx={1280}
+                photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
+              />
+            )}
+            {maskSrc && <img src={maskSrc} alt="" aria-hidden="true" className="mask-overlay" />}
+            <div className="mask-status">
+              <Chip variant={status?.reachable ? 'solid' : undefined}>Mask · {statusLabel}</Chip>
+              {activeMask && (
+                <Chip onClose={() => setActiveMask(null)}>
+                  {activeMask.prompt} · {Math.round(activeMask.confidence * 100)}%
+                </Chip>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="mask-panel editor-inspector">
+        <div className="editor-ihead">
+          <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-dim)' }}>
+            Intelligent masking
+          </div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setActiveMask(null)}
+            disabled={!activeMask}
+            aria-disabled={!activeMask}
+            style={{ padding: '5px 9px', fontSize: 11.5 }}
+          >
+            Clear
+          </button>
+        </div>
+        <div className="editor-ibody">
+          <div className="editor-group">
+            <h4>Quick masks</h4>
+            <div className="mask-preset-grid">
+              {MASK_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={activePresetId === preset.id ? 'btn primary' : 'btn'}
+                  disabled={!canMask}
+                  aria-disabled={!canMask}
+                  onClick={() => runMask(preset.prompt, preset.id)}
+                  title={canMask ? preset.prompt : 'Needs a reachable prompt sidecar'}
+                >
+                  <Icon name={preset.icon} size={12} /> {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="editor-group">
+            <h4>Prompt</h4>
+            <div className="mask-custom-row">
+              <input
+                type="text"
+                value={customPrompt}
+                onChange={(e) => setCustomPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    runMask(customPrompt, null);
+                  }
+                }}
+                aria-label="Custom mask prompt"
+              />
+              <button
+                type="button"
+                className={canMask ? 'btn primary' : 'btn primary phase-gated'}
+                disabled={!canMask}
+                aria-disabled={!canMask}
+                onClick={() => runMask(customPrompt, null)}
+              >
+                <Icon name="brush" size={12} /> {masking ? 'Masking...' : 'Mask'}
+              </button>
+            </div>
+          </div>
+
+          <div className="editor-group">
+            <h4>Selection</h4>
+            {activeMask ? (
+              <div className="mask-readout">
+                <div>
+                  <span className="mono">Prompt</span>
+                  <strong>{activeMask.prompt}</strong>
+                </div>
+                <div>
+                  <span className="mono">Confidence</span>
+                  <strong>{Math.round(activeMask.confidence * 100)}%</strong>
+                </div>
+                <div>
+                  <span className="mono">Latency</span>
+                  <strong>{activeMask.latencyMs} ms</strong>
+                </div>
+              </div>
+            ) : (
+              <div className="mask-empty-state">No active mask</div>
+            )}
+            {maskError && <div className="mask-error mono">{maskError}</div>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface PromptStageProps {
   photo: PhotoRow;
   promptText: string;
@@ -617,10 +815,16 @@ function PromptStage({
   const [generating, setGenerating] = useState(false);
   const [renderedB64, setRenderedB64] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
-  const [maskB64, setMaskB64] = useState<string | null>(null);
+  const [maskPrompt, setMaskPrompt] = useState('the main subject');
   const [masking, setMasking] = useState(false);
   const [currentEditId, setCurrentEditId] = useState<number | null>(null);
   const [acceptedB64, setAcceptedB64] = useState<string | null>(null);
+  const activeMask = useDevelopUi((s) => s.activeMask);
+  const setActiveMask = useDevelopUi((s) => s.setActiveMask);
+
+  useEffect(() => {
+    if (activeMask?.prompt) setMaskPrompt(activeMask.prompt);
+  }, [activeMask?.prompt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -672,7 +876,7 @@ function PromptStage({
         prompt: promptText,
         strength: promptStrength,
         constraints,
-        mask_b64: maskB64,
+        mask_b64: activeMask?.maskB64 ?? null,
       });
       setRenderedB64(result.image_b64);
       // The sidecar writes a prompt_edits row server-side. The UI tracks
@@ -721,16 +925,22 @@ function PromptStage({
   };
 
   const onMask = async () => {
-    const rawPrompt = globalThis.prompt('What should be masked? (e.g. "the sky", "the subject")');
-    if (!rawPrompt) return;
+    const rawPrompt = maskPrompt.trim();
+    if (!rawPrompt || !status?.reachable) return;
     setMasking(true);
     setRenderError(null);
     try {
       const result = await maskFromPrompt({
         photo_id: photo.id,
-        prompt: rawPrompt.trim(),
+        prompt: rawPrompt,
       });
-      setMaskB64(result.mask_b64);
+      setActiveMask({
+        prompt: rawPrompt,
+        maskB64: result.mask_b64,
+        confidence: result.confidence,
+        latencyMs: result.latency_ms,
+        createdAt: new Date().toISOString(),
+      });
     } catch (e) {
       setRenderError(String(e));
     } finally {
@@ -909,8 +1119,35 @@ function PromptStage({
               }
               style={{ padding: '5px 9px', fontSize: 11.5 }}
             >
-              <Icon name="brush" size={12} /> {masking ? 'Masking…' : maskB64 ? 'Mask ✓' : 'Mask'}
+              <Icon name="brush" size={12} /> {masking ? 'Masking...' : activeMask ? 'Mask on' : 'Mask'}
             </button>
+            <input
+              type="text"
+              value={maskPrompt}
+              onChange={(e) => setMaskPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  onMask();
+                }
+              }}
+              placeholder="mask prompt"
+              aria-label="Mask prompt"
+              style={{
+                width: 130,
+                fontSize: 11.5,
+                padding: '3px 8px',
+                border: '1px dashed var(--stroke-strong)',
+                borderRadius: 999,
+                background: 'transparent',
+                color: 'var(--fg)',
+              }}
+            />
+            {activeMask && (
+              <Chip onClose={() => setActiveMask(null)}>
+                {activeMask.prompt} · {Math.round(activeMask.confidence * 100)}%
+              </Chip>
+            )}
             {constraints.map((c) => (
               <Chip key={c} onClose={() => removeConstraint(c)}>
                 {c}

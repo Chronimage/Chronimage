@@ -27,7 +27,7 @@ import {
   useUnseenPhotos,
 } from '../../state/queries';
 import { useUi } from '../../state/ui';
-import type { PhotoRow } from '../../tauri/invoke';
+import type { CatalogFacet, PhotoRow } from '../../tauri/invoke';
 import { ExportSheet } from '../export/ExportSheet';
 import { CatalogEmptyState } from './CatalogEmptyState';
 import { DuplicatesPanel } from './DuplicatesPanel';
@@ -37,7 +37,17 @@ export interface CatalogScreenProps {
   albumId: string;
 }
 
-const FACETS = ['All', 'People', 'Places', 'Objects', 'Events', 'Colors', 'Cameras'];
+type FacetId = 'all' | CatalogFacet;
+
+const FACETS: { id: FacetId; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'people', label: 'People' },
+  { id: 'place', label: 'Places' },
+  { id: 'object', label: 'Objects' },
+  { id: 'event', label: 'Events' },
+  { id: 'color', label: 'Colors' },
+  { id: 'camera', label: 'Cameras' },
+];
 
 const SORT_LABELS: Record<
   'captured_desc' | 'captured_asc' | 'imported_desc' | 'filename_asc' | 'aesthetic_desc' | 'random',
@@ -645,6 +655,11 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const rowHeightPx = gridDensity === 'spacious' ? 260 : gridDensity === 'compact' ? 160 : 200;
 
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const [activeFacet, setActiveFacet] = useState<FacetId>('all');
+  // Stable seed for `random` sort so paginated `list_photos` calls don't
+  // duplicate rows. Regenerated on every fresh "Random" pick (including
+  // re-clicking it while already active) so the user can re-shuffle.
+  const [randomSeed, setRandomSeed] = useState<number>(() => Math.floor(Math.random() * 0x7fffffff));
 
   const { data: albums = [] } = useAlbums();
   const { data: sources = [] } = useSources();
@@ -654,7 +669,12 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = usePhotos({ albumId: numericAlbumId, sortBy });
+  } = usePhotos({
+    albumId: numericAlbumId,
+    sortBy,
+    facet: activeFacet === 'all' ? null : activeFacet,
+    randomSeed: sortBy === 'random' ? randomSeed : null,
+  });
 
   const selectedIds = useMemo(() => [...selected], [selected]);
   const { data: removePreview } = useRemovePhotosPreview(removeDialogOpen ? selectedIds : []);
@@ -775,19 +795,29 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
         <div className="divider" />
         <button
           type="button"
-          className={`btn${gridDensity === 'comfortable' || gridDensity === 'compact' ? ' on' : ''}`}
-          aria-label="Grid view"
-          title="Grid view (denser columns)"
-          onClick={() => setTweaks({ gridDensity: 'comfortable' })}
-          aria-pressed={gridDensity !== 'spacious'}
+          className={`btn${gridDensity === 'compact' ? ' on' : ''}`}
+          aria-label="Compact density"
+          title="Compact density (smallest thumbnails, most photos visible)"
+          onClick={() => setTweaks({ gridDensity: 'compact' })}
+          aria-pressed={gridDensity === 'compact'}
         >
           <Icon name="grid" size={13} />
         </button>
         <button
           type="button"
+          className={`btn${gridDensity === 'comfortable' ? ' on' : ''}`}
+          aria-label="Comfortable density"
+          title="Comfortable density (medium thumbnails)"
+          onClick={() => setTweaks({ gridDensity: 'comfortable' })}
+          aria-pressed={gridDensity === 'comfortable'}
+        >
+          <Icon name="cards" size={13} />
+        </button>
+        <button
+          type="button"
           className={`btn${gridDensity === 'spacious' ? ' on' : ''}`}
-          aria-label="Stack view"
-          title="Stack view (wider columns)"
+          aria-label="Spacious density"
+          title="Spacious density (largest thumbnails, stack view)"
           onClick={() => setTweaks({ gridDensity: 'spacious' })}
           aria-pressed={gridDensity === 'spacious'}
         >
@@ -815,6 +845,11 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                   role="menuitemradio"
                   aria-checked={sortBy === key}
                   onClick={() => {
+                    // Picking Random (or re-picking it) regenerates the seed
+                    // so the user gets a fresh shuffle each time.
+                    if (key === 'random') {
+                      setRandomSeed(Math.floor(Math.random() * 0x7fffffff));
+                    }
                     setTweaks({ sortBy: key });
                     setSortMenuOpen(false);
                   }}
@@ -919,12 +954,23 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
               </div>
             </div>
 
-            <div className="catalog-section facetbar">
-              {FACETS.map((f) => (
-                <button type="button" key={f} className="btn" style={{ border: '1px solid var(--stroke)' }}>
-                  {f}
-                </button>
-              ))}
+            <div className="catalog-section facetbar" role="tablist" aria-label="Filter by facet">
+              {FACETS.map((f) => {
+                const active = activeFacet === f.id;
+                return (
+                  <button
+                    type="button"
+                    key={f.id}
+                    role="tab"
+                    aria-selected={active}
+                    className={`btn${active ? ' active' : ''}`}
+                    style={{ border: '1px solid var(--stroke)' }}
+                    onClick={() => setActiveFacet(f.id)}
+                  >
+                    {f.label}
+                  </button>
+                );
+              })}
             </div>
 
             <RediscoveryRow

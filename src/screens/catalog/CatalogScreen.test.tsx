@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 import { describe, expect, it } from 'vitest';
 import { CatalogScreen } from './CatalogScreen';
@@ -25,6 +25,28 @@ describe('CatalogScreen', () => {
     // now the picker leads with a policy banner + three action buttons.
     expect(screen.getByText(/CHRONIMAGE ALWAYS COPIES/i)).toBeInTheDocument();
     expect(screen.getByText(/Add a folder/i)).toBeInTheDocument();
+  });
+
+  it('density toggle exposes three independently selectable buttons', () => {
+    render(<CatalogScreen albumId="all" />, { wrapper });
+    const compact = screen.getByRole('button', { name: /compact density/i });
+    const comfortable = screen.getByRole('button', { name: /comfortable density/i });
+    const spacious = screen.getByRole('button', { name: /spacious density/i });
+
+    // Default tweaks ship with `compact`, so only the compact button is on.
+    expect(compact).toHaveAttribute('aria-pressed', 'true');
+    expect(comfortable).toHaveAttribute('aria-pressed', 'false');
+    expect(spacious).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(comfortable);
+    expect(compact).toHaveAttribute('aria-pressed', 'false');
+    expect(comfortable).toHaveAttribute('aria-pressed', 'true');
+    expect(spacious).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(spacious);
+    expect(compact).toHaveAttribute('aria-pressed', 'false');
+    expect(comfortable).toHaveAttribute('aria-pressed', 'false');
+    expect(spacious).toHaveAttribute('aria-pressed', 'true');
   });
 });
 

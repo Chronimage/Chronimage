@@ -21,14 +21,24 @@ import type { DevelopOperations } from '../tauri/invoke';
 
 type OperationSource = 'screen' | 'sidepanel';
 
+export interface ActiveDevelopMask {
+  prompt: string;
+  maskB64: string;
+  confidence: number;
+  latencyMs: number;
+  createdAt: string;
+}
+
 interface DevelopUiState {
   focusedPhotoId: number | null;
   preview: string | null;
   operations: DevelopOperations | null;
   operationSource: OperationSource | null;
+  activeMask: ActiveDevelopMask | null;
   setFocusedPhotoId: (id: number | null) => void;
   setPreview: (url: string | null) => void;
   setOperations: (operations: DevelopOperations | null, source: OperationSource) => void;
+  setActiveMask: (mask: ActiveDevelopMask | null) => void;
 }
 
 export const useDevelopUi = create<DevelopUiState>((set) => ({
@@ -36,7 +46,9 @@ export const useDevelopUi = create<DevelopUiState>((set) => ({
   preview: null,
   operations: null,
   operationSource: null,
+  activeMask: null,
   setFocusedPhotoId: (id) => set({ focusedPhotoId: id }),
   setPreview: (url) => set({ preview: url }),
   setOperations: (operations, operationSource) => set({ operations, operationSource }),
+  setActiveMask: (activeMask) => set({ activeMask }),
 }));

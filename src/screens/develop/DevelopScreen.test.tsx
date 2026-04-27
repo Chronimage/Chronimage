@@ -74,6 +74,30 @@ async function mockDevelopInvoke(
     if (cmd === 'develop_reset') return 1;
     if (cmd === 'develop_paste_edits') return { pasted_photo_count: 1, skipped: [] };
     if (cmd === 'presets_list') return presets;
+    if (cmd === 'prompt_sidecar_ping') {
+      return { configured: true, url: 'http://localhost:17183', reachable: true, model: 'sam2', error: null };
+    }
+    if (cmd === 'mask_from_prompt') return { mask_b64: 'mask-png', confidence: 0.92, latency_ms: 12 };
+    if (cmd === 'prompt_edit')
+      return { image_b64: 'rendered-png', latency_ms: 20, model_id: 'flux-dev', seed: 7 };
+    if (cmd === 'prompt_edit_list') {
+      return [
+        {
+          id: 9,
+          photo_id: Number(callArgs.photoId ?? 1),
+          prompt: 'edit',
+          strength: 65,
+          constraints_json: '[]',
+          mask_b64: null,
+          rendered_b64: 'rendered-png',
+          model_id: 'flux-dev',
+          seed: 7,
+          latency_ms: 20,
+          state: 'pending',
+          created_at: '2026-04-01T00:00:00Z',
+        },
+      ];
+    }
     if (cmd === 'get_thumbnail') return [];
     return [];
   });
@@ -97,6 +121,7 @@ beforeEach(() => {
     preview: null,
     operations: null,
     operationSource: null,
+    activeMask: null,
   });
 });
 
@@ -227,6 +252,31 @@ describe('DevelopScreen', () => {
       const saveArgs = lastCallArg(invoke, 'develop_save');
       expect((saveArgs.operations as DevelopOperations).exposure).toBe(0.75);
       expect((saveArgs.operations as DevelopOperations).contrast).toBe(15);
+    });
+  });
+
+  it('creates an intelligent mask and threads it into prompt generation', async () => {
+    const invoke = await mockDevelopInvoke([photoFixture(1)]);
+    render(<DevelopScreen />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mask' }));
+    const subject = await screen.findByRole('button', { name: /subject/i });
+    await waitFor(() => expect(subject).not.toBeDisabled());
+    fireEvent.click(subject);
+
+    await waitFor(() => {
+      const maskArgs = lastCallArg(invoke, 'mask_from_prompt');
+      expect(maskArgs.req).toEqual({ photo_id: 1, prompt: 'the main subject' });
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
+    const generate = await screen.findByRole('button', { name: /generate/i });
+    await waitFor(() => expect(generate).not.toBeDisabled());
+    fireEvent.click(generate);
+
+    await waitFor(() => {
+      const editArgs = lastCallArg(invoke, 'prompt_edit');
+      expect((editArgs.req as Record<string, unknown>).mask_b64).toBe('mask-png');
     });
   });
 });

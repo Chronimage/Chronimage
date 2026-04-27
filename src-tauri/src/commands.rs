@@ -1832,25 +1832,73 @@ pub struct PhotoRow {
 /// Translate a user-facing sort identifier to a SQL `ORDER BY` clause.
 ///
 /// Unknown values fall back to the default newest-first order. Each variant
-/// appends `imported_at DESC` as a deterministic tie-breaker so pagination
-/// stays stable inside ties.
-fn sort_by_to_sql(sort_by: Option<&str>) -> &'static str {
+/// appends `imported_at DESC` (or `id`) as a deterministic tie-breaker so
+/// pagination stays stable inside ties.
+///
+/// `random` with a `random_seed` produces a deterministic pseudo-random
+/// shuffle so infinite scroll doesn't return duplicates across pages. Without
+/// a seed it falls back to `RANDOM()` (per-row, unstable across pages).
+fn sort_by_to_sql(sort_by: Option<&str>, random_seed: Option<i64>) -> String {
     match sort_by.unwrap_or("captured_desc") {
-        "captured_asc" => "ORDER BY captured_at ASC NULLS LAST, imported_at ASC",
-        "imported_desc" => "ORDER BY imported_at DESC",
-        "filename_asc" => "ORDER BY LOWER(filename) ASC, imported_at DESC",
-        "aesthetic_desc" => "ORDER BY aesthetic_score DESC NULLS LAST, imported_at DESC",
-        "random" => "ORDER BY RANDOM()",
+        "captured_asc" => "ORDER BY captured_at ASC NULLS LAST, imported_at ASC".to_string(),
+        "imported_desc" => "ORDER BY imported_at DESC".to_string(),
+        "filename_asc" => "ORDER BY LOWER(filename) ASC, imported_at DESC".to_string(),
+        "aesthetic_desc" => {
+            "ORDER BY aesthetic_score DESC NULLS LAST, imported_at DESC".to_string()
+        }
+        "random" => match random_seed {
+            // (id + seed) * Knuth-prime, mod a large prime — well-spread,
+            // stable per (id, seed) pair, fits in SQLite's signed 64-bit ints
+            // for any catalog id up to ~3.4B. Trailing `id` hard tie-break.
+            Some(seed) => {
+                let s = seed.rem_euclid(9_999_991);
+                format!("ORDER BY ((id + {s}) * 2654435761) % 9999991, id")
+            }
+            None => "ORDER BY RANDOM()".to_string(),
+        },
         // Default + explicit "captured_desc"
-        _ => "ORDER BY captured_at DESC NULLS LAST, imported_at DESC",
+        _ => "ORDER BY captured_at DESC NULLS LAST, imported_at DESC".to_string(),
     }
 }
 
-/// List photos with optional pagination, album filter, and sort.
+/// Translate a toolbar facet identifier to a SQL fragment that filters
+/// `photos` to rows matching that facet. Returns `None` for `all` or any
+/// unknown value (caller treats as "no filter"). Whitelist-only — never
+/// interpolates raw user input into SQL.
+fn facet_to_sql_clause(facet: Option<&str>) -> Option<&'static str> {
+    match facet? {
+        "people" => Some("EXISTS (SELECT 1 FROM faces f WHERE f.photo_id = photos.id)"),
+        // GPS-tagged photos count as places even before reverse-geocoding
+        // produces a `place` tag, so users see immediate results post-import.
+        "place" => Some(
+            "(photos.gps_lat IS NOT NULL OR EXISTS (SELECT 1 FROM tags t \
+             WHERE t.photo_id = photos.id AND t.kind = 'place'))",
+        ),
+        // SigLIP scene tags land under `auto_scene`; user/AI-curated object
+        // tags use `object`. Both feel like "objects" to the user.
+        "object" => Some(
+            "EXISTS (SELECT 1 FROM tags t \
+             WHERE t.photo_id = photos.id AND t.kind IN ('object', 'auto_scene'))",
+        ),
+        "event" => {
+            Some("EXISTS (SELECT 1 FROM tags t WHERE t.photo_id = photos.id AND t.kind = 'event')")
+        }
+        "color" => {
+            Some("EXISTS (SELECT 1 FROM tags t WHERE t.photo_id = photos.id AND t.kind = 'color')")
+        }
+        "camera" => Some("photos.camera_make IS NOT NULL"),
+        _ => None,
+    }
+}
+
+/// List photos with optional pagination, album filter, facet filter, and sort.
 /// `limit` defaults to 100; `offset` defaults to 0.
 /// When `album_id` is provided the album's `rule_json` is evaluated to build a WHERE clause.
 /// `sort_by` accepts `captured_desc` (default) | `captured_asc` | `imported_desc`
 ///   | `filename_asc` | `aesthetic_desc` | `random`.
+/// `facet` accepts `people` | `place` | `object` | `event` | `color` | `camera`
+///   and combines with the album filter via `AND`.
+/// `random_seed` makes `random` sort stable across paginated calls.
 #[tauri::command]
 pub async fn list_photos(
     state: State<'_, AppState>,
@@ -1858,12 +1906,15 @@ pub async fn list_photos(
     offset: Option<i64>,
     album_id: Option<i64>,
     sort_by: Option<String>,
+    facet: Option<String>,
+    random_seed: Option<i64>,
 ) -> AppResult<Vec<PhotoRow>> {
     let lim = limit.unwrap_or(100);
     let off = offset.unwrap_or(0);
 
-    // Resolve album filter.
-    let where_clause = if let Some(aid) = album_id {
+    // Collect WHERE fragments from album rules + facet filter; combine with AND.
+    let mut where_parts: Vec<String> = Vec::new();
+    if let Some(aid) = album_id {
         let rule_json: Option<String> =
             sqlx::query_scalar("SELECT rule_json FROM smart_albums WHERE id = ?1")
                 .bind(aid)
@@ -1879,16 +1930,24 @@ pub async fn list_photos(
                         "invalid rule_json for album {aid}"
                     )))
                 }
-                Ok(rule) => catalog::rules::rule_to_sql(&rule)
-                    .map(|frag| format!("WHERE {frag}"))
-                    .unwrap_or_default(),
+                Ok(rule) => {
+                    if let Some(frag) = catalog::rules::rule_to_sql(&rule) {
+                        where_parts.push(frag);
+                    }
+                }
             },
         }
-    } else {
+    }
+    if let Some(facet_clause) = facet_to_sql_clause(facet.as_deref()) {
+        where_parts.push(facet_clause.to_string());
+    }
+    let where_clause = if where_parts.is_empty() {
         String::new()
+    } else {
+        format!("WHERE {}", where_parts.join(" AND "))
     };
 
-    let order_clause = sort_by_to_sql(sort_by.as_deref());
+    let order_clause = sort_by_to_sql(sort_by.as_deref(), random_seed);
 
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
@@ -5539,6 +5598,155 @@ mod tests {
             ids.contains(&photo_id),
             "cover should include the matching photo"
         );
+    }
+
+    // list_photos facet filter + seeded random sort ───────────────────────────
+
+    #[test]
+    fn facet_to_sql_clause_whitelist_only() {
+        // Known facets return a fragment.
+        for f in ["people", "place", "object", "event", "color", "camera"] {
+            assert!(
+                facet_to_sql_clause(Some(f)).is_some(),
+                "facet `{f}` should map to a SQL fragment"
+            );
+        }
+        // Anything else (including `all` and obvious injection attempts) is
+        // ignored — the caller treats `None` as "no facet filter".
+        for f in [
+            "all",
+            "",
+            "; drop table photos; --",
+            "people'; drop table photos; --",
+            "unknown",
+        ] {
+            assert!(
+                facet_to_sql_clause(Some(f)).is_none(),
+                "facet `{f}` must NOT yield a fragment"
+            );
+        }
+        assert!(facet_to_sql_clause(None).is_none());
+    }
+
+    #[test]
+    fn sort_by_random_with_seed_is_stable() {
+        // Two calls with the same seed produce the same ORDER BY.
+        let a = sort_by_to_sql(Some("random"), Some(42));
+        let b = sort_by_to_sql(Some("random"), Some(42));
+        assert_eq!(a, b);
+        assert!(a.contains(" % 9999991"));
+        assert!(a.ends_with(", id"), "must end with `, id` tie-break");
+
+        // Different seeds produce different orderings.
+        let c = sort_by_to_sql(Some("random"), Some(43));
+        assert_ne!(a, c);
+
+        // Negative seeds don't break the SQL — `rem_euclid` keeps it positive.
+        let d = sort_by_to_sql(Some("random"), Some(-7));
+        assert!(d.contains(" % 9999991"));
+        assert!(!d.contains("-"), "no negative literal in SQL: `{d}`");
+
+        // No seed → fall back to plain RANDOM() (the unstable, per-call mode).
+        assert_eq!(sort_by_to_sql(Some("random"), None), "ORDER BY RANDOM()");
+    }
+
+    async fn insert_blank_photo(pool: &sqlx::SqlitePool, sha_prefix: char) -> i64 {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, imported_at, is_raw) \
+             VALUES (?1, ?2, 0, 0, ?3, 0) RETURNING id",
+        )
+        .bind(format!("{sha_prefix:0>64}"))
+        .bind(format!("{sha_prefix}.jpg"))
+        .bind(&now)
+        .fetch_one(pool)
+        .await
+        .expect("insert photo")
+    }
+
+    async fn tag_photo(pool: &sqlx::SqlitePool, photo_id: i64, kind: &str, label: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO tags (photo_id, label, kind, confidence, created_at) \
+             VALUES (?1, ?2, ?3, 1.0, ?4)",
+        )
+        .bind(photo_id)
+        .bind(label)
+        .bind(kind)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("insert tag");
+    }
+
+    /// Run the same SELECT body `list_photos` builds, with a bolted-on facet
+    /// fragment, so we exercise the actual SQL the production code generates.
+    async fn fetch_with_facet(pool: &sqlx::SqlitePool, facet: &str) -> Vec<PhotoRow> {
+        let frag = facet_to_sql_clause(Some(facet)).expect("known facet");
+        let sql = format!(
+            "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
+             size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+             FROM photos WHERE {frag} ORDER BY id ASC LIMIT 100 OFFSET 0"
+        );
+        sqlx::query_as::<_, PhotoRow>(&sql)
+            .fetch_all(pool)
+            .await
+            .expect("query")
+    }
+
+    #[tokio::test]
+    async fn list_photos_camera_facet_keeps_only_photos_with_camera_make() {
+        let (_tmp, pool) = make_pool().await;
+        let with_camera = insert_blank_photo(&pool, 'a').await;
+        let _no_camera = insert_blank_photo(&pool, 'b').await;
+        sqlx::query("UPDATE photos SET camera_make = 'Sony' WHERE id = ?1")
+            .bind(with_camera)
+            .execute(&pool)
+            .await
+            .expect("update");
+
+        let rows = fetch_with_facet(&pool, "camera").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, with_camera);
+    }
+
+    #[tokio::test]
+    async fn list_photos_object_facet_matches_object_or_auto_scene_tags() {
+        let (_tmp, pool) = make_pool().await;
+        let p_object = insert_blank_photo(&pool, 'a').await;
+        let p_scene = insert_blank_photo(&pool, 'b').await;
+        let p_color = insert_blank_photo(&pool, 'c').await;
+        tag_photo(&pool, p_object, "object", "dog").await;
+        tag_photo(&pool, p_scene, "auto_scene", "beach").await;
+        tag_photo(&pool, p_color, "color", "red").await;
+
+        let rows = fetch_with_facet(&pool, "object").await;
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2, "object facet keeps both object + auto_scene");
+        assert!(ids.contains(&p_object));
+        assert!(ids.contains(&p_scene));
+        assert!(!ids.contains(&p_color));
+    }
+
+    #[tokio::test]
+    async fn list_photos_place_facet_matches_gps_or_place_tag() {
+        let (_tmp, pool) = make_pool().await;
+        let p_gps = insert_blank_photo(&pool, 'a').await;
+        let p_tag = insert_blank_photo(&pool, 'b').await;
+        let _p_neither = insert_blank_photo(&pool, 'c').await;
+        sqlx::query("UPDATE photos SET gps_lat = 47.6, gps_lng = -122.3 WHERE id = ?1")
+            .bind(p_gps)
+            .execute(&pool)
+            .await
+            .expect("update gps");
+        tag_photo(&pool, p_tag, "place", "Seattle").await;
+
+        let rows = fetch_with_facet(&pool, "place").await;
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&p_gps));
+        assert!(ids.contains(&p_tag));
     }
 
     // list_sources ────────────────────────────────────────────────────────────
