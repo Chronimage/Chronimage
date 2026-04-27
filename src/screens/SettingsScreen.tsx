@@ -43,6 +43,7 @@ const KIND_TO_REINDEX: Record<string, string | null> = {
   'face-detect': 'face-detect',
   'face-embed': 'face-embed',
   'caption-gguf': 'captions',
+  'mask-runtime': null,
 };
 
 /**
@@ -56,6 +57,7 @@ const KIND_LABEL: Record<string, string> = {
   aesthetic: 'Scores photo quality',
   'face-detect': 'Finds faces in photos',
   'face-embed': 'Tells people apart',
+  'mask-runtime': 'Selects masks like Lightroom',
   'caption-gguf': 'Writes photo descriptions',
   tokenizer: 'Search text tokenizer',
 };
@@ -76,6 +78,8 @@ const KIND_DESCRIPTION: Record<string, string> = {
     "Finds where faces are in each photo so the app can group them. Doesn't identify anyone on its own — just locates the faces.",
   'face-embed':
     'Converts each detected face into a fingerprint so the app can group all photos of the same person together.',
+  'mask-runtime':
+    'Creates local masks for Subject, Sky, Object, Person, Foreground, and Background in the Develop tab.',
   'caption-gguf':
     'Writes a short natural-language description of each photo. Optional — search works without it.',
   tokenizer:
@@ -88,6 +92,7 @@ interface Preset {
   filename: string;
   sizeBytes: number;
   license: string;
+  installNames?: string[];
   note?: string;
   /**
    * Short plain-English blurb rendered under the name in the picker so a
@@ -204,6 +209,43 @@ const PRESETS_BY_KIND: Record<string, Preset[]> = {
       license: 'MIT',
       note: 'Default · bundled',
       tagline: 'Industry-standard — groups same person across angles.',
+    },
+  ],
+  'mask-runtime': [
+    {
+      name: 'sam2.1-hiera-large',
+      repo: 'vietanhdev/segment-anything-2.1-onnx-models',
+      filename: 'sam2.1_hiera_large_20260221.zip',
+      sizeBytes: 900_000_000,
+      license: 'Apache-2.0',
+      note: 'Default · bundled',
+      tagline: 'Best default quality for Lightroom-style Subject, Sky, Person, and Object selections.',
+      installNames: ['sam2.1-hiera-large', 'sam2.1-hiera-large-decoder'],
+    },
+    {
+      name: 'sam2.1-hiera-tiny',
+      repo: 'vietanhdev/segment-anything-2.1-onnx-models',
+      filename: 'sam2.1_hiera_tiny_20260221.zip',
+      sizeBytes: 180_000_000,
+      license: 'Apache-2.0',
+      tagline: 'Fastest fallback for low-RAM machines; lower mask quality.',
+      installNames: ['sam2.1-hiera-tiny', 'sam2.1-hiera-tiny-decoder'],
+    },
+    {
+      name: 'sam3-vith',
+      repo: 'vietanhdev/segment-anything-3-onnx-models',
+      filename: 'sam3_vit_h.zip',
+      sizeBytes: 3_700_000_000,
+      license: 'SAM License',
+      tagline: 'Optional text-prompt masks like "red car" or "person with hat"; much larger and slower.',
+      installNames: [
+        'sam3-vith-image-encoder',
+        'sam3-vith-image-encoder-data',
+        'sam3-vith-language-encoder',
+        'sam3-vith-language-encoder-data',
+        'sam3-vith-decoder',
+        'sam3-vith-decoder-data',
+      ],
     },
   ],
   'caption-gguf': [
@@ -504,7 +546,7 @@ function ModelPickerModal({ open, feature, onClose, onSwapped }: PickerProps) {
       const reindexKind = KIND_TO_REINDEX[feature.kind];
       if (activePreset && activePreset.name !== feature.name) {
         // Selected a different preset — ensure it's downloaded first.
-        await download.mutateAsync([activePreset.name]);
+        await download.mutateAsync(activePreset.installNames ?? [activePreset.name]);
       } else if (customRepo.trim() && customFilename.trim()) {
         // Custom HF URL flow — Phase 1b will land the register-custom flow.
         // For now, surface a friendly "not yet available" to avoid silent no-op.
@@ -818,6 +860,7 @@ export function SettingsScreen() {
     isError: modelsError,
     refetch: refetchModels,
   } = useAiModelsStatus();
+  const visibleModels = models.filter((model) => model.kind !== 'mask-runtime-component');
 
   const [pickerFor, setPickerFor] = useState<ModelStatus | null>(null);
   // Tracks which model name is currently being installed so the row shows
@@ -869,7 +912,8 @@ export function SettingsScreen() {
   async function handleInstallModel(model: ModelStatus) {
     setInstallingName(model.name);
     try {
-      await installMutation.mutateAsync([model.name]);
+      const defaultPreset = PRESETS_BY_KIND[model.kind]?.[0];
+      await installMutation.mutateAsync(defaultPreset?.installNames ?? [model.name]);
       await refetchModels();
     } catch (err) {
       debug('settings: install model failed', model.name, err);
@@ -1077,12 +1121,12 @@ export function SettingsScreen() {
                 Failed to load model status.
               </div>
             )}
-            {!modelsLoading && !modelsError && models.length === 0 && (
+            {!modelsLoading && !modelsError && visibleModels.length === 0 && (
               <div className="mono" style={{ fontSize: 12, color: 'var(--fg-mute)', padding: '12px 0' }}>
                 No models registered yet.
               </div>
             )}
-            {models.map((m) => (
+            {visibleModels.map((m) => (
               <ModelRow
                 key={m.filename}
                 model={m}

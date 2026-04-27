@@ -1348,6 +1348,10 @@ select {
   width: 100%;
   accent-color: var(--accent);
 }
+.slider-row input[type="range"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .preset-grid {
   display: grid;
@@ -2099,6 +2103,135 @@ select {
   min-height: 0;
   overflow: hidden;
   position: relative;
+  background:
+    linear-gradient(45deg, color-mix(in oklch, var(--bg) 92%, white) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in oklch, var(--bg) 92%, white) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in oklch, var(--bg) 92%, white) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in oklch, var(--bg) 92%, white) 75%);
+  background-color: var(--bg);
+  background-position:
+    0 0,
+    0 10px,
+    10px -10px,
+    -10px 0;
+  background-size: 20px 20px;
+}
+.develop-canvas-frame {
+  border-radius: 5px;
+  transform-origin: center center;
+  transition: transform 120ms ease;
+}
+.develop-canvas-toolbar,
+.develop-crop-toolbar {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--bg-chrome) 90%, transparent);
+  backdrop-filter: blur(10px);
+}
+.develop-canvas-toolbar {
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.develop-crop-toolbar {
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.develop-canvas-toolbar .btn,
+.develop-crop-toolbar .btn {
+  padding: 4px 9px;
+  font-size: 11px;
+}
+.develop-crop-toolbar .mono {
+  color: var(--fg-mute);
+  font-size: 10.5px;
+  padding: 0 4px 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.crop-dim {
+  position: absolute;
+  z-index: 4;
+  background: rgba(0, 0, 0, 0.52);
+  pointer-events: none;
+}
+.crop-dim-top {
+  left: 0;
+  right: 0;
+  top: 0;
+}
+.crop-dim-left {
+  left: 0;
+}
+.crop-dim-bottom {
+  left: 0;
+  right: 0;
+  bottom: 0;
+}
+.crop-box {
+  position: absolute;
+  z-index: 5;
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  cursor: move;
+  touch-action: none;
+}
+.crop-grid {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      to right,
+      transparent 33.1%,
+      rgba(255, 255, 255, 0.55) 33.1% 33.7%,
+      transparent 33.7% 66.1%,
+      rgba(255, 255, 255, 0.55) 66.1% 66.7%,
+      transparent 66.7%
+    ),
+    linear-gradient(
+      to bottom,
+      transparent 33.1%,
+      rgba(255, 255, 255, 0.55) 33.1% 33.7%,
+      transparent 33.7% 66.1%,
+      rgba(255, 255, 255, 0.55) 66.1% 66.7%,
+      transparent 66.7%
+    );
+  pointer-events: none;
+}
+.crop-handle {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  border: 2px solid white;
+  background: var(--bg);
+  border-radius: 999px;
+  touch-action: none;
+}
+.crop-handle.nw {
+  left: -7px;
+  top: -7px;
+  cursor: nwse-resize;
+}
+.crop-handle.ne {
+  right: -7px;
+  top: -7px;
+  cursor: nesw-resize;
+}
+.crop-handle.sw {
+  left: -7px;
+  bottom: -7px;
+  cursor: nesw-resize;
+}
+.crop-handle.se {
+  right: -7px;
+  bottom: -7px;
+  cursor: nwse-resize;
 }
 .editor-histogram {
   position: absolute;
@@ -2156,6 +2289,12 @@ select {
   color: var(--fg-mute);
   margin: 0 0 10px;
   font-weight: 500;
+}
+.crop-aspect-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0 6px;
 }
 
 .curves-box {
@@ -2320,6 +2459,50 @@ select {
   filter: sepia(1) saturate(5) hue-rotate(250deg);
   pointer-events: none;
 }
+.local-mask-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0.55;
+  mix-blend-mode: screen;
+  background: color-mix(in oklch, var(--accent) 55%, #d78cff);
+}
+.local-mask-preview.kind-sky {
+  display: none;
+}
+.local-mask-preview.kind-foreground {
+  display: none;
+}
+.local-mask-preview.kind-subject,
+.local-mask-preview.kind-object {
+  display: none;
+}
+.local-mask-preview.kind-person {
+  display: none;
+}
+.local-mask-preview.kind-background,
+.local-mask-preview.kind-landscape {
+  display: none;
+}
+.local-mask-preview.kind-unavailable {
+  display: none;
+}
+.local-mask-preview.kind-linear-gradient {
+  background: linear-gradient(
+    to bottom,
+    transparent var(--mask-top),
+    rgba(166, 112, 255, 0.95) var(--mask-bottom)
+  );
+}
+.local-mask-preview.kind-radial-gradient,
+.local-mask-preview.kind-brush {
+  background: radial-gradient(
+    circle var(--mask-radius) at var(--mask-cx) var(--mask-cy),
+    rgba(166, 112, 255, 0.98) 0 50%,
+    transparent 78%
+  );
+}
 .mask-status {
   position: absolute;
   left: 12px;
@@ -2328,6 +2511,54 @@ select {
   gap: 6px;
   flex-wrap: wrap;
   max-width: calc(100% - 24px);
+}
+.mask-subtitle {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--fg-mute);
+}
+.mask-create-head {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.mask-create-head h4 {
+  margin: 0;
+}
+.mask-mode-seg,
+.mask-layer-mode {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.mask-mode-legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.mask-mode-seg button,
+.mask-layer-mode button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-mute);
+  padding: 5px 4px;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.mask-mode-seg button.on,
+.mask-layer-mode button.on {
+  background: color-mix(in oklch, var(--accent) 18%, var(--bg-elev));
+  color: var(--fg);
 }
 .mask-preset-grid {
   display: grid;
@@ -2386,6 +2617,11 @@ select {
   border: 1px solid var(--stroke);
   border-radius: 8px;
   background: var(--bg-elev);
+  cursor: pointer;
+}
+.mask-layer-row.active {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 10%, var(--bg-elev));
 }
 .mask-layer-row[data-hidden="true"] {
   opacity: 0.58;
@@ -2400,6 +2636,12 @@ select {
   margin-top: 2px;
   font-size: 10.5px;
   color: var(--fg-mute);
+}
+.mask-layer-mode {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.mask-layer-mode button {
+  padding: 4px 3px;
 }
 .mask-layer-actions {
   display: flex;

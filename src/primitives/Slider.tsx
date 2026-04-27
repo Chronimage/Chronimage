@@ -6,6 +6,7 @@ export interface SliderProps {
   max?: number;
   step?: number;
   suffix?: string;
+  disabled?: boolean;
 }
 
 export function Slider({
@@ -16,6 +17,7 @@ export function Slider({
   max = 100,
   step = 1,
   suffix = '',
+  disabled = false,
 }: SliderProps) {
   return (
     <div className="slider-row">
@@ -26,6 +28,7 @@ export function Slider({
         max={max}
         step={step}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
         aria-label={label}
       />

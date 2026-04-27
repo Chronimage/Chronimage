@@ -1,7 +1,10 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  aiModelsStatus,
+  aiReindex,
   appVersion,
+  backfillPlaceLabels,
   cleanupDryRun,
   createSource,
   currentChannel,
@@ -9,11 +12,18 @@ import {
   detectIcloudPath,
   developApply,
   developCopyEdits,
+  developMaskApplyPreview,
+  developMaskCreate,
+  developMaskDelete,
+  developMaskGenerate,
+  developMasksList,
+  developMaskUpdate,
   developOpen,
   developPasteEdits,
   developPresetApply,
   developReset,
   developSave,
+  geonamesStatus,
   gphotosUpload,
   gphotosUploadScopeOk,
   identityOperations,
@@ -24,13 +34,31 @@ import {
   listIphoneDevices,
   listPhotos,
   listSources,
+  mapTile,
+  maskFromPrompt,
   onedriveAuthStatus,
   onedriveUpload,
   onThisDay,
   ping,
   presetSave,
   presetsList,
+  promptEdit,
+  promptEditAccept,
+  promptEditList,
+  promptEditReject,
+  promptSidecarCommandGet,
+  promptSidecarCommandSet,
+  promptSidecarGet,
+  promptSidecarModelGet,
+  promptSidecarModelSet,
+  promptSidecarPing,
+  promptSidecarProcStart,
+  promptSidecarProcStatus,
+  promptSidecarProcStop,
+  promptSidecarSet,
   refreshSmartAlbums,
+  shortcutsList,
+  shortcutsSet,
   startImport,
   unseenPhotos,
 } from './invoke';
@@ -397,6 +425,194 @@ describe('invoke wrappers', () => {
       name: 'My look',
       group: 'Style',
       operations: ops,
+    });
+  });
+
+  it('develop mask wrappers forward their command payloads', async () => {
+    const ops = { ...identityOperations(), exposure: 0.4 };
+    const mask = {
+      id: 9,
+      photo_id: 4,
+      edit_id: null,
+      name: 'Subject',
+      source: 'subject',
+      mode: 'replace',
+      visible: true,
+      order_index: 0,
+      payload_storage: 'inline',
+      mask_payload: '{"kind":"bitmap"}',
+      operations_json: JSON.stringify(ops),
+      confidence: 0.91,
+      created_at: '2026-04-27T00:00:00Z',
+      updated_at: '2026-04-27T00:00:00Z',
+    };
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([mask]);
+    await developMasksList(4);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_masks_list', { photoId: 4 });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(9);
+    await developMaskCreate({
+      photo_id: 4,
+      name: 'Subject',
+      source: 'subject',
+      mode: 'replace',
+      mask_payload: { kind: 'bitmap' },
+      operations: ops,
+    });
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_mask_create', {
+      req: {
+        photo_id: 4,
+        name: 'Subject',
+        source: 'subject',
+        mode: 'replace',
+        mask_payload: { kind: 'bitmap' },
+        operations: ops,
+      },
+    });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ mask, preview_data_url: 'data:', elapsed_ms: 12 });
+    await developMaskGenerate({
+      photo_id: 4,
+      name: 'Subject',
+      source: 'subject',
+      mode: 'replace',
+      operations: ops,
+    });
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_mask_generate', {
+      req: {
+        photo_id: 4,
+        name: 'Subject',
+        source: 'subject',
+        mode: 'replace',
+        operations: ops,
+      },
+    });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(mask);
+    await developMaskUpdate({ mask_id: 9, visible: false });
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_mask_update', { req: { mask_id: 9, visible: false } });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(1);
+    await developMaskDelete(9);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_mask_delete', { maskId: 9 });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ photo_id: 4, preview_data_url: 'data:', elapsed_ms: 7 });
+    await developMaskApplyPreview(4, ops);
+    expect(tauriInvoke).toHaveBeenCalledWith('develop_mask_apply_preview', { photoId: 4, operations: ops });
+  });
+
+  it('settings and prompt wrappers forward command payloads', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await aiModelsStatus();
+    expect(tauriInvoke).toHaveBeenCalledWith('ai_models_status');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(3);
+    await aiReindex('embeddings');
+    expect(tauriInvoke).toHaveBeenCalledWith('ai_reindex', { kind: 'embeddings' });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(null);
+    await promptSidecarGet();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_get');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await promptSidecarSet('http://localhost:17183');
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_set', { url: 'http://localhost:17183' });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce('flux');
+    await promptSidecarModelGet();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_model_get');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await promptSidecarModelSet('flux');
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_model_set', { model: 'flux' });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      configured: true,
+      reachable: true,
+      url: 'u',
+      model: 'm',
+      error: null,
+    });
+    await promptSidecarPing();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_ping');
+
+    const editReq = { photo_id: 4, prompt: 'relight', strength: 0.5, constraints: [], mask_b64: null };
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ image_b64: 'img', latency_ms: 1, model_id: 'm', seed: 7 });
+    await promptEdit(editReq);
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_edit', { req: editReq });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ mask_b64: 'mask', confidence: 0.9, latency_ms: 1 });
+    await maskFromPrompt({ photo_id: 4, prompt: 'subject' });
+    expect(tauriInvoke).toHaveBeenCalledWith('mask_from_prompt', { req: { photo_id: 4, prompt: 'subject' } });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await promptEditList(4);
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_edit_list', { photoId: 4 });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await promptEditAccept(7);
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_edit_accept', { editId: 7 });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await promptEditReject(8);
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_edit_reject', { editId: 8 });
+  });
+
+  it('map, sidecar process, and shortcut wrappers forward command payloads', async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ scanned: 1, labelled: 1, skipped: 0, elapsed_ms: 2 });
+    await backfillPlaceLabels();
+    expect(tauriInvoke).toHaveBeenCalledWith('backfill_place_labels');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([1, 2, 3]);
+    expect(Array.from(await mapTile(1, 2, 3))).toEqual([1, 2, 3]);
+    expect(tauriInvoke).toHaveBeenCalledWith('map_tile', { z: 1, x: 2, y: 3 });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      extended_loaded: true,
+      extended_count: 2,
+      bundled_count: 3,
+    });
+    await geonamesStatus();
+    expect(tauriInvoke).toHaveBeenCalledWith('geonames_status');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce('pnpm sidecar');
+    await promptSidecarCommandGet();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_command_get');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await promptSidecarCommandSet('pnpm sidecar');
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_command_set', { command: 'pnpm sidecar' });
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(123);
+    await promptSidecarProcStart();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_proc_start');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await promptSidecarProcStop();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_proc_stop');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({
+      running: true,
+      pid: 123,
+      command: 'pnpm sidecar',
+      started_at: null,
+      last_exit_code: null,
+      configured: true,
+    });
+    await promptSidecarProcStatus();
+    expect(tauriInvoke).toHaveBeenCalledWith('prompt_sidecar_proc_status');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await shortcutsList();
+    expect(tauriInvoke).toHaveBeenCalledWith('shortcuts_list');
+
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(undefined);
+    await shortcutsSet('develop.save', 'Ctrl+S', 'develop');
+    expect(tauriInvoke).toHaveBeenCalledWith('shortcuts_set', {
+      commandId: 'develop.save',
+      keyBinding: 'Ctrl+S',
+      context: 'develop',
     });
   });
 });

@@ -74,6 +74,40 @@ async function mockDevelopInvoke(
     if (cmd === 'develop_reset') return 1;
     if (cmd === 'develop_paste_edits') return { pasted_photo_count: 1, skipped: [] };
     if (cmd === 'presets_list') return presets;
+    if (cmd === 'develop_masks_list') return [];
+    if (cmd === 'develop_mask_create') return 44;
+    if (cmd === 'develop_mask_generate') {
+      const req = callArgs.req as Record<string, unknown>;
+      return {
+        mask: {
+          id: 44,
+          photo_id: Number(req.photo_id ?? 1),
+          edit_id: null,
+          name: req.name ?? 'Subject mask',
+          source: req.source ?? 'subject',
+          mode: req.mode ?? 'normal',
+          visible: true,
+          order_index: 0,
+          payload_storage: 'inline',
+          mask_payload: JSON.stringify({
+            kind: 'bitmap',
+            source: req.source ?? 'subject',
+            model: 'local-segmentation-v1',
+            format: 'png-luma8',
+            width: 2,
+            height: 2,
+            data_b64: 'mask-png',
+          }),
+          operations_json: JSON.stringify(req.operations ?? identityOperations()),
+          confidence: 0.72,
+          created_at: '2026-04-01T00:00:00Z',
+          updated_at: '2026-04-01T00:00:00Z',
+        },
+        preview_data_url: 'data:image/jpeg;base64,masked',
+        elapsed_ms: 3,
+      };
+    }
+    if (cmd === 'develop_mask_apply_preview') return previewReceipt(Number(callArgs.photoId ?? 1));
     if (cmd === 'prompt_sidecar_ping') {
       return { configured: true, url: 'http://localhost:17183', reachable: true, model: 'sam2', error: null };
     }
@@ -255,7 +289,7 @@ describe('DevelopScreen', () => {
     });
   });
 
-  it('creates an intelligent mask and threads it into prompt generation', async () => {
+  it('generates a bitmap quick mask without the prompt sidecar', async () => {
     const invoke = await mockDevelopInvoke([photoFixture(1)]);
     render(<DevelopScreen />, { wrapper });
 
@@ -265,19 +299,16 @@ describe('DevelopScreen', () => {
     fireEvent.click(subject);
 
     await waitFor(() => {
-      const maskArgs = lastCallArg(invoke, 'mask_from_prompt');
-      expect(maskArgs.req).toEqual({ photo_id: 1, prompt: 'the main subject' });
+      const generateArgs = lastCallArg(invoke, 'develop_mask_generate');
+      expect(generateArgs.req).toMatchObject({
+        photo_id: 1,
+        name: 'Subject mask',
+        source: 'subject',
+        mode: 'normal',
+      });
     });
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Prompt' }));
-    const generate = await screen.findByRole('button', { name: /generate/i });
-    await waitFor(() => expect(generate).not.toBeDisabled());
-    fireEvent.click(generate);
-
-    await waitFor(() => {
-      const editArgs = lastCallArg(invoke, 'prompt_edit');
-      expect((editArgs.req as Record<string, unknown>).mask_b64).toBe('mask-png');
-    });
+    expect(invoke.mock.calls.some(([cmd]) => cmd === 'develop_mask_create')).toBe(false);
+    expect(invoke.mock.calls.some(([cmd]) => cmd === 'mask_from_prompt')).toBe(false);
   });
 });
 

@@ -67,6 +67,20 @@ pub fn bundled_models_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Optio
     if let Ok(override_path) = std::env::var("CHRONIMAGE_BUNDLED_MODELS_DIR") {
         return Some(PathBuf::from(override_path));
     }
+
+    // Local `pnpm tauri dev` runs from the repo and may not recopy large
+    // resources after they are downloaded. Prefer the repo staging directory
+    // in debug builds so freshly fetched models are visible after app restart.
+    #[cfg(debug_assertions)]
+    {
+        let repo_bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("models")
+            .join("bundled");
+        if repo_bundled.exists() {
+            return Some(repo_bundled);
+        }
+    }
+
     // Production: resolve via Tauri's resource directory.
     app.path()
         .resolve("models/bundled", tauri::path::BaseDirectory::Resource)

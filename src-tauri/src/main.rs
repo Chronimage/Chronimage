@@ -12,6 +12,7 @@ use chronimage::{
         seed_default_smart_albums,
     },
     commands,
+    develop::sam::init_global_sam_session,
     state::AppState,
     util::paths::{bundled_models_dir, catalog_db_path, models_dir},
 };
@@ -203,6 +204,7 @@ fn main() {
             commands::preset_save,
             commands::develop_masks_list,
             commands::develop_mask_create,
+            commands::develop_mask_generate,
             commands::develop_mask_update,
             commands::develop_mask_delete,
             commands::develop_mask_apply_preview,
@@ -351,6 +353,12 @@ fn main() {
                     siglip_text.as_deref(),
                     siglip_tok.as_deref(),
                 );
+
+                // Memoise the default SAM2.1 encoder + decoder for Develop
+                // masks. SAM3 remains an optional Settings install.
+                let sam_enc = resolve("sam2.1_hiera_large.encoder.onnx");
+                let sam_dec = resolve("sam2.1_hiera_large.decoder.onnx");
+                init_global_sam_session(sam_enc.as_deref(), sam_dec.as_deref());
             });
 
             Ok(())

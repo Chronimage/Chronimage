@@ -20,7 +20,7 @@
 //! A 2000 px preview under all 8 stages runs in ~50 ms on an i5.
 
 use super::ops::{is_identity_curve, Curve, Operations};
-use image::{DynamicImage, RgbImage};
+use image::{imageops, DynamicImage, RgbImage};
 use rayon::prelude::*;
 
 /// Apply the full operations stack to an RGB image. Returns a new image
@@ -35,7 +35,8 @@ pub fn apply(img: &RgbImage, ops: &Operations) -> RgbImage {
     // Work in unit-range f32 throughout; convert back to u8 at the end.
     let mut buf = rgb_to_unit_buf(img);
     apply_to_unit_buf(&mut buf, w as usize, h as usize, ops);
-    unit_buf_to_rgb(w, h, &buf, img)
+    let out = unit_buf_to_rgb(w, h, &buf, img);
+    apply_spatial(out, ops)
 }
 
 pub(crate) fn rgb_to_unit_buf(img: &RgbImage) -> Vec<[f32; 3]> {
@@ -218,6 +219,12 @@ pub(crate) fn apply_to_unit_buf(buf: &mut [[f32; 3]], w: usize, h: usize, ops: &
             }
         });
     }
+
+    // Stage 10: Vignette. Negative values darken edges; positive values lift
+    // them. This is preview-grade but gives the visible control a real result.
+    if ops.lens_vignette != 0.0 {
+        apply_vignette(buf, w, h, ops.lens_vignette / 100.0);
+    }
 }
 
 /// Convenience wrapper that takes a `DynamicImage`.
@@ -227,11 +234,112 @@ pub fn apply_dynamic(img: &DynamicImage, ops: &Operations) -> DynamicImage {
     DynamicImage::ImageRgb8(out)
 }
 
+pub(crate) fn apply_spatial(mut img: RgbImage, ops: &Operations) -> RgbImage {
+    if ops.lens_blur_amount > 0.0 {
+        img = apply_lens_blur(&img, ops);
+    }
+    if has_crop(ops) {
+        img = apply_crop(&img, ops);
+    }
+    img
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn luminance(p: &[f32; 3]) -> f32 {
     // Rec. 709 luma.
     0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
+}
+
+fn has_crop(ops: &Operations) -> bool {
+    const EPS: f32 = 1e-4;
+    ops.crop_x.abs() > EPS
+        || ops.crop_y.abs() > EPS
+        || (ops.crop_w - 1.0).abs() > EPS
+        || (ops.crop_h - 1.0).abs() > EPS
+}
+
+fn apply_crop(img: &RgbImage, ops: &Operations) -> RgbImage {
+    let (w, h) = img.dimensions();
+    if w <= 1 || h <= 1 {
+        return img.clone();
+    }
+    let crop_w = ops.crop_w.clamp(0.05, 1.0);
+    let crop_h = ops.crop_h.clamp(0.05, 1.0);
+    let crop_x = ops.crop_x.clamp(0.0, 1.0 - crop_w);
+    let crop_y = ops.crop_y.clamp(0.0, 1.0 - crop_h);
+    let x = (crop_x * w as f32).round() as u32;
+    let y = (crop_y * h as f32).round() as u32;
+    let cw = ((crop_w * w as f32).round() as u32).clamp(1, w.saturating_sub(x));
+    let ch = ((crop_h * h as f32).round() as u32).clamp(1, h.saturating_sub(y));
+    imageops::crop_imm(img, x, y, cw, ch).to_image()
+}
+
+fn apply_vignette(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let cx = (w.saturating_sub(1)) as f32 * 0.5;
+    let cy = (h.saturating_sub(1)) as f32 * 0.5;
+    let max_r = (cx * cx + cy * cy).sqrt().max(1.0);
+    let strength = amount.clamp(-1.0, 1.0) * 0.55;
+    buf.par_iter_mut().enumerate().for_each(|(i, p)| {
+        let x = (i % w) as f32;
+        let y = (i / w) as f32;
+        let d = (((x - cx).powi(2) + (y - cy).powi(2)).sqrt() / max_r).clamp(0.0, 1.0);
+        let edge = smoothstep(0.25, 1.0, d);
+        let factor = 1.0 + strength * edge;
+        for c in p.iter_mut() {
+            *c = (*c * factor).clamp(0.0, 1.5);
+        }
+    });
+}
+
+fn apply_lens_blur(img: &RgbImage, ops: &Operations) -> RgbImage {
+    let amount = (ops.lens_blur_amount / 100.0).clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return img.clone();
+    }
+    let sigma = 0.8 + amount * 7.0;
+    let blurred = DynamicImage::ImageRgb8(img.clone()).blur(sigma).to_rgb8();
+    let (w, h) = img.dimensions();
+    let mut out = img.clone();
+    let near = ops.lens_blur_focus_near.clamp(0.0, 1.0);
+    let far = ops.lens_blur_focus_far.clamp(0.0, 1.0).max(near);
+    let feather = 0.18_f32;
+    let bokeh = (ops.lens_blur_bokeh_boost / 100.0).clamp(0.0, 1.0);
+
+    for y in 0..h {
+        let yf = if h > 1 {
+            y as f32 / (h - 1) as f32
+        } else {
+            0.0
+        };
+        let outside = if yf < near {
+            ((near - yf) / feather).clamp(0.0, 1.0)
+        } else if yf > far {
+            ((yf - far) / feather).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let mix = (outside * amount).clamp(0.0, 1.0);
+        for x in 0..w {
+            let src = img.get_pixel(x, y).0;
+            let mut blur = blurred.get_pixel(x, y).0;
+            if bokeh > 0.0 {
+                for c in &mut blur {
+                    let lifted = *c as f32 + ((*c as f32 / 255.0).powi(3) * bokeh * 45.0);
+                    *c = lifted.clamp(0.0, 255.0) as u8;
+                }
+            }
+            let dst = out.get_pixel_mut(x, y);
+            for channel in 0..3 {
+                dst.0[channel] =
+                    (src[channel] as f32 * (1.0 - mix) + blur[channel] as f32 * mix).round() as u8;
+            }
+        }
+    }
+    out
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -503,6 +611,39 @@ mod tests {
             (185..=196).contains(&avg),
             "expected ~191 after +midtone curve, got {avg}"
         );
+    }
+
+    #[test]
+    fn crop_changes_preview_dimensions() {
+        let img = solid(128);
+        let ops = Operations {
+            crop_x: 0.25,
+            crop_y: 0.0,
+            crop_w: 0.5,
+            crop_h: 1.0,
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        assert_eq!(out.dimensions(), (4, 8));
+    }
+
+    #[test]
+    fn lens_blur_changes_high_contrast_edges() {
+        let mut img = RgbImage::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                let v = if x < 8 { 0 } else { 255 };
+                img.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        let ops = Operations {
+            lens_blur_amount: 100.0,
+            lens_blur_focus_near: 0.45,
+            lens_blur_focus_far: 0.55,
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        assert_ne!(img.as_raw(), out.as_raw());
     }
 
     #[test]

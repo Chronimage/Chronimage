@@ -98,7 +98,6 @@ async function waitForStable(page: Page): Promise<void> {
     .evaluate(
       () =>
         new Promise<void>((resolve) => {
-          // biome-ignore lint/suspicious/noExplicitAny: playwright browser ctx
           const d = document as any;
           if (d.fonts && typeof d.fonts.ready?.then === 'function') {
             d.fonts.ready.then(() => resolve());
@@ -123,12 +122,10 @@ test.describe('phase-1 visual goldens', () => {
     // visible when a golden fails.
     page.on('console', (msg) => {
       if (msg.type() === 'error') {
-        // biome-ignore lint/suspicious/noConsole: diagnostic output only
         console.error(`[browser error] ${msg.text()}`);
       }
     });
     page.on('pageerror', (err) => {
-      // biome-ignore lint/suspicious/noConsole: diagnostic output only
       console.error(`[page error] ${err.message}`);
     });
     await installInvokeStub(page);

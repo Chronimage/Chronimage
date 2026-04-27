@@ -5426,6 +5426,87 @@ pub async fn develop_mask_create(
     crate::develop::masks::create(&state.pool, req).await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DevelopMaskGenerateRequest {
+    pub photo_id: i64,
+    pub name: Option<String>,
+    pub source: String,
+    pub mode: Option<String>,
+    pub operations: Operations,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DevelopMaskGenerateReceipt {
+    pub mask: DevelopMask,
+    pub preview_data_url: String,
+    pub elapsed_ms: u64,
+}
+
+#[tauri::command]
+pub async fn develop_mask_generate(
+    state: State<'_, AppState>,
+    req: DevelopMaskGenerateRequest,
+) -> AppResult<DevelopMaskGenerateReceipt> {
+    let start = std::time::Instant::now();
+    let thumb_bytes = generate_thumbnail_bytes(req.photo_id, Some(1280), &state.pool).await?;
+    let decoded = image::load_from_memory(&thumb_bytes)
+        .map_err(|e| AppError::Internal(format!("decode thumb for photo {}: {e}", req.photo_id)))?;
+    let rgb = decoded.to_rgb8();
+    let face_hints = develop_mask_face_hints(&state.pool, req.photo_id).await?;
+    let generated = {
+        let sam_result = crate::develop::sam::global_sam_session()
+            .ok_or_else(|| AppError::NotFound("SAM2.1 runtime not loaded".into()))
+            .and_then(|s| s.generate_bitmap_mask(&rgb, &req.source, &face_hints));
+        match sam_result {
+            Ok(mask) => mask,
+            Err(e) => {
+                tracing::warn!(
+                    source = %req.source,
+                    error = %e,
+                    "SAM2.1 mask generation unavailable; using local fallback"
+                );
+                crate::develop::segmentation::generate_bitmap_mask(&rgb, &req.source, &face_hints)?
+            }
+        }
+    };
+    let source = req.source;
+    let payload = serde_json::json!({
+        "kind": "bitmap",
+        "source": source.clone(),
+        "model": generated.model,
+        "generated_by": "develop-local",
+        "format": "png-luma8",
+        "width": generated.width,
+        "height": generated.height,
+        "data_b64": generated.data_b64,
+    });
+    let id = crate::develop::masks::create(
+        &state.pool,
+        DevelopMaskCreateRequest {
+            photo_id: req.photo_id,
+            edit_id: None,
+            name: req.name,
+            source,
+            mode: req.mode,
+            visible: Some(true),
+            order_index: None,
+            payload_storage: Some("inline".into()),
+            mask_payload: payload,
+            operations: req.operations,
+            confidence: Some(generated.confidence),
+        },
+    )
+    .await?;
+    let mask = crate::develop::masks::get(&state.pool, id).await?;
+    let current_ops = crate::develop::history::load_current(&state.pool, req.photo_id).await?;
+    let preview_data_url = render_preview(&state.pool, req.photo_id, &current_ops).await?;
+    Ok(DevelopMaskGenerateReceipt {
+        mask,
+        preview_data_url,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
 #[tauri::command]
 pub async fn develop_mask_update(
     state: State<'_, AppState>,
@@ -5446,6 +5527,39 @@ pub async fn develop_mask_apply_preview(
     operations: Operations,
 ) -> AppResult<RenderReceipt> {
     develop_apply(state, photo_id, operations).await
+}
+
+async fn develop_mask_face_hints(
+    pool: &sqlx::SqlitePool,
+    photo_id: i64,
+) -> AppResult<Vec<crate::develop::segmentation::FaceHint>> {
+    let dims: Option<(Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT width, height FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((Some(width), Some(height))) = dims else {
+        return Ok(Vec::new());
+    };
+    if width <= 0 || height <= 0 {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(f64, f64, f64, f64)> = sqlx::query_as(
+        "SELECT bbox_x, bbox_y, bbox_w, bbox_h \
+         FROM faces WHERE photo_id = ?1 ORDER BY quality DESC, id ASC LIMIT 4",
+    )
+    .bind(photo_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(x, y, w, h)| crate::develop::segmentation::FaceHint {
+            x: (x as f32 / width as f32).clamp(0.0, 1.0),
+            y: (y as f32 / height as f32).clamp(0.0, 1.0),
+            w: (w as f32 / width as f32).clamp(0.0, 1.0),
+            h: (h as f32 / height as f32).clamp(0.0, 1.0),
+        })
+        .collect())
 }
 
 #[tauri::command]

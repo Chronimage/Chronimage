@@ -185,7 +185,7 @@ Events:
 ## Open questions
 
 - **wgpu backend on older Windows**: DirectX 12 (default) vs Vulkan fallback vs WARP (software) — DirectX 12 is the plan, document the graceful degradation to CPU.
-- **SAM2 model size**: ~180 MB; first-time download adds setup friction. Consider bundling a smaller MobileSAM variant for v1 and offering "upgrade to full SAM2 in Settings."
+- **SAM3 model size**: ~3.5 GB for the default mask path; installer size is accepted for the SAM3-only baseline.
 - **Preset strength curve**: linear interpolation works for scalar parameters; what about Curves? Lean "apply curves at `strength/100` blend onto base state."
 - **Bit-exact reproducibility across GPU vendors**: NVIDIA vs AMD vs Intel may produce ±1 LSB differences. Test-suite tolerance of ΔE < 1 covers this; document as expected.
 - **History pruning**: how many `edits` rows to keep per photo before auto-collapsing to snapshots? Lean "collapse to snapshot after 30 edits or 24 hours, whichever first."
@@ -196,7 +196,7 @@ Events:
 - [ ] `raw/` module completion (decode, color, pipeline, wgsl shaders, orientation, masks)
 - [ ] `develop/` module (history, copy-paste, auto, presets)
 - [ ] `src/screens/develop/` ported
-- [ ] SAM2 / MobileSAM ONNX download flow
+- [ ] SAM3 ONNX download flow
 - [ ] Benchmarks in `src-tauri/benches/` tied to perf-cop baselines
 - [ ] 8 exit-criterion test files
 - [ ] Built-in preset JSON definitions in `src-tauri/src/develop/presets/*.json`
