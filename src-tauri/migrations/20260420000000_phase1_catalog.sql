@@ -161,36 +161,72 @@ CREATE VIRTUAL TABLE IF NOT EXISTS photos_fts USING fts5(
   tokenize = 'porter unicode61 remove_diacritics 2'
 );
 
--- Trigger: on photo insert/update, refresh fts row (tags concatenated later by a trigger on tags too)
+-- Trigger: on photo insert/update, refresh fts row (tags concatenated later by a trigger on tags too).
+-- Contentless FTS5 tables don't support UPDATE/DELETE; updates are modeled as
+-- an FTS5 'delete' command with exact old values followed by a fresh INSERT.
 CREATE TRIGGER IF NOT EXISTS photos_fts_insert AFTER INSERT ON photos BEGIN
   INSERT INTO photos_fts(rowid, filename, tags) VALUES (new.id, new.filename, '');
 END;
 
-CREATE TRIGGER IF NOT EXISTS photos_fts_delete AFTER DELETE ON photos BEGIN
-  DELETE FROM photos_fts WHERE rowid = old.id;
-END;
-
 CREATE TRIGGER IF NOT EXISTS photos_fts_update AFTER UPDATE OF filename ON photos BEGIN
-  UPDATE photos_fts SET filename = new.filename WHERE rowid = new.id;
+  INSERT INTO photos_fts(photos_fts, rowid, filename, tags)
+    SELECT 'delete', old.id, old.filename,
+           COALESCE(
+             (SELECT group_concat(label, ' ')
+              FROM tags WHERE photo_id = old.id),
+             ''
+           );
+  INSERT INTO photos_fts(rowid, filename, tags)
+    SELECT new.id, new.filename,
+           COALESCE(
+             (SELECT group_concat(label, ' ')
+              FROM tags WHERE photo_id = new.id),
+             ''
+           );
 END;
 
 -- Rebuild FTS tags cell whenever tags table changes (cheap: re-join)
 CREATE TRIGGER IF NOT EXISTS tags_fts_insert AFTER INSERT ON tags BEGIN
-  UPDATE photos_fts
-    SET tags = (SELECT group_concat(label, ' ') FROM tags WHERE photo_id = new.photo_id)
-    WHERE rowid = new.photo_id;
+  INSERT INTO photos_fts(photos_fts, rowid, filename, tags)
+    SELECT 'delete', p.id, p.filename,
+           COALESCE(
+             (SELECT group_concat(label, ' ')
+              FROM tags
+              WHERE photo_id = new.photo_id AND id != new.id),
+             ''
+           )
+    FROM photos p WHERE p.id = new.photo_id;
+  INSERT INTO photos_fts(rowid, filename, tags)
+    SELECT p.id, p.filename,
+           COALESCE(
+             (SELECT group_concat(label, ' ')
+              FROM tags WHERE photo_id = p.id),
+             ''
+           )
+    FROM photos p WHERE p.id = new.photo_id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS tags_fts_delete AFTER DELETE ON tags BEGIN
-  UPDATE photos_fts
-    SET tags = COALESCE((SELECT group_concat(label, ' ') FROM tags WHERE photo_id = old.photo_id), '')
-    WHERE rowid = old.photo_id;
+CREATE TRIGGER IF NOT EXISTS tags_fts_before_delete BEFORE DELETE ON tags BEGIN
+  INSERT INTO photos_fts(photos_fts, rowid, filename, tags)
+    SELECT 'delete', p.id, p.filename,
+           COALESCE(
+             (SELECT group_concat(label, ' ')
+              FROM tags WHERE photo_id = old.photo_id),
+             ''
+           )
+    FROM photos p WHERE p.id = old.photo_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS tags_fts_after_delete AFTER DELETE ON tags BEGIN
+  INSERT INTO photos_fts(rowid, filename, tags)
+    SELECT p.id, p.filename,
+           COALESCE(
+             (SELECT group_concat(label, ' ')
+              FROM tags WHERE photo_id = p.id),
+             ''
+           )
+    FROM photos p WHERE p.id = old.photo_id;
 END;
 
 -- ── Imports: add skipped_count column ───────────────────────────────────────
 ALTER TABLE imports ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0;
-
--- ── Schema version bump ─────────────────────────────────────────────────────
-
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '2', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

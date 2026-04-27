@@ -147,9 +147,6 @@ CREATE TABLE IF NOT EXISTS presets (
 -- Per-photo current-edit pointer (speeds up hot path; writable from UI).
 ALTER TABLE photos ADD COLUMN current_edit_id INTEGER REFERENCES edits(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_photos_current_edit ON photos(current_edit_id);
-
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '4', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 ```
 
 ## API surface (new commands)

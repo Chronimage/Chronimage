@@ -37,23 +37,26 @@ function coverHue(id: number): number {
 
 interface ClusterCardProps {
   cluster: ClusterRow;
-  onNameBlur: (clusterId: number, name: string) => void;
+  onNameSave: (clusterId: number, name: string) => void;
   onMergeClick: (clusterId: number) => void;
   onOpen: (clusterId: number) => void;
   merging: boolean;
 }
 
-function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: ClusterCardProps) {
+function ClusterCard({ cluster, onNameSave, onMergeClick, onOpen, merging }: ClusterCardProps) {
   const [draft, setDraft] = useState<string>(cluster.name ?? '');
+  const [editing, setEditing] = useState(false);
 
-  function handleBlur() {
+  function handleSave() {
     const trimmed = draft.trim();
     if (trimmed !== (cluster.name ?? '')) {
-      onNameBlur(cluster.id, trimmed);
+      onNameSave(cluster.id, trimmed);
     }
+    setEditing(false);
   }
 
   const hue = coverHue(cluster.id);
+  const label = cluster.name?.trim() || 'Unnamed person';
 
   return (
     <div
@@ -96,6 +99,7 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: Clu
         {cluster.coverPhotoId != null ? (
           <Thumbnail
             photoId={cluster.coverPhotoId}
+            sizePx={160}
             photo={{ hue, filename: `Cluster ${cluster.id}` }}
             subtle
           />
@@ -104,7 +108,6 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: Clu
         )}
       </button>
 
-      {/* Face count badge */}
       <div
         className="mono"
         style={{
@@ -113,47 +116,80 @@ function ClusterCard({ cluster, onNameBlur, onMergeClick, onOpen, merging }: Clu
           letterSpacing: '0.06em',
         }}
       >
-        {cluster.faceCount.toLocaleString()} PHOTOS
+        {cluster.faceCount.toLocaleString()} FACES
       </div>
 
-      {/* Inline name edit */}
-      <input
-        className="tx-input"
-        value={draft}
-        placeholder={`Unnamed · cluster ${cluster.id}`}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={handleBlur}
-        aria-label={`Name for cluster ${cluster.id}`}
-        style={{
-          background: 'var(--surface-2, var(--bg))',
-          border: '1px solid var(--stroke)',
-          borderRadius: 'var(--radius-sm)',
-          padding: '5px 8px',
-          color: 'var(--fg)',
-          fontFamily: 'var(--mono-font)',
-          fontSize: 12,
-          width: '100%',
-          boxSizing: 'border-box',
-        }}
-      />
-
-      {/* Merge secondary action */}
-      <button
-        type="button"
-        className="btn2"
-        onClick={() => onMergeClick(cluster.id)}
-        disabled={merging}
-        style={{
-          fontSize: 11,
-          padding: '4px 8px',
-          color: 'var(--fg-mute)',
-          width: '100%',
-          justifyContent: 'center',
-        }}
-        title="Merge this cluster with another"
-      >
-        Merge with…
-      </button>
+      {editing ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <input
+            className="tx-input"
+            value={draft}
+            placeholder="Type a name"
+            onChange={(e) => setDraft(e.target.value)}
+            aria-label={`Name for cluster ${cluster.id}`}
+            style={{
+              background: 'var(--surface-2, var(--bg))',
+              border: '1px solid var(--stroke)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '6px 8px',
+              color: 'var(--fg)',
+              fontFamily: 'var(--mono-font)',
+              fontSize: 12,
+              width: '100%',
+              boxSizing: 'border-box',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              type="button"
+              className="btn2 primary"
+              onClick={handleSave}
+              disabled={draft.trim().length === 0}
+              style={{ flex: 1, justifyContent: 'center' }}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className="btn2"
+              onClick={() => {
+                setDraft(cluster.name ?? '');
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize: 14, color: cluster.isNamed ? 'var(--fg)' : 'var(--fg-mute)' }}>{label}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button type="button" className="btn2 primary" onClick={() => setEditing(true)}>
+              {cluster.isNamed ? 'Rename' : 'Name'}
+            </button>
+            <button type="button" className="btn2" onClick={() => onOpen(cluster.id)}>
+              Review
+            </button>
+          </div>
+          <button
+            type="button"
+            className="btn2"
+            onClick={() => onMergeClick(cluster.id)}
+            disabled={merging}
+            style={{
+              fontSize: 11,
+              padding: '4px 8px',
+              color: 'var(--fg-mute)',
+              width: '100%',
+              justifyContent: 'center',
+            }}
+            title="Merge this person with another"
+          >
+            Merge with…
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -209,8 +245,10 @@ export function PeopleScreen() {
       : filter === 'unnamed'
         ? clusters.filter((c) => !c.isNamed)
         : clusters;
+  const filteredTitle =
+    filter === 'named' ? 'Named People' : filter === 'unnamed' ? 'Suggestions to Name' : 'People Review';
 
-  function handleNameBlur(clusterId: number, name: string) {
+  function handleNameSave(clusterId: number, name: string) {
     nameCluster.mutate({ clusterId, name });
   }
 
@@ -230,7 +268,7 @@ export function PeopleScreen() {
   const TABS: { id: FilterTab; label: string }[] = [
     { id: 'all', label: 'All' },
     { id: 'named', label: 'Named' },
-    { id: 'unnamed', label: 'Unnamed' },
+    { id: 'unnamed', label: 'Suggestions' },
   ];
 
   return (
@@ -253,8 +291,12 @@ export function PeopleScreen() {
             }}
           >
             <h1 className="page-title" style={{ margin: 0 }}>
-              People<em>.</em>
+              People & Faces<em>.</em>
             </h1>
+            <p style={{ margin: '6px 0 0', maxWidth: 620, color: 'var(--fg-dim)', fontSize: 13 }}>
+              Name faces the way you would in Photos: review the strongest suggestions, save a name
+              explicitly, then use that person everywhere in the library.
+            </p>
 
             <div
               style={{
@@ -390,8 +432,8 @@ export function PeopleScreen() {
               <Icon name="faces" size={36} />
               <div style={{ marginTop: 'var(--space-3)', fontSize: 14 }}>No face clusters yet.</div>
               <div style={{ marginTop: 'var(--space-2)', fontSize: 12.5, color: 'var(--fg-mute)' }}>
-                Faces are clustered automatically after every import. If you imported photos before the latest
-                update, click Re-cluster to rebuild.
+                Open a photo and tap a detected face to name it. If you imported photos before face clustering
+                was available, run a re-cluster pass once.
               </div>
               <button
                 type="button"
@@ -426,25 +468,31 @@ export function PeopleScreen() {
 
           {/* Cluster grid */}
           {filtered.length > 0 && (
-            <div
-              className="person-grid"
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-                gap: 'var(--space-4)',
-              }}
-            >
-              {filtered.map((cluster) => (
-                <ClusterCard
-                  key={cluster.id}
-                  cluster={cluster}
-                  onNameBlur={handleNameBlur}
-                  onMergeClick={handleMergeClick}
-                  onOpen={setOpenedClusterId}
-                  merging={mergeCluster.isPending && mergePending !== null}
-                />
-              ))}
-            </div>
+            <>
+              <div className="section-label" style={{ margin: '0 0 var(--space-3)' }}>
+                <span>{filteredTitle}</span>
+                <span>{filtered.length}</span>
+              </div>
+              <div
+                className="person-grid"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+                  gap: 'var(--space-4)',
+                }}
+              >
+                {filtered.map((cluster) => (
+                  <ClusterCard
+                    key={cluster.id}
+                    cluster={cluster}
+                    onNameSave={handleNameSave}
+                    onMergeClick={handleMergeClick}
+                    onOpen={setOpenedClusterId}
+                    merging={mergeCluster.isPending && mergePending !== null}
+                  />
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -551,6 +599,7 @@ function ClusterDrillDown({ cluster, onClose }: ClusterDrillDownProps) {
               <div key={p.id} className="cell" style={{ aspectRatio: '3/2', position: 'relative' }}>
                 <Thumbnail
                   photoId={p.id}
+                  sizePx={320}
                   photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
                   subtle
                 />

@@ -99,8 +99,8 @@ Fixed bug #42
 - [ ] The gauntlet passes locally.
 - [ ] Tests cover the new code (unit preferred; integration when the
       seam is a Tauri command).
-- [ ] If you touched a schema, you added a forward-only migration and
-      bumped `schema_version`.
+- [ ] If you touched a schema, you added or updated the sqlx migration
+      source of truth.
 - [ ] If you added a new external credential or env var, you updated
       `docs/manual-setup.md`.
 - [ ] If you added a new feature, you updated the relevant PRD.

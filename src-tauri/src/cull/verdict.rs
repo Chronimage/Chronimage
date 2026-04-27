@@ -178,14 +178,14 @@ async fn reject_photo(
     Ok(result.rows_affected() == 1)
 }
 
-/// Set `photos.star_rating`. Validates 0..=5 (0 clears).
-pub async fn set_star_rating(pool: &SqlitePool, photo_id: i64, rating: i64) -> AppResult<()> {
+/// Set `photos.rating`. Validates 0..=5 (0 clears).
+pub async fn set_rating(pool: &SqlitePool, photo_id: i64, rating: i64) -> AppResult<()> {
     if !(0..=5).contains(&rating) {
         return Err(AppError::InvalidInput(format!(
-            "star_rating must be 0..5, got {rating}"
+            "rating must be 0..5, got {rating}"
         )));
     }
-    let affected = sqlx::query("UPDATE photos SET star_rating = ?1 WHERE id = ?2")
+    let affected = sqlx::query("UPDATE photos SET rating = ?1 WHERE id = ?2")
         .bind(rating)
         .bind(photo_id)
         .execute(pool)
@@ -301,17 +301,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_star_rating_clamps_and_persists() {
+    async fn set_rating_clamps_and_persists() {
         let pool = setup().await;
-        set_star_rating(&pool, 1, 4).await.expect("set 4");
-        let s: i64 = sqlx::query_scalar("SELECT star_rating FROM photos WHERE id = 1")
+        set_rating(&pool, 1, 4).await.expect("set 4");
+        let s: i64 = sqlx::query_scalar("SELECT rating FROM photos WHERE id = 1")
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(s, 4);
         // Out-of-range rejected.
         assert!(matches!(
-            set_star_rating(&pool, 1, 7).await.unwrap_err(),
+            set_rating(&pool, 1, 7).await.unwrap_err(),
             AppError::InvalidInput(_)
         ));
     }

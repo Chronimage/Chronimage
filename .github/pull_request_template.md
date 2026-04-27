@@ -22,7 +22,7 @@ fine when that's all there is to say.
 ## Migration / secret notes
 
 <!--
-- If you added a schema change: migration file + schema_version bump.
+- If you added a schema change: migration file updated; sqlx migration metadata remains the source of truth.
 - If you added a new credential / env var: updated docs/manual-setup.md.
 - If you added a command that hits the network: ensured it's behind a
   user_initiated_* gate.

@@ -1,5 +1,5 @@
 ---
-description: Drive the real import pipeline against a folder + query Loki for stage-by-stage timing. Use to diagnose "import is slow" complaints.
+description: Drive the real import pipeline against a folder and inspect file/stdout logs for stage-by-stage timing. Use to diagnose "import is slow" complaints.
 argument-hint: <path-to-photos-directory>
 ---
 
@@ -31,14 +31,14 @@ cargo test --manifest-path src-tauri/Cargo.toml --test debug_import `
 
 ## What to report
 
-Parse the stdout summary (final "debug-import result" block) and also query Loki for the stage timings. Loki runs at `http://localhost:3101` in dev; the test tags every log line with `run=debug-import` so you can isolate it from the main app's traffic.
+Parse the stdout summary (final "debug-import result" block) and the emitted tracing lines. The helper script writes the full run to `debug-import.log`.
 
-Useful LogQL queries (feed via `curl` to `/loki/api/v1/query_range`):
+Useful log searches:
 
-- **Stage summary:** `{app="chronimage",run="debug-import"} |= "import pipeline:"`
-- **Stage 2 per-photo:** `{app="chronimage",run="debug-import"} |= "stage-2 per-photo timing"`
-- **Stage 4 per-photo:** `{app="chronimage",run="debug-import"} |= "stage-4 per-photo timing"`
-- **Error hunt:** `{app="chronimage",run="debug-import",level=~"warn|error"}`
+- **Stage summary:** `import pipeline:`
+- **Stage 2 per-photo:** `stage-2 per-photo timing`
+- **Stage 4 per-photo:** `stage-4 per-photo timing`
+- **Error hunt:** `WARN` / `ERROR`
 
 After the run, summarise in this format (fill in from the log data):
 

@@ -19,6 +19,13 @@ pub fn catalog_db_path() -> AppResult<PathBuf> {
     Ok(app_data_dir()?.join("catalog.db"))
 }
 
+/// Directory for rolling application logs. Created on demand.
+pub fn logs_dir() -> AppResult<PathBuf> {
+    let dir = app_data_dir()?.join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(dir)
+}
+
 /// Path to the cached-thumbnail directory. Creates the directory on demand.
 /// Thumbnails are named `{sha256}_{size}.jpg`.
 pub fn thumbnails_dir() -> AppResult<PathBuf> {

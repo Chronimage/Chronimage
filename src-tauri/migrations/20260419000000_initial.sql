@@ -74,6 +74,3 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TEXT NOT NULL
 );
 
--- Seed: schema version as the only initial setting so app start-up can detect "fresh install".
-INSERT OR IGNORE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '1', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

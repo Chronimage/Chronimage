@@ -4,12 +4,18 @@ import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon } from '../../primitives/Icon';
 import { StarRater } from '../../primitives/StarRater';
 import { TagDropdown } from '../../primitives/TagDropdown';
-import { Thumbnail } from '../../primitives/Thumbnail';
+import { Thumbnail, thumbnailSizeForCssBox } from '../../primitives/Thumbnail';
 import {
   useAlbums,
   useCullApplyVerdict,
+  useFaceAssignCluster,
+  useFaceClusters,
+  useFaceCreatePersonFromFace,
+  useFacesForPhoto,
+  useFaceUnassign,
   useFirstTimeOnNewCamera,
   useFlagPhoto,
+  useGenerateAiTags,
   useOnThisDay,
   usePhotoLocation,
   usePhotoQuality,
@@ -27,7 +33,7 @@ import {
   useUnseenPhotos,
 } from '../../state/queries';
 import { useUi } from '../../state/ui';
-import type { CatalogFacet, PhotoRow } from '../../tauri/invoke';
+import type { PhotoFaceRow, PhotoRow } from '../../tauri/invoke';
 import { ExportSheet } from '../export/ExportSheet';
 import { CatalogEmptyState } from './CatalogEmptyState';
 import { DuplicatesPanel } from './DuplicatesPanel';
@@ -36,18 +42,6 @@ import { JustifiedGrid } from './JustifiedGrid';
 export interface CatalogScreenProps {
   albumId: string;
 }
-
-type FacetId = 'all' | CatalogFacet;
-
-const FACETS: { id: FacetId; label: string }[] = [
-  { id: 'all', label: 'All' },
-  { id: 'people', label: 'People' },
-  { id: 'place', label: 'Places' },
-  { id: 'object', label: 'Objects' },
-  { id: 'event', label: 'Events' },
-  { id: 'color', label: 'Colors' },
-  { id: 'camera', label: 'Cameras' },
-];
 
 const SORT_LABELS: Record<
   'captured_desc' | 'captured_asc' | 'imported_desc' | 'filename_asc' | 'aesthetic_desc' | 'random',
@@ -78,6 +72,9 @@ const TAG_KIND_ORDER = ['people', 'place', 'object', 'event', 'auto_scene', 'col
 
 interface DetailInspectorProps {
   photo: PhotoRow;
+  faces: PhotoFaceRow[];
+  selectedFaceId: number | null;
+  onSelectFace: (faceId: number) => void;
   metaParts: string;
   exifParts: string;
 }
@@ -122,8 +119,166 @@ function QualityBar({ label, value, warnBelow }: QualityBarProps) {
   );
 }
 
-function DetailInspector({ photo, metaParts, exifParts }: DetailInspectorProps) {
+interface PeopleTaggingSectionProps {
+  photoId: number;
+  faces: PhotoFaceRow[];
+  selectedFaceId: number | null;
+  onSelectFace: (faceId: number) => void;
+}
+
+function PeopleTaggingSection({ photoId, faces, selectedFaceId, onSelectFace }: PeopleTaggingSectionProps) {
+  const { data: clusters = [] } = useFaceClusters(100);
+  const assignCluster = useFaceAssignCluster();
+  const createPerson = useFaceCreatePersonFromFace();
+  const unassignFace = useFaceUnassign();
+  const [drafts, setDrafts] = useState<Record<number, string>>({});
+
+  const namedClusters = clusters.filter((cluster) => cluster.isNamed && cluster.name?.trim());
+
+  function setDraft(faceId: number, value: string) {
+    setDrafts((prev) => ({ ...prev, [faceId]: value }));
+  }
+
+  function createName(face: PhotoFaceRow) {
+    const name = (drafts[face.id] ?? '').trim();
+    if (!name) return;
+    createPerson.mutate(
+      { faceId: face.id, name, photoId },
+      {
+        onSuccess: () => setDraft(face.id, ''),
+      },
+    );
+  }
+
+  return (
+    <section>
+      <div
+        className="mono"
+        style={{ fontSize: 10.5, color: 'var(--fg-mute)', marginBottom: 8, letterSpacing: '0.08em' }}
+      >
+        PEOPLE
+      </div>
+      {faces.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>
+          No faces detected in this photo. When faces are found, tap a face box to name it here.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {faces.map((face, index) => {
+            const label = face.isNamed && face.clusterName ? face.clusterName : `Face ${index + 1}`;
+            const selected = selectedFaceId === face.id;
+            return (
+              <div
+                key={face.id}
+                style={{
+                  border: selected ? '1px solid var(--accent)' : '1px solid var(--stroke)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 10,
+                  background: selected
+                    ? 'color-mix(in oklch, var(--accent) 8%, var(--bg-elev))'
+                    : 'var(--bg-elev)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelectFace(face.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    padding: 0,
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'var(--fg)',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span style={{ fontSize: 13 }}>{label}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)' }}>
+                    {Math.round(face.quality * 100)}%
+                  </span>
+                </button>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <select
+                    aria-label={`Assign ${label} to an existing person`}
+                    value={face.clusterId ?? ''}
+                    onChange={(e) => {
+                      if (e.target.value === '') return;
+                      const nextClusterId = Number(e.target.value);
+                      if (Number.isFinite(nextClusterId)) {
+                        assignCluster.mutate({ faceId: face.id, clusterId: nextClusterId, photoId });
+                      }
+                    }}
+                    style={{
+                      flex: '1 1 150px',
+                      minWidth: 0,
+                      background: 'var(--bg)',
+                      color: 'var(--fg)',
+                      border: '1px solid var(--stroke)',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '6px 8px',
+                      fontSize: 12,
+                    }}
+                  >
+                    <option value="">Choose person…</option>
+                    {namedClusters.map((cluster) => (
+                      <option key={cluster.id} value={cluster.id}>
+                        {cluster.name ?? `Person ${cluster.id}`}
+                      </option>
+                    ))}
+                  </select>
+                  {face.clusterId != null && (
+                    <button
+                      type="button"
+                      className="btn2"
+                      onClick={() => unassignFace.mutate({ faceId: face.id, photoId })}
+                    >
+                      Not this person
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    className="tx-input"
+                    value={drafts[face.id] ?? ''}
+                    onChange={(e) => setDraft(face.id, e.target.value)}
+                    placeholder="Type a name"
+                    aria-label={`Create a person for ${label}`}
+                    style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '6px 8px' }}
+                  />
+                  <button
+                    type="button"
+                    className="btn2 primary"
+                    onClick={() => createName(face)}
+                    disabled={(drafts[face.id] ?? '').trim().length === 0 || createPerson.isPending}
+                  >
+                    Name
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DetailInspector({
+  photo,
+  faces,
+  selectedFaceId,
+  onSelectFace,
+  metaParts,
+  exifParts,
+}: DetailInspectorProps) {
   const { data: tags = [], isLoading: tagsLoading } = useTags(photo.id);
+  const generateAiTags = useGenerateAiTags();
   const { data: quality } = usePhotoQuality(photo.id);
   const { data: location } = usePhotoLocation(photo.id);
 
@@ -149,24 +304,53 @@ function DetailInspector({ photo, metaParts, exifParts }: DetailInspectorProps) 
         gap: 'var(--space-5)',
       }}
     >
+      <PeopleTaggingSection
+        photoId={photo.id}
+        faces={faces}
+        selectedFaceId={selectedFaceId}
+        onSelectFace={onSelectFace}
+      />
+
       {/* AI TAGS */}
       <section>
         <div
-          className="mono"
           style={{
-            fontSize: 10.5,
-            color: 'var(--fg-mute)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--space-2)',
             marginBottom: 'var(--space-2)',
-            letterSpacing: '0.08em',
           }}
         >
-          AI TAGS
+          <div
+            className="mono"
+            style={{
+              fontSize: 10.5,
+              color: 'var(--fg-mute)',
+              letterSpacing: '0.08em',
+            }}
+          >
+            AI TAGS
+          </div>
+          <button
+            type="button"
+            className="btn2"
+            onClick={() => generateAiTags.mutate(photo.id)}
+            disabled={generateAiTags.isPending || tagsLoading}
+            title="Generate zero-shot tags from the stored SigLIP embedding"
+            style={{ marginLeft: 'auto' }}
+          >
+            {generateAiTags.isPending ? 'Tagging…' : 'Generate'}
+          </button>
         </div>
         {tagsLoading && <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>Loading tags…</div>}
+        {generateAiTags.isError && (
+          <div style={{ fontSize: 12, color: 'var(--warn)', marginBottom: 'var(--space-2)' }}>
+            Could not generate tags: {generateAiTags.error.message}
+          </div>
+        )}
         {!tagsLoading && tags.length === 0 && (
           <div style={{ fontSize: 12, color: 'var(--fg-mute)' }}>
-            No tags on this photo yet. Zero-shot object tagging arrives with Phase 2 §10 (manual tags) and
-            Phase C4f (SigLIP zero-shot) in the catalog rehaul.
+            No tags on this photo yet. Generate AI tags after the embedding pipeline has processed this photo.
           </div>
         )}
         {!tagsLoading && tags.length > 0 && (
@@ -289,6 +473,7 @@ interface LocationSectionProps {
 }
 
 function LocationSection({ lat, lng }: LocationSectionProps) {
+  const setScreen = useUi((s) => s.setScreen);
   const hasCoords = typeof lat === 'number' && typeof lng === 'number';
   const osmUrl = hasCoords
     ? `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=14/${lat}/${lng}`
@@ -360,14 +545,30 @@ function LocationSection({ lat, lng }: LocationSectionProps) {
               {lat?.toFixed(5)}, {lng?.toFixed(5)}
             </span>
             {osmUrl && (
-              <a
-                href={osmUrl}
-                target="_blank"
-                rel="noreferrer noopener"
-                style={{ color: 'var(--accent)', textDecoration: 'none' }}
-              >
-                Open in OpenStreetMap →
-              </a>
+              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  type="button"
+                  onClick={() => setScreen('map')}
+                  style={{
+                    color: 'var(--accent)',
+                    background: 'transparent',
+                    border: 'none',
+                    padding: 0,
+                    cursor: 'pointer',
+                    font: 'inherit',
+                  }}
+                >
+                  View nearby photos
+                </button>
+                <a
+                  href={osmUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  style={{ color: 'var(--accent)', textDecoration: 'none' }}
+                >
+                  OSM →
+                </a>
+              </span>
             )}
           </div>
         </div>
@@ -385,6 +586,7 @@ interface DetailViewProps {
   onNext: () => void;
   allPhotos: PhotoRow[];
   onJumpTo: (index: number) => void;
+  onExportPhoto: (photoId: number) => void;
 }
 
 function DetailView({
@@ -396,7 +598,9 @@ function DetailView({
   onNext,
   allPhotos,
   onJumpTo,
+  onExportPhoto,
 }: DetailViewProps) {
+  const setScreen = useUi((s) => s.setScreen);
   const hue = (photo.id * 31) % 360;
   const ext = photo.filename.split('.').pop()?.toUpperCase() ?? '';
   const dims = photo.width && photo.height ? `${photo.width}×${photo.height}` : '';
@@ -415,6 +619,21 @@ function DetailView({
   const ratePhoto = useRatePhoto();
   const flagPhotoMut = useFlagPhoto();
   const applyVerdict = useCullApplyVerdict();
+  const { data: faces = [] } = useFacesForPhoto(photo.id);
+  const activeFilmstripItemRef = useRef<HTMLButtonElement | null>(null);
+  const setActiveFilmstripItem = useCallback((node: HTMLButtonElement | null) => {
+    activeFilmstripItemRef.current = node;
+    node?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, []);
+  const [selectedFace, setSelectedFace] = useState<{ photoId: number; faceId: number | null }>({
+    photoId: photo.id,
+    faceId: null,
+  });
+  const selectedFaceId = selectedFace.photoId === photo.id ? selectedFace.faceId : null;
+  const selectFace = useCallback(
+    (faceId: number) => setSelectedFace({ photoId: photo.id, faceId }),
+    [photo.id],
+  );
 
   const onRate = useCallback(
     (rating: number) => {
@@ -472,7 +691,7 @@ function DetailView({
           {photo.filename} · {photoIndex + 1}/{totalPhotos}
         </span>
         <div style={{ flex: 1 }} />
-        <StarRater rating={photo.star_rating ?? 0} onChange={onRate} />
+        <StarRater rating={photo.rating ?? 0} onChange={onRate} />
         <button
           type="button"
           className={`btn${photo.is_flagged ? ' on' : ''}`}
@@ -485,21 +704,14 @@ function DetailView({
           <Icon name="reject" size={13} /> To bin
         </button>
         <div className="divider" />
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 3"
-        >
+        <button type="button" className="btn" onClick={() => setScreen('develop')} title="Open Develop">
           <Icon name="brush" size={13} /> Develop
         </button>
         <button
           type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2"
+          className="btn"
+          onClick={() => onExportPhoto(photo.id)}
+          title="Export this photo"
         >
           <Icon name="export" size={13} /> Export
         </button>
@@ -514,6 +726,7 @@ function DetailView({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
+              position: 'relative',
             }}
           >
             <Thumbnail
@@ -522,6 +735,56 @@ function DetailView({
               photo={{ hue, filename: photo.filename, id: String(photo.id) }}
               subtle={false}
             />
+            {faces.map((face, index) => {
+              const label = face.isNamed && face.clusterName ? face.clusterName : `Face ${index + 1}`;
+              const selected = selectedFaceId === face.id;
+              return (
+                <button
+                  key={face.id}
+                  type="button"
+                  onClick={() => selectFace(face.id)}
+                  aria-label={`Select ${label}`}
+                  title={label}
+                  style={{
+                    position: 'absolute',
+                    left: `${face.bboxX * 100}%`,
+                    top: `${face.bboxY * 100}%`,
+                    width: `${face.bboxW * 100}%`,
+                    height: `${face.bboxH * 100}%`,
+                    border: selected
+                      ? '2px solid var(--accent)'
+                      : '1px solid color-mix(in oklch, var(--accent) 70%, white)',
+                    borderRadius: 8,
+                    background: selected
+                      ? 'color-mix(in oklch, var(--accent) 14%, transparent)'
+                      : 'transparent',
+                    color: 'var(--accent)',
+                    cursor: 'pointer',
+                    boxShadow: selected
+                      ? '0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent)'
+                      : 'none',
+                  }}
+                >
+                  <span
+                    className="mono"
+                    style={{
+                      position: 'absolute',
+                      left: 0,
+                      bottom: -24,
+                      whiteSpace: 'nowrap',
+                      fontSize: 10.5,
+                      padding: '3px 6px',
+                      borderRadius: 999,
+                      background: 'var(--bg-elev)',
+                      border: '1px solid var(--stroke)',
+                      color: 'var(--fg)',
+                    }}
+                  >
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
         <div className="detail-scroll">
@@ -543,17 +806,16 @@ function DetailView({
               {photo.paired_photo_id != null && <Chip>paired</Chip>}
             </div>
           </div>
-          <DetailInspector photo={photo} metaParts={metaParts} exifParts={exifParts} />
+          <DetailInspector
+            photo={photo}
+            faces={faces}
+            selectedFaceId={selectedFaceId}
+            onSelectFace={selectFace}
+            metaParts={metaParts}
+            exifParts={exifParts}
+          />
           {/* Filmstrip */}
-          <div
-            style={{
-              display: 'flex',
-              gap: 4,
-              padding: '10px 24px 20px',
-              overflowX: 'auto',
-              scrollbarWidth: 'thin',
-            }}
-          >
+          <div className="detail-filmstrip">
             {allPhotos.map((ph, i) => {
               const phHue = (ph.id * 31) % 360;
               const isFocused = ph.id === photo.id;
@@ -561,20 +823,10 @@ function DetailView({
                 <button
                   type="button"
                   key={ph.id}
+                  ref={isFocused ? setActiveFilmstripItem : undefined}
+                  className="detail-filmstrip-thumb"
+                  data-active={isFocused ? 'true' : undefined}
                   onClick={() => onJumpTo(i)}
-                  style={{
-                    flex: '0 0 auto',
-                    width: 72,
-                    aspectRatio: '3/2',
-                    padding: 0,
-                    border: 'none',
-                    cursor: 'pointer',
-                    outline: isFocused ? '2px solid var(--accent)' : '1px solid var(--stroke)',
-                    outlineOffset: isFocused ? -2 : -1,
-                    opacity: isFocused ? 1 : 0.65,
-                    borderRadius: 2,
-                    overflow: 'hidden',
-                  }}
                   aria-label={ph.filename}
                   aria-current={isFocused ? 'true' : undefined}
                 >
@@ -623,6 +875,7 @@ function RediscoveryRow({ title, photos, selected, onToggle }: RediscoveryRowPro
             >
               <Thumbnail
                 photoId={p.id}
+                sizePx={thumbnailSizeForCssBox(160, 160, { maxPx: 320 })}
                 photo={{ hue, filename: p.filename, id: String(p.id) }}
                 selected={selected.has(p.id)}
                 subtle
@@ -642,6 +895,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const [showDuplicates, setShowDuplicates] = useState(false);
   const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportPhotoIds, setExportPhotoIds] = useState<number[]>([]);
   const [bulkCullOpen, setBulkCullOpen] = useState(false);
   const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const searching = query.trim().length > 0;
@@ -650,12 +904,12 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   const gridDensity = useUi((s) => s.tweaks.gridDensity);
   const sortBy = useUi((s) => s.tweaks.sortBy);
   const setTweaks = useUi((s) => s.setTweaks);
+  const setScreen = useUi((s) => s.setScreen);
   // Density → justified-grid target row height. Compact = shorter rows
   // (more photos per page), spacious = taller rows (photos look bigger).
   const rowHeightPx = gridDensity === 'spacious' ? 260 : gridDensity === 'compact' ? 160 : 200;
 
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
-  const [activeFacet, setActiveFacet] = useState<FacetId>('all');
   // Stable seed for `random` sort so paginated `list_photos` calls don't
   // duplicate rows. Regenerated on every fresh "Random" pick (including
   // re-clicking it while already active) so the user can re-shuffle.
@@ -672,7 +926,6 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
   } = usePhotos({
     albumId: numericAlbumId,
     sortBy,
-    facet: activeFacet === 'all' ? null : activeFacet,
     randomSeed: sortBy === 'random' ? randomSeed : null,
   });
 
@@ -766,16 +1019,23 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
 
   if (focusedIndex !== null && photos[focusedIndex]) {
     return (
-      <DetailView
-        photo={photos[focusedIndex]}
-        photoIndex={focusedIndex}
-        totalPhotos={photos.length}
-        onClose={closeDetail}
-        onPrev={() => openDetail(focusedIndex - 1)}
-        onNext={() => openDetail(focusedIndex + 1)}
-        allPhotos={photos}
-        onJumpTo={openDetail}
-      />
+      <>
+        <DetailView
+          photo={photos[focusedIndex]}
+          photoIndex={focusedIndex}
+          totalPhotos={photos.length}
+          onClose={closeDetail}
+          onPrev={() => openDetail(focusedIndex - 1)}
+          onNext={() => openDetail(focusedIndex + 1)}
+          allPhotos={photos}
+          onJumpTo={openDetail}
+          onExportPhoto={(photoId) => {
+            setExportPhotoIds([photoId]);
+            setExportOpen(true);
+          }}
+        />
+        <ExportSheet open={exportOpen} photoIds={exportPhotoIds} onClose={() => setExportOpen(false)} />
+      </>
     );
   }
 
@@ -874,13 +1134,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
             <span className="mono" style={{ fontSize: 11, color: 'var(--accent)' }}>
               {selected.size} selected
             </span>
-            <button
-              type="button"
-              className="btn phase-gated"
-              disabled
-              title="Coming in Phase 3 — RAW Develop"
-              aria-disabled="true"
-            >
+            <button type="button" className="btn" onClick={() => setScreen('develop')} title="Open Develop">
               <Icon name="brush" size={13} /> Develop
             </button>
             <button
@@ -894,7 +1148,10 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
             <button
               type="button"
               className="btn"
-              onClick={() => setExportOpen(true)}
+              onClick={() => {
+                setExportPhotoIds([...selected]);
+                setExportOpen(true);
+              }}
               title="Export selected photos"
             >
               <Icon name="export" size={13} /> Export
@@ -952,25 +1209,6 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                   {displayAlbum.description ? ` · ${displayAlbum.description}` : ''}
                 </div>
               </div>
-            </div>
-
-            <div className="catalog-section facetbar" role="tablist" aria-label="Filter by facet">
-              {FACETS.map((f) => {
-                const active = activeFacet === f.id;
-                return (
-                  <button
-                    type="button"
-                    key={f.id}
-                    role="tab"
-                    aria-selected={active}
-                    className={`btn${active ? ' active' : ''}`}
-                    style={{ border: '1px solid var(--stroke)' }}
-                    onClick={() => setActiveFacet(f.id)}
-                  >
-                    {f.label}
-                  </button>
-                );
-              })}
             </div>
 
             <RediscoveryRow
@@ -1052,11 +1290,12 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                     key={p.id}
                     className="cell"
                     style={{ position: 'relative' }}
-                    onClick={() => toggle(i)}
+                    onClick={() => toggle(p.id)}
                     aria-label={`Select ${p.filename}`}
                   >
                     <Thumbnail
                       photoId={p.id}
+                      sizePx={thumbnailSizeForCssBox(240, 240, { maxPx: 480 })}
                       photo={{
                         id: String(p.id),
                         filename: p.filename,
@@ -1066,7 +1305,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
                           : p.filename,
                       }}
                       idx={i}
-                      selected={selected.has(i)}
+                      selected={selected.has(p.id)}
                       subtle
                     />
                   </button>
@@ -1125,7 +1364,7 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
         onCancel={() => setRemoveDialogOpen(false)}
         onConfirm={handleRemoveConfirm}
       />
-      <ExportSheet open={exportOpen} photoIds={[...selected]} onClose={() => setExportOpen(false)} />
+      <ExportSheet open={exportOpen} photoIds={exportPhotoIds} onClose={() => setExportOpen(false)} />
       <ConfirmDialog
         open={bulkCullOpen}
         title={`Reject ${selected.size} ${selected.size === 1 ? 'photo' : 'photos'}?`}

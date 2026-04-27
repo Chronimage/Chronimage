@@ -235,17 +235,13 @@ mod tests {
         let pool = open_pool(PoolOptions::new(db.clone())).await.expect("pool");
         assert!(db.exists(), "db file should exist");
 
-        // Schema version must be present and set by the latest migration.
-        let row: (String,) =
-            sqlx::query_as("SELECT value FROM settings WHERE key = 'schema_version'")
-                .fetch_one(&pool)
-                .await
-                .expect("schema_version row");
-        assert!(
-            ["1", "2", "3", "4", "5", "6", "7", "8"].contains(&row.0.as_str()),
-            "unexpected schema version: {}",
-            row.0
-        );
+        // sqlx is the migration source of truth; the old settings.schema_version
+        // breadcrumb was removed in the reset cleanup.
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("migration count");
+        assert!(row.0 > 0, "expected applied migrations");
 
         // Core tables exist.
         for tbl in ["photos", "sources", "source_copies", "imports", "settings"] {

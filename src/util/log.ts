@@ -2,37 +2,34 @@
  * Typed logging wrapper. Use this instead of `console.log` — lefthook's
  * forbidden-patterns check bans raw console usage in app code.
  *
- * In dev, logs are also pushed to Loki (http://localhost:3100) when available.
- * Loki shipping is fire-and-forget — failures are silently swallowed.
+ * Logs are also forwarded to the Rust backend so frontend/backend events land
+ * in the same local rolling log files under the app data directory.
  */
 
+import { frontendLog } from '../tauri/invoke';
+
 const IS_DEV = import.meta.env.DEV;
-const LOKI_URL = 'http://localhost:3101/loki/api/v1/push';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 
-function lokiPush(level: Level, message: string): void {
-  if (!IS_DEV) return;
-  const nowNs = (BigInt(Date.now()) * 1_000_000n).toString();
-  const body = JSON.stringify({
-    streams: [
-      {
-        stream: { app: 'chronimage', env: 'dev', layer: 'frontend', level },
-        values: [[nowNs, message]],
-      },
-    ],
-  });
-  fetch(LOKI_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body,
-  }).catch(() => {
-    // Loki not running — ignore silently
+function fileLog(level: Level, message: string): void {
+  frontendLog(level, message).catch(() => {
+    // The app may be running in a browser test without Tauri IPC.
   });
 }
 
 function fmt(level: Level, args: unknown[]): string {
-  return `[chronimage:${level}] ${args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`;
+  return `[chronimage:${level}] ${args.map(stringifyLogValue).join(' ')}`;
+}
+
+function stringifyLogValue(value: unknown): string {
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  if (typeof value !== 'object' || value === null) return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 export function debug(...args: unknown[]): void {
@@ -40,26 +37,26 @@ export function debug(...args: unknown[]): void {
   const msg = fmt('debug', args);
   // biome-ignore lint/suspicious/noConsole: app-wide debug wrapper
   console.debug(msg);
-  lokiPush('debug', msg);
+  fileLog('debug', msg);
 }
 
 export function info(...args: unknown[]): void {
   const msg = fmt('info', args);
   // biome-ignore lint/suspicious/noConsole: app-wide info wrapper
   console.info(msg);
-  lokiPush('info', msg);
+  fileLog('info', msg);
 }
 
 export function warn(...args: unknown[]): void {
   const msg = fmt('warn', args);
   console.warn(msg);
-  lokiPush('warn', msg);
+  fileLog('warn', msg);
 }
 
 export function error(...args: unknown[]): void {
   const msg = fmt('error', args);
   console.error(msg);
-  lokiPush('error', msg);
+  fileLog('error', msg);
 }
 
 /**

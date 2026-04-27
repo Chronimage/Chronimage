@@ -10,18 +10,27 @@ import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { Seg } from '../../primitives/Seg';
-import { Thumbnail } from '../../primitives/Thumbnail';
+import { Thumbnail, thumbnailSizeForCssBox } from '../../primitives/Thumbnail';
 import { useDevelopUi } from '../../state/develop';
 import {
   type DevelopOperations,
+  useAiEditRefresh,
+  useAiEditStatus,
   useDevelopApply,
+  useDevelopMaskApplyPreview,
+  useDevelopMaskCreate,
+  useDevelopMaskDelete,
+  useDevelopMasks,
+  useDevelopMaskUpdate,
   useDevelopOpen,
   useDevelopPasteEdits,
   useDevelopReset,
   useDevelopSave,
+  useDevelopSnapshotSave,
   usePhotos,
 } from '../../state/queries';
 import {
+  identityOperations,
   maskFromPrompt,
   type PhotoRow,
   promptEdit,
@@ -128,6 +137,7 @@ export function DevelopScreen() {
 
   const applyMut = useDevelopApply();
   const saveMut = useDevelopSave();
+  const snapshotMut = useDevelopSnapshotSave();
   const resetMut = useDevelopReset();
   const pasteMut = useDevelopPasteEdits();
 
@@ -254,6 +264,15 @@ export function DevelopScreen() {
     saveMut.mutate({ photoId: focusedPhotoId, operations: currentOperations() });
   }, [currentOperations, focusedPhotoId, saveMut]);
 
+  const saveSnapshot = useCallback(() => {
+    if (focusedPhotoId == null) return;
+    snapshotMut.mutate({
+      photoId: focusedPhotoId,
+      operations: currentOperations(),
+      label: `Snapshot ${new Date().toLocaleTimeString()}`,
+    });
+  }, [currentOperations, focusedPhotoId, snapshotMut]);
+
   const copyEdits = useCallback(() => {
     setCopiedOps(currentOperations());
   }, [currentOperations]);
@@ -335,8 +354,9 @@ export function DevelopScreen() {
         onPrev={() => setFocusedIdx((i) => Math.max(0, i - 1))}
         onNext={() => setFocusedIdx((i) => Math.min(photos.length - 1, i + 1))}
         onSave={saveEdits}
+        onSnapshot={saveSnapshot}
         onCopy={copyEdits}
-        saving={saveMut.isPending}
+        saving={saveMut.isPending || snapshotMut.isPending}
       />
 
       {tab === 'develop' ? (
@@ -357,7 +377,16 @@ export function DevelopScreen() {
           preview={preview}
         />
       ) : tab === 'mask' ? (
-        <MaskStage photo={photo} stageAspect={stageAspect} preview={preview} />
+        <MaskStage
+          photo={photo}
+          stageAspect={stageAspect}
+          preview={preview}
+          operations={valuesToOperations(values)}
+          onPreview={(next) => {
+            setPreview(next);
+            setSharedPreview(next);
+          }}
+        />
       ) : (
         <PromptStage
           photo={photo}
@@ -383,6 +412,7 @@ interface DevelopToolbarProps {
   onPrev: () => void;
   onNext: () => void;
   onSave: () => void;
+  onSnapshot: () => void;
   onCopy: () => void;
   saving: boolean;
 }
@@ -397,6 +427,7 @@ function DevelopToolbar({
   onPrev,
   onNext,
   onSave,
+  onSnapshot,
   onCopy,
   saving,
 }: DevelopToolbarProps) {
@@ -440,23 +471,11 @@ function DevelopToolbar({
         ]}
       />
       <div className="divider" />
-      <button
-        type="button"
-        className="btn phase-gated"
-        disabled
-        aria-disabled="true"
-        title="Coming in Phase 3 · crop + transform"
-      >
+      <button type="button" className="btn" title="Crop + transform controls are in the inspector">
         <Icon name="crop" size={13} />
       </button>
-      <button
-        type="button"
-        className="btn phase-gated"
-        disabled
-        aria-disabled="true"
-        title="Coming in Phase 3 · before/after compare"
-      >
-        <Icon name="eye" size={13} /> Before/After
+      <button type="button" className="btn" title="Save a named before/after snapshot" onClick={onSnapshot}>
+        <Icon name="eye" size={13} /> Snapshot
       </button>
       <div className="divider" />
       <button type="button" className="btn" onClick={onCopy} title="Copy current edits to the clipboard">
@@ -575,7 +594,7 @@ function DevelopStageSplit({
             >
               <Thumbnail
                 photoId={p.id}
-                sizePx={160}
+                sizePx={thumbnailSizeForCssBox(96, 64, { maxPx: 240 })}
                 photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
               />
             </button>
@@ -610,9 +629,11 @@ interface MaskStageProps {
   photo: PhotoRow;
   stageAspect: string;
   preview: string | null;
+  operations: DevelopOperations;
+  onPreview: (previewDataUrl: string) => void;
 }
 
-function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
+function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskStageProps) {
   const [status, setStatus] = useState<SidecarStatus | null>(null);
   const [masking, setMasking] = useState(false);
   const [maskError, setMaskError] = useState<string | null>(null);
@@ -620,6 +641,11 @@ function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const activeMask = useDevelopUi((s) => s.activeMask);
   const setActiveMask = useDevelopUi((s) => s.setActiveMask);
+  const { data: masks = [] } = useDevelopMasks(photo.id);
+  const createMask = useDevelopMaskCreate();
+  const updateMask = useDevelopMaskUpdate();
+  const deleteMask = useDevelopMaskDelete();
+  const applyMaskPreview = useDevelopMaskApplyPreview();
 
   useEffect(() => {
     let cancelled = false;
@@ -664,6 +690,26 @@ function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
         latencyMs: result.latency_ms,
         createdAt: new Date().toISOString(),
       });
+      createMask.mutate(
+        {
+          photo_id: photoId,
+          name: trimmed,
+          source: presetId ?? 'prompt',
+          mode: 'normal',
+          payload_storage: 'inline',
+          mask_payload: {
+            kind: presetId ?? 'prompt',
+            prompt: trimmed,
+            mask_b64: result.mask_b64,
+            latency_ms: result.latency_ms,
+          },
+          operations: { ...identityOperations(), exposure: 0.35 },
+          confidence: result.confidence,
+        },
+        {
+          onSuccess: () => refreshPreview(),
+        },
+      );
     } catch (e) {
       setMaskError(String(e));
     } finally {
@@ -672,6 +718,64 @@ function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
   };
 
   const maskSrc = activeMask ? `data:image/png;base64,${activeMask.maskB64}` : null;
+
+  function refreshPreview() {
+    applyMaskPreview.mutate(
+      { photoId: photo.id, operations },
+      {
+        onSuccess: (receipt) => onPreview(receipt.preview_data_url),
+      },
+    );
+  }
+
+  function createManualMask(kind: 'brush' | 'linear_gradient' | 'radial_gradient') {
+    const label =
+      kind === 'brush' ? 'Brush mask' : kind === 'linear_gradient' ? 'Linear gradient' : 'Radial gradient';
+    createMask.mutate(
+      {
+        photo_id: photo.id,
+        name: label,
+        source: kind,
+        mode: 'normal',
+        payload_storage: 'inline',
+        mask_payload:
+          kind === 'linear_gradient'
+            ? { kind, top: 0.0, bottom: 0.55 }
+            : kind === 'radial_gradient'
+              ? { kind, cx: 0.5, cy: 0.5, radius: 0.35, feather: 0.35 }
+              : { kind: 'full', tool: 'brush', size: 80, feather: 0.5, flow: 1.0, density: 1.0, strokes: [] },
+        operations: { ...identityOperations(), exposure: kind === 'brush' ? 0.2 : 0.35 },
+      },
+      {
+        onSuccess: () => refreshPreview(),
+      },
+    );
+  }
+
+  function setMaskExposure(maskId: number, exposure: number) {
+    updateMask.mutate(
+      {
+        mask_id: maskId,
+        operations: { ...identityOperations(), exposure },
+      },
+      {
+        onSuccess: () => refreshPreview(),
+      },
+    );
+  }
+
+  function maskExposure(mask: (typeof masks)[number]) {
+    try {
+      const parsed: unknown = JSON.parse(mask.operations_json);
+      if (parsed && typeof parsed === 'object' && 'exposure' in parsed) {
+        const exposure = (parsed as { exposure?: unknown }).exposure;
+        return typeof exposure === 'number' ? exposure : 0;
+      }
+    } catch {
+      return 0;
+    }
+    return 0;
+  }
 
   return (
     <div className="mask-stage">
@@ -683,8 +787,9 @@ function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
             ) : (
               <Thumbnail
                 photoId={photo.id}
-                sizePx={1280}
+                sizePx={thumbnailSizeForCssBox(1100, 800, { maxPx: 1280 })}
                 photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
+                fit="contain"
               />
             )}
             {maskSrc && <img src={maskSrc} alt="" aria-hidden="true" className="mask-overlay" />}
@@ -737,6 +842,29 @@ function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
           </div>
 
           <div className="editor-group">
+            <h4>Manual masks</h4>
+            <div className="mask-preset-grid">
+              <button type="button" className="btn" onClick={() => createManualMask('brush')}>
+                <Icon name="brush" size={12} /> Brush
+              </button>
+              <button type="button" className="btn" onClick={() => createManualMask('linear_gradient')}>
+                Linear gradient
+              </button>
+              <button type="button" className="btn" onClick={() => createManualMask('radial_gradient')}>
+                Radial gradient
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={refreshPreview}
+                disabled={applyMaskPreview.isPending}
+              >
+                {applyMaskPreview.isPending ? 'Rendering...' : 'Refresh'}
+              </button>
+            </div>
+          </div>
+
+          <div className="editor-group">
             <h4>Prompt</h4>
             <div className="mask-custom-row">
               <input
@@ -764,24 +892,70 @@ function MaskStage({ photo, stageAspect, preview }: MaskStageProps) {
           </div>
 
           <div className="editor-group">
-            <h4>Selection</h4>
-            {activeMask ? (
+            <h4>Mask layers</h4>
+            {masks.length === 0 ? (
+              <div className="mask-empty-state">No persistent masks yet</div>
+            ) : (
+              <div className="mask-layer-list">
+                {masks.map((mask) => {
+                  const exposure = maskExposure(mask);
+                  return (
+                    <div key={mask.id} className="mask-layer-row" data-hidden={!mask.visible}>
+                      <div>
+                        <strong>{mask.name}</strong>
+                        <span className="mono">
+                          {mask.source.replaceAll('_', ' ')} · {exposure > 0 ? '+' : ''}
+                          {exposure.toFixed(2)} EV
+                        </span>
+                      </div>
+                      <div className="mask-layer-actions">
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() =>
+                            updateMask.mutate(
+                              { mask_id: mask.id, visible: !mask.visible },
+                              { onSuccess: () => refreshPreview() },
+                            )
+                          }
+                        >
+                          {mask.visible ? 'Hide' : 'Show'}
+                        </button>
+                        <button type="button" className="btn" onClick={() => setMaskExposure(mask.id, 0.35)}>
+                          +Light
+                        </button>
+                        <button type="button" className="btn" onClick={() => setMaskExposure(mask.id, -0.35)}>
+                          -Dark
+                        </button>
+                        <button
+                          type="button"
+                          className="btn danger"
+                          onClick={() =>
+                            deleteMask.mutate(
+                              { maskId: mask.id, photoId: photo.id },
+                              { onSuccess: () => refreshPreview() },
+                            )
+                          }
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {activeMask && (
               <div className="mask-readout">
                 <div>
-                  <span className="mono">Prompt</span>
+                  <span className="mono">Latest AI mask</span>
                   <strong>{activeMask.prompt}</strong>
                 </div>
                 <div>
                   <span className="mono">Confidence</span>
                   <strong>{Math.round(activeMask.confidence * 100)}%</strong>
                 </div>
-                <div>
-                  <span className="mono">Latency</span>
-                  <strong>{activeMask.latencyMs} ms</strong>
-                </div>
               </div>
-            ) : (
-              <div className="mask-empty-state">No active mask</div>
             )}
             {maskError && <div className="mask-error mono">{maskError}</div>}
           </div>
@@ -821,6 +995,8 @@ function PromptStage({
   const [acceptedB64, setAcceptedB64] = useState<string | null>(null);
   const activeMask = useDevelopUi((s) => s.activeMask);
   const setActiveMask = useDevelopUi((s) => s.setActiveMask);
+  const { data: aiEdits = [] } = useAiEditStatus(photo.id);
+  const refreshAiEdit = useAiEditRefresh();
 
   useEffect(() => {
     if (activeMask?.prompt) setMaskPrompt(activeMask.prompt);
@@ -879,6 +1055,7 @@ function PromptStage({
         mask_b64: activeMask?.maskB64 ?? null,
       });
       setRenderedB64(result.image_b64);
+      refreshAiEdit.mutate({ photoId: photo.id, feature: 'prompt_edit' });
       // The sidecar writes a prompt_edits row server-side. The UI tracks
       // the freshest id so Accept/Reject can target it. We fetch the
       // latest pending row rather than threading the id back through the
@@ -941,6 +1118,7 @@ function PromptStage({
         latencyMs: result.latency_ms,
         createdAt: new Date().toISOString(),
       });
+      refreshAiEdit.mutate({ photoId: photo.id, feature: 'prompt_mask' });
     } catch (e) {
       setRenderError(String(e));
     } finally {
@@ -972,11 +1150,12 @@ function PromptStage({
           <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', letterSpacing: '0.08em' }}>
             BEFORE · original
           </div>
-          <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          <div className="prompt-before-frame" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
             <Thumbnail
               photoId={photo.id}
-              sizePx={1280}
+              sizePx={thumbnailSizeForCssBox(700, 700, { maxPx: 1280 })}
               photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
+              fit="contain"
             />
           </div>
         </div>
@@ -1151,6 +1330,19 @@ function PromptStage({
             {constraints.map((c) => (
               <Chip key={c} onClose={() => removeConstraint(c)}>
                 {c}
+              </Chip>
+            ))}
+            {aiEdits.map((edit) => (
+              <Chip
+                key={edit.id}
+                variant={edit.state === 'current' ? 'solid' : undefined}
+                onClose={
+                  edit.state === 'stale'
+                    ? () => refreshAiEdit.mutate({ photoId: photo.id, feature: edit.feature })
+                    : undefined
+                }
+              >
+                {edit.feature} · {edit.state}
               </Chip>
             ))}
             <input

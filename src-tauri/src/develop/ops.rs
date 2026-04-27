@@ -50,6 +50,43 @@ pub struct Operations {
     pub clarity: f32,
     #[serde(default)]
     pub dehaze: f32,
+    /// Normalized crop rectangle. Identity is x=0, y=0, w=1, h=1.
+    #[serde(default)]
+    pub crop_x: f32,
+    #[serde(default)]
+    pub crop_y: f32,
+    #[serde(default = "unit")]
+    pub crop_w: f32,
+    #[serde(default = "unit")]
+    pub crop_h: f32,
+    /// Degrees clockwise. `straighten` is a fine adjustment for horizon tools.
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default)]
+    pub straighten: f32,
+    #[serde(default)]
+    pub transform_h: f32,
+    #[serde(default)]
+    pub transform_v: f32,
+    /// Lens correction controls. Stored now; applied by the full RAW renderer.
+    #[serde(default)]
+    pub lens_distortion: f32,
+    #[serde(default)]
+    pub lens_vignette: f32,
+    #[serde(default)]
+    pub chromatic_aberration: f32,
+    #[serde(default)]
+    pub spot_heal_count: f32,
+    #[serde(default)]
+    pub lens_blur_amount: f32,
+    #[serde(default)]
+    pub lens_blur_focus_near: f32,
+    #[serde(default = "unit")]
+    pub lens_blur_focus_far: f32,
+    #[serde(default)]
+    pub lens_blur_bokeh_boost: f32,
+    #[serde(default)]
+    pub lens_blur_cat_eye: f32,
     /// Tone curves — master RGB + per-channel R/G/B + luma. Default is
     /// identity on every channel (no-op). See module doc.
     #[serde(default)]
@@ -70,6 +107,10 @@ pub fn identity_curve() -> Curve {
         [0.75, 0.75],
         [1.0, 1.0],
     ]
+}
+
+fn unit() -> f32 {
+    1.0
 }
 
 /// Maximum number of control points per channel. Keeps the on-disk JSON
@@ -198,6 +239,23 @@ impl Operations {
             saturation: 0.0,
             clarity: 0.0,
             dehaze: 0.0,
+            crop_x: 0.0,
+            crop_y: 0.0,
+            crop_w: 1.0,
+            crop_h: 1.0,
+            rotation: 0.0,
+            straighten: 0.0,
+            transform_h: 0.0,
+            transform_v: 0.0,
+            lens_distortion: 0.0,
+            lens_vignette: 0.0,
+            chromatic_aberration: 0.0,
+            spot_heal_count: 0.0,
+            lens_blur_amount: 0.0,
+            lens_blur_focus_near: 0.0,
+            lens_blur_focus_far: 1.0,
+            lens_blur_bokeh_boost: 0.0,
+            lens_blur_cat_eye: 0.0,
             curves: Curves::identity(),
         }
     }
@@ -226,6 +284,23 @@ impl Operations {
             saturation: lerp(self.saturation, target.saturation),
             clarity: lerp(self.clarity, target.clarity),
             dehaze: lerp(self.dehaze, target.dehaze),
+            crop_x: lerp(self.crop_x, target.crop_x),
+            crop_y: lerp(self.crop_y, target.crop_y),
+            crop_w: lerp(self.crop_w, target.crop_w),
+            crop_h: lerp(self.crop_h, target.crop_h),
+            rotation: lerp(self.rotation, target.rotation),
+            straighten: lerp(self.straighten, target.straighten),
+            transform_h: lerp(self.transform_h, target.transform_h),
+            transform_v: lerp(self.transform_v, target.transform_v),
+            lens_distortion: lerp(self.lens_distortion, target.lens_distortion),
+            lens_vignette: lerp(self.lens_vignette, target.lens_vignette),
+            chromatic_aberration: lerp(self.chromatic_aberration, target.chromatic_aberration),
+            spot_heal_count: lerp(self.spot_heal_count, target.spot_heal_count),
+            lens_blur_amount: lerp(self.lens_blur_amount, target.lens_blur_amount),
+            lens_blur_focus_near: lerp(self.lens_blur_focus_near, target.lens_blur_focus_near),
+            lens_blur_focus_far: lerp(self.lens_blur_focus_far, target.lens_blur_focus_far),
+            lens_blur_bokeh_boost: lerp(self.lens_blur_bokeh_boost, target.lens_blur_bokeh_boost),
+            lens_blur_cat_eye: lerp(self.lens_blur_cat_eye, target.lens_blur_cat_eye),
             curves: self.curves.blend(&target.curves, t),
         }
     }

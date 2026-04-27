@@ -11,7 +11,7 @@
 
 ## Context
 
-The first Phase-2 dev-build import against a real 112-JPG folder (`C:\Users\jayas\OneDrive\Pictures\ugadi 2026`) clocked **82 minutes** — 44 s per photo. Loki traces ruled out the obvious culprits:
+The first Phase-2 dev-build import against a real 112-JPG folder (`C:\Users\jayas\OneDrive\Pictures\ugadi 2026`) clocked **82 minutes** — 44 s per photo. Local file/stdout traces ruled out the obvious culprits:
 
 - OneDrive hydration (files were `Archive`, fully hydrated locally)
 - Tokio scheduler (Stage 2 hash parallelism was behaving correctly)
@@ -29,7 +29,7 @@ New module [`src-tauri/src/ai/providers.rs`](../../src-tauri/src/ai/providers.rs
 
 - On Windows + `HardwareTier::GpuLow | GpuHigh`: attempts `DirectML::default().with_device_id(0).build()`. On `ort::Error<SessionBuilder>` (DLL missing, D3D12 unavailable), calls `e.recover()` to unwrap the original builder and falls through to CPU silently.
 - On non-Windows or `CpuOnly` tier: plain CPU EP.
-- Every path emits a `tracing::info!` line naming the EP so Loki shows which accelerator each of the 5 sessions actually picked at boot.
+- Every path emits a `tracing::info!` line naming the EP so local logs show which accelerator each of the 5 sessions actually picked at boot.
 
 All five `Session::builder()` call sites migrated: SigLIP image, SigLIP text, SigLIP image-only fallback ([siglip.rs](../../src-tauri/src/ai/siglip.rs)), SCRFD, ArcFace ([faces.rs](../../src-tauri/src/ai/faces.rs)), NIMA ([aesthetic.rs](../../src-tauri/src/ai/aesthetic.rs)).
 
@@ -106,7 +106,7 @@ Per-photo p50 sub-stage cost post-fix:
 
 - **Decode-once, infer-many.** Stages 2+4+5 each independently call `image::open(path)` on the same JPG. A shared decoded `DynamicImage` per photo — passed through all models in the same task — would cut the remaining ~2 s/photo in half. Tracked for a Phase-2 perf pass.
 - **Per-photo progress through stages 4–5 in the UI.** Today the progress event only advances during Stage 2. User sees `done == total` but AI work keeps going. Needs a second event stream.
-- **GPU utilisation verification under load.** Loki confirms DML is *registered*, but we don't have a proof we're GPU-bound rather than decode-bound during Stage 4. A quick nvidia-smi trace during a debug-import run would settle it.
+- **GPU utilisation verification under load.** Local logs confirm DML is *registered*, but we don't have a proof we're GPU-bound rather than decode-bound during Stage 4. A quick nvidia-smi trace during a debug-import run would settle it.
 
 ## References
 

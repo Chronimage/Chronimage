@@ -3,8 +3,8 @@
 //! Drives the real import pipeline against a real folder on disk so we can see
 //! stage + per-photo timings without needing tauri-driver / Playwright. The
 //! pipeline's own `tracing::info!/debug!` logs fire into stdout via
-//! `tracing_subscriber::fmt` and — when Loki is running at :3101 — also get
-//! shipped there via the same `util::loki` layer the app uses in dev builds.
+//! `tracing_subscriber::fmt`; the desktop app itself writes rolling log files
+//! under the app data directory.
 //!
 //! ## How to run
 //!
@@ -44,7 +44,7 @@ use tempfile::TempDir;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 /// Initialise tracing once for the test process so pipeline logs stream to
-/// stdout AND (if Loki is up) to the local Loki instance on port 3101.
+/// stdout.
 fn install_tracing_once() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -53,23 +53,9 @@ fn install_tracing_once() {
             .unwrap_or_else(|_| EnvFilter::new("chronimage=debug,sqlx=warn"));
         let fmt_layer = fmt::layer().with_target(true).compact();
 
-        // Best-effort Loki shipping — same URL as the app uses in dev.
-        let loki_url =
-            std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3101".to_string());
-        let push_url = format!("{loki_url}/loki/api/v1/push");
-        let labels: chronimage::util::loki::Labels = vec![
-            ("app".into(), "chronimage".into()),
-            ("env".into(), "dev".into()),
-            ("layer".into(), "backend".into()),
-            ("run".into(), "debug-import".into()),
-            ("pid".into(), std::process::id().to_string()),
-        ];
-        let loki_layer = chronimage::util::loki::LokiLayer::spawn(push_url, labels);
-
         let _ = tracing_subscriber::registry()
             .with(filter)
             .with(fmt_layer)
-            .with(loki_layer)
             .try_init();
     });
 }

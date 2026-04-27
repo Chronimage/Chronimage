@@ -16,7 +16,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { useDevelopUi } from '../../state/develop';
-import { useDevelopApply, usePresets } from '../../state/queries';
+import { useDevelopAdaptivePresetApply, useDevelopApply, usePresets } from '../../state/queries';
 import type { DevelopOperations } from '../../tauri/invoke';
 import { warn } from '../../util/log';
 import { blendOperations, normaliseOperations, type PresetCategory, parseOperationsJson } from './types';
@@ -52,6 +52,7 @@ export function DevelopSidePanel() {
 
   const { data: allPresets = [] } = usePresets();
   const applyPreset = useDevelopApply();
+  const applyAdaptivePreset = useDevelopAdaptivePresetApply();
 
   const filtered = useMemo(() => {
     if (category === 'custom') {
@@ -66,6 +67,18 @@ export function DevelopSidePanel() {
       if (focusedPhotoId == null) return;
       const preset = allPresets.find((p) => p.id === presetId);
       if (!preset) return;
+      if (preset.scope === 'mask') {
+        applyAdaptivePreset.mutate(
+          { photoId: focusedPhotoId, presetId, strength },
+          {
+            onSuccess: (r) => {
+              setPreview(r.preview_data_url);
+            },
+            onError: (e) => warn('develop adaptive preset apply failed', e),
+          },
+        );
+        return;
+      }
       const presetOperations = parseOperationsJson(preset.operations_json);
       if (!presetOperations) {
         warn('develop preset operations parse failed', preset.operations_json);
@@ -83,7 +96,7 @@ export function DevelopSidePanel() {
         },
       );
     },
-    [allPresets, applyPreset, focusedPhotoId, setOperations, setPreview],
+    [allPresets, applyAdaptivePreset, applyPreset, focusedPhotoId, setOperations, setPreview],
   );
 
   const onPresetClick = useCallback(
@@ -220,7 +233,11 @@ export function DevelopSidePanel() {
                 />
                 <div className="preset-meta">
                   <div className="name">{p.name}</div>
-                  <div className="sub">{p.description ?? p.group_name}</div>
+                  <div className="sub">
+                    {p.scope === 'mask'
+                      ? `Adaptive · ${p.mask_source ?? 'mask'}`
+                      : (p.description ?? p.group_name)}
+                  </div>
                 </div>
                 <div className="val mono">{active && strength !== undefined ? String(strength) : '—'}</div>
               </button>

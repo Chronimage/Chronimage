@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Thumbnail } from '../../primitives/Thumbnail';
+import { Thumbnail, thumbnailSizeForCssBox } from '../../primitives/Thumbnail';
 import type { PhotoRow } from '../../tauri/invoke';
 
 const TARGET_ROW_HEIGHT_DEFAULT = 200;
@@ -270,6 +270,7 @@ export function JustifiedGrid({
             >
               <Thumbnail
                 photoId={p.id}
+                sizePx={thumbnailSizeForCssBox(it.w, it.h, { maxPx: 960 })}
                 photo={{ hue, filename: p.filename, id: String(p.id) }}
                 selected={isSelected}
                 subtle

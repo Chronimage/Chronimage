@@ -47,8 +47,8 @@ Tauri commands this phase adds:
 Events emitted:
 - `chronimage.import.progress`
 
-## Entitlements (gate-ready even though free in v1)
-- Features to wrap in `ensure_entitlement(Feature::…)`: ...
+## Access / licensing
+- User-visible feature gates, if any, and how license state affects them: ...
 
 ## Exit criteria
 - [ ] ... (bound to `tests/…` file whenever testable)

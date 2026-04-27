@@ -49,6 +49,7 @@ describe('CullScreen', () => {
       if (cmd === 'list_photos') {
         return [photoFixture(1), photoFixture(2)];
       }
+      if (cmd === 'cull_bin_summary') return { total_count: 0, total_bytes: 0, by_reason: [] };
       return undefined;
     });
 

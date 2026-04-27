@@ -18,46 +18,39 @@ use chronimage::{
 use tauri::Manager;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-fn install_tracing() {
+fn install_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("chronimage=debug,tauri=info,sqlx=warn"));
 
-    let fmt_layer = fmt::layer().with_target(true).compact();
+    let console_layer = fmt::layer().with_target(true).compact();
+    let log_dir = match chronimage::util::paths::logs_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(console_layer)
+                .try_init();
+            tracing::warn!(error = %e, "file logging unavailable; using console only");
+            return None;
+        }
+    };
 
-    // Ship to Loki in dev via our own minimal layer (see util::loki). The
-    // `tracing-loki` crate's background task silently stopped delivering
-    // pushes (Loki's distributor metrics showed zero backend lines despite
-    // init reporting success), so we replaced it with a ~200-line custom
-    // layer that uses reqwest 0.12 directly + `eprintln!`s on push failure.
-    #[cfg(debug_assertions)]
-    {
-        let loki_url =
-            std::env::var("LOKI_URL").unwrap_or_else(|_| "http://localhost:3101".to_string());
-        let push_url = format!("{loki_url}/loki/api/v1/push");
-        let labels: chronimage::util::loki::Labels = vec![
-            ("app".into(), "chronimage".into()),
-            ("env".into(), "dev".into()),
-            // Parity with the frontend's `layer=frontend` — a single
-            // `{app="chronimage"}` query surfaces both streams interleaved.
-            ("layer".into(), "backend".into()),
-            ("pid".into(), std::process::id().to_string()),
-        ];
-        let loki_layer = chronimage::util::loki::LokiLayer::spawn(push_url, labels);
-        let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .with(loki_layer)
-            .try_init();
-        tracing::info!(loki_url, "loki log shipping enabled");
-    }
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "chronimage.log");
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = fmt::layer()
+        .with_writer(file_writer)
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(true)
+        .compact();
 
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .try_init();
-    }
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer)
+        .try_init();
+    tracing::info!(log_dir = %log_dir.display(), "file logging enabled");
+    Some(guard)
 }
 
 #[cfg(target_os = "windows")]
@@ -78,7 +71,7 @@ fn main() {
     let _ = dotenvy::from_filename(".env.local");
     let _ = dotenvy::dotenv();
 
-    install_tracing();
+    let _log_guard = install_tracing();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -96,6 +89,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
+            commands::frontend_log,
             commands::app_version,
             commands::current_channel,
             commands::import_dry_run,
@@ -152,6 +146,7 @@ fn main() {
             commands::search_suggestions,
             commands::get_thumbnail,
             commands::list_tags,
+            commands::generate_ai_tags,
             commands::photo_quality,
             commands::photo_location,
             commands::list_photos_for_cluster,
@@ -164,6 +159,10 @@ fn main() {
             commands::face_clusters_list,
             commands::face_cluster_name,
             commands::face_cluster_merge,
+            commands::list_faces_for_photo,
+            commands::face_assign_cluster,
+            commands::face_create_person_from_face,
+            commands::face_unassign,
             commands::record_photo_view,
             commands::ai_reindex,
             commands::get_default_catalog_path,
@@ -193,12 +192,26 @@ fn main() {
             commands::develop_open,
             commands::develop_apply,
             commands::develop_save,
+            commands::develop_snapshot_save,
+            commands::develop_history_list,
             commands::develop_reset,
             commands::develop_copy_edits,
             commands::develop_paste_edits,
             commands::develop_preset_apply,
+            commands::develop_adaptive_preset_apply,
             commands::presets_list,
             commands::preset_save,
+            commands::develop_masks_list,
+            commands::develop_mask_create,
+            commands::develop_mask_update,
+            commands::develop_mask_delete,
+            commands::develop_mask_apply_preview,
+            commands::ai_edit_status,
+            commands::ai_edit_refresh,
+            commands::merge_job_create,
+            commands::merge_jobs_list,
+            commands::tether_source_add,
+            commands::tether_sources_list,
             commands::map_recompute_trips,
             commands::map_list_trips,
             commands::map_photos_in_trip,

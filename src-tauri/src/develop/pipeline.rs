@@ -33,8 +33,13 @@ pub fn apply(img: &RgbImage, ops: &Operations) -> RgbImage {
 
     let (w, h) = (img.width(), img.height());
     // Work in unit-range f32 throughout; convert back to u8 at the end.
-    let mut buf: Vec<[f32; 3]> = img
-        .as_raw()
+    let mut buf = rgb_to_unit_buf(img);
+    apply_to_unit_buf(&mut buf, w as usize, h as usize, ops);
+    unit_buf_to_rgb(w, h, &buf, img)
+}
+
+pub(crate) fn rgb_to_unit_buf(img: &RgbImage) -> Vec<[f32; 3]> {
+    img.as_raw()
         .chunks_exact(3)
         .map(|rgb| {
             [
@@ -43,7 +48,23 @@ pub fn apply(img: &RgbImage, ops: &Operations) -> RgbImage {
                 rgb[2] as f32 / 255.0,
             ]
         })
-        .collect();
+        .collect()
+}
+
+pub(crate) fn unit_buf_to_rgb(w: u32, h: u32, buf: &[[f32; 3]], fallback: &RgbImage) -> RgbImage {
+    let mut out_bytes: Vec<u8> = Vec::with_capacity(buf.len() * 3);
+    for p in buf {
+        out_bytes.push((p[0].clamp(0.0, 1.0) * 255.0).round() as u8);
+        out_bytes.push((p[1].clamp(0.0, 1.0) * 255.0).round() as u8);
+        out_bytes.push((p[2].clamp(0.0, 1.0) * 255.0).round() as u8);
+    }
+    RgbImage::from_raw(w, h, out_bytes).unwrap_or_else(|| fallback.clone())
+}
+
+pub(crate) fn apply_to_unit_buf(buf: &mut [[f32; 3]], w: usize, h: usize, ops: &Operations) {
+    if ops.is_identity() {
+        return;
+    }
 
     // Stage 1: Exposure (EV stops → multiplier).
     if ops.exposure != 0.0 {
@@ -138,7 +159,7 @@ pub fn apply(img: &RgbImage, ops: &Operations) -> RgbImage {
     // proper Gaussian.
     if ops.clarity != 0.0 {
         let amount = ops.clarity / 100.0;
-        apply_clarity(&mut buf, w as usize, h as usize, amount);
+        apply_clarity(buf, w, h, amount);
     }
 
     // Stage 8: Dehaze — lift blacks + boost saturation proportional to
@@ -197,15 +218,6 @@ pub fn apply(img: &RgbImage, ops: &Operations) -> RgbImage {
             }
         });
     }
-
-    // Back to u8.
-    let mut out_bytes: Vec<u8> = Vec::with_capacity(buf.len() * 3);
-    for p in &buf {
-        out_bytes.push((p[0].clamp(0.0, 1.0) * 255.0).round() as u8);
-        out_bytes.push((p[1].clamp(0.0, 1.0) * 255.0).round() as u8);
-        out_bytes.push((p[2].clamp(0.0, 1.0) * 255.0).round() as u8);
-    }
-    RgbImage::from_raw(w, h, out_bytes).unwrap_or_else(|| img.clone())
 }
 
 /// Convenience wrapper that takes a `DynamicImage`.

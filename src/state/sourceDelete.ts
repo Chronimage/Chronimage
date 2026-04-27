@@ -19,6 +19,7 @@ import {
   type SourceDeletePhase,
   type SourceDeleteProgressEvent,
 } from '../tauri/invoke';
+import { resetCatalogContentQueries } from './queryInvalidation';
 
 export interface ActiveSourceDelete {
   sourceId: number;
@@ -110,16 +111,11 @@ export function useSourceDeleteProgressListener() {
         const u = await listen<SourceDeleteProgressEvent>(SOURCE_DELETE_PROGRESS_EVENT, (evt) => {
           applyProgress(evt.payload);
           if (evt.payload.phase === 'committed') {
-            qc.invalidateQueries({ queryKey: ['photos'] });
-            qc.invalidateQueries({ queryKey: ['albums'] });
-            qc.invalidateQueries({ queryKey: ['rediscovery'] });
+            resetCatalogContentQueries(qc);
           }
           if (evt.payload.phase === 'done') {
-            qc.invalidateQueries({ queryKey: ['sources'] });
-            qc.invalidateQueries({ queryKey: ['imports'] });
+            resetCatalogContentQueries(qc);
             qc.invalidateQueries({ queryKey: ['cleanup'] });
-            qc.invalidateQueries({ queryKey: ['face-clusters'] });
-            qc.invalidateQueries({ queryKey: ['photos'] });
             // Let the user see the "done" tick briefly, then clear it.
             const sourceId = evt.payload.source_id;
             setTimeout(() => dismiss(sourceId), 2000);

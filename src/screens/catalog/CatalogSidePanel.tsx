@@ -1,5 +1,6 @@
 import { Icon } from '../../primitives/Icon';
 import { useAlbums, useFaceClusters, useSources } from '../../state/queries';
+import { useUi } from '../../state/ui';
 import { ImportProgressCard } from './ImportProgressCard';
 import { SourceDeleteProgressCard } from './SourceDeleteProgressCard';
 import { SourcesPanel } from './SourcesPanel';
@@ -13,6 +14,7 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
   const { data: albums = [] } = useAlbums();
   const { data: sources = [] } = useSources();
   const { data: clusters = [] } = useFaceClusters(60);
+  const setScreen = useUi((s) => s.setScreen);
 
   const totalPhotos = sources.reduce((sum, s) => sum + s.photo_count, 0);
   const nonCullAlbums = albums.filter((a) => a.tag !== 'cull').slice(0, 9);
@@ -85,35 +87,23 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
               const hue = (c.id * 47) % 360;
               const label = c.name?.trim() || `#${c.id}`;
               return (
-                <div key={c.id} className="person" title={`${label} · ${c.faceCount}`}>
+                <button
+                  key={c.id}
+                  type="button"
+                  className="person"
+                  title={`${label} · ${c.faceCount} faces`}
+                  onClick={() => setScreen('people')}
+                  style={{ border: 'none', cursor: 'pointer' }}
+                >
                   <div className="avatar" style={{ background: `oklch(0.5 0.15 ${hue})` }} />
                   <div className="name">{label}</div>
-                </div>
+                </button>
               );
             })}
           </div>
         )}
 
         <SourcesPanel />
-      </div>
-
-      <div className="sidepanel-footer">
-        <button
-          type="button"
-          className="btn2 ghost"
-          style={{
-            width: '100%',
-            justifyContent: 'center',
-            fontSize: 12,
-            padding: 7,
-            opacity: 0.5,
-            cursor: 'not-allowed',
-          }}
-          disabled
-          title="Coming in Phase 2 — user-defined smart albums"
-        >
-          <Icon name="plus" size={12} /> New Smart Album
-        </button>
       </div>
     </div>
   );

@@ -4,8 +4,8 @@
 > maintainer; contributors should read the [`SECURITY.md`](../SECURITY.md)
 > + [`CONTRIBUTING.md`](../CONTRIBUTING.md) flows first.
 
-This runbook covers the operational edges of Chronimage's Phase 5
-release infrastructure. When you're paging yourself at 2am, come here
+This runbook covers the operational edges of Chronimage's Phase 6
+launch infrastructure. When you're paging yourself at 2am, come here
 first.
 
 ---
@@ -32,9 +32,9 @@ as more users download the signed artifact.
      "Not a threat". Response is usually 24–72 hours.
    - Post a pinned GitHub discussion pointing users at the
      workaround: More info → Run anyway.
-3. Medium-term: buy an EV cert (we currently ship with OV). EV gets
-   instant SmartScreen reputation. Cost is ~$400 for 3 years. See
-   `docs/manual-setup.md` for the purchase workflow.
+3. Medium-term: buy an EV cert before stable/beta distribution. EV gets
+   instant SmartScreen reputation. See `docs/manual-setup.md` for the
+   purchase workflow.
 
 ---
 
@@ -177,8 +177,8 @@ after using Chronimage's source-cleanup dashboard.
 
 ## When in doubt
 
-- Check Sentry for recent error volume.
-- Check Grafana dashboards for release-pipeline metrics.
+- Check local app log files first, then Sentry once Phase 6 telemetry is wired.
+- Check GitHub Actions and Cloudflare Pages/R2 deploy logs for release-pipeline failures.
 - Check the #chronimage-ops private Slack (if it exists yet).
 - Post a status update on `status.chronimage.app` before anything else
   so users know you're aware.

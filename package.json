@@ -27,7 +27,7 @@
     "test:visual": "playwright test tests/visual-goldens",
     "test:a11y": "playwright test tests/e2e/a11y.spec.ts",
     "migrate:new": "node scripts/new-migration.cjs",
-    "migrate:run": "cargo run -p chronimage-cli -- migrate",
+    "migrate:run": "cargo run --manifest-path src-tauri/Cargo.toml --bin chronimage-cli -- migrate",
     "forbidden-patterns": "node scripts/forbidden-patterns.cjs",
     "bundle-size": "node scripts/bundle-size-check.cjs",
     "prepare": "lefthook install --force",

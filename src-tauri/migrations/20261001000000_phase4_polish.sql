@@ -2,23 +2,15 @@
 -- Phase: 4 — Prompt editing + polish
 --
 -- Adds:
---   1. `photos.rating` (0..=5) — Lightroom-style integer rating. Distinct
---      from `star_rating` added in Phase 2 so XMP round-tripping stays
---      clean (xmp:Rating maps to this column; the Phase 2 Rate button
---      keeps using star_rating to avoid breaking existing UI).
---   2. `photos.color_label` — red/yellow/green/blue/purple/NULL
+--   1. `photos.color_label` — red/yellow/green/blue/purple/NULL
 --      (optional XMP label).
---   3. `shortcuts` — user-overridable keyboard bindings.
---   4. `trips` + `trip_photos` — GPS cluster result cached on disk so
+--   2. `shortcuts` — user-overridable keyboard bindings.
+--   3. `trips` + `trip_photos` — GPS cluster result cached on disk so
 --      the map view doesn't recompute every open.
 --
 -- Forward-only. Do NOT edit once merged.
 
-ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0
-    CHECK (rating BETWEEN 0 AND 5);
 ALTER TABLE photos ADD COLUMN color_label TEXT;
-CREATE INDEX IF NOT EXISTS idx_photos_rating ON photos(rating)
-    WHERE rating > 0;
 CREATE INDEX IF NOT EXISTS idx_photos_color_label ON photos(color_label)
     WHERE color_label IS NOT NULL;
 
@@ -53,7 +45,3 @@ CREATE TABLE IF NOT EXISTS trip_photos (
   photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   PRIMARY KEY (trip_id, photo_id)
 );
-
--- Bump schema_version.
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '5', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

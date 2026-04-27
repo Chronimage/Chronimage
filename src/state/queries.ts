@@ -15,11 +15,15 @@ import {
   deleteSource,
   detectIcloudPath,
   downloadModels,
+  faceAssignCluster,
   faceClusterMerge,
   faceClusterName,
   faceClustersList,
+  faceCreatePersonFromFace,
+  faceUnassign,
   findDuplicates,
   firstTimeOnNewCamera,
+  generateAiTags,
   getDefaultCatalogPath,
   getDiskInfo,
   getThumbnail,
@@ -32,6 +36,7 @@ import {
   liftShiftDryRun,
   liftShiftExecute,
   listAlbums,
+  listFacesForPhoto,
   listImports,
   listIphoneDevices,
   listPhotos,
@@ -40,6 +45,7 @@ import {
   listTags,
   type ModelStatus,
   onThisDay,
+  type PhotoFaceRow,
   type PhotoRow,
   photoLocation,
   photoQuality,
@@ -65,6 +71,8 @@ import {
   unflaggedFavorites,
   unseenPhotos,
 } from '../tauri/invoke';
+import { warn } from '../util/log';
+import { clearPhotoScopedQueries, resetCatalogContentQueries } from './queryInvalidation';
 import { useSourceDeleteStore } from './sourceDelete';
 
 export type {
@@ -80,6 +88,7 @@ export type {
   LiftReceipt,
   ModelSource,
   ModelStatus,
+  PhotoFaceRow,
   PhotoLocation,
   PhotoQuality,
   PhotoRow,
@@ -98,6 +107,7 @@ export type {
 export { IMPORT_PROGRESS_EVENT, REBUILD_PROGRESS_EVENT, RECLUSTER_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
+const PHOTOS_MAX_PAGES = 20;
 
 // ── Read hooks ────────────────────────────────────────────────────────────────
 
@@ -114,6 +124,7 @@ export function usePhotos(params?: Omit<ListPhotosParams, 'offset'>) {
       if (lastPage.length < PHOTOS_PAGE_SIZE) return undefined;
       return allPages.length * PHOTOS_PAGE_SIZE;
     },
+    maxPages: PHOTOS_MAX_PAGES,
     select: (data) => data.pages.flat(),
   });
 }
@@ -205,10 +216,7 @@ export function useCreateSource() {
       // Sources panel + anything that pivots on source existence (empty
       // state, default selected album, rediscovery rows) should reflect
       // the new source immediately — before its import even starts.
-      qc.invalidateQueries({ queryKey: ['sources'] });
-      qc.invalidateQueries({ queryKey: ['photos'] });
-      qc.invalidateQueries({ queryKey: ['albums'] });
-      qc.invalidateQueries({ queryKey: ['rediscovery'] });
+      resetCatalogContentQueries(qc);
     },
   });
 }
@@ -229,18 +237,14 @@ export function useDeleteSource() {
       // Surface the disconnect card immediately so the user sees activity
       // even if the first backend `collecting` event lands a moment later.
       registerDelete(sourceId, sourceName ?? `Source ${sourceId}`);
+      clearPhotoScopedQueries(qc);
     },
     onSuccess: () => {
       // The progress listener already invalidates these on `committed`
       // and `done`. We re-fire on success as a safety net for the case
       // where the event listener is unmounted (e.g. error in Tauri bridge).
-      qc.invalidateQueries({ queryKey: ['sources'] });
-      qc.invalidateQueries({ queryKey: ['photos'] });
+      resetCatalogContentQueries(qc);
       qc.invalidateQueries({ queryKey: ['cleanup'] });
-      qc.invalidateQueries({ queryKey: ['imports'] });
-      qc.invalidateQueries({ queryKey: ['albums'] });
-      qc.invalidateQueries({ queryKey: ['rediscovery'] });
-      qc.invalidateQueries({ queryKey: ['face-clusters'] });
     },
   });
 }
@@ -275,10 +279,7 @@ export function useRemovePhotosFromCatalog() {
   return useMutation<RemoveReceipt, Error, number[]>({
     mutationFn: (photoIds: number[]) => removePhotosFromCatalog(photoIds),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['photos'] });
-      qc.invalidateQueries({ queryKey: ['sources'] });
-      qc.invalidateQueries({ queryKey: ['albums'] });
-      qc.invalidateQueries({ queryKey: ['duplicates'] });
+      resetCatalogContentQueries(qc);
     },
   });
 }
@@ -298,6 +299,9 @@ export function useStartImport() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ sourceId, root }: { sourceId: number; root: string }) => startImport(sourceId, root),
+    onMutate: () => {
+      clearPhotoScopedQueries(qc);
+    },
     onSuccess: (_data, { sourceId }) => {
       qc.invalidateQueries({ queryKey: ['imports', sourceId] });
       qc.invalidateQueries({ queryKey: ['imports'] });
@@ -310,6 +314,9 @@ export function useImportGoogleTakeout() {
   return useMutation({
     mutationFn: ({ sourceId, root }: { sourceId: number; root: string }) =>
       importGoogleTakeout(sourceId, root),
+    onMutate: () => {
+      clearPhotoScopedQueries(qc);
+    },
     onSuccess: (_data, { sourceId }) => {
       qc.invalidateQueries({ queryKey: ['imports', sourceId] });
       qc.invalidateQueries({ queryKey: ['imports'] });
@@ -412,6 +419,18 @@ export function useTags(photoId: number | null | undefined) {
   });
 }
 
+export function useGenerateAiTags() {
+  const qc = useQueryClient();
+  return useMutation<import('../tauri/invoke').TagRow[], Error, number>({
+    mutationFn: (photoId) => generateAiTags(photoId),
+    onSuccess: (rows, photoId) => {
+      qc.setQueryData(['tags', photoId], rows);
+      qc.invalidateQueries({ queryKey: ['photos'] });
+      qc.invalidateQueries({ queryKey: ['search_suggestions'] });
+    },
+  });
+}
+
 export function useThumbnailUrl(photoId: number | null | undefined, sizePx = 320) {
   return useQuery<string | null, Error>({
     queryKey: ['thumbnail', photoId, sizePx],
@@ -426,12 +445,12 @@ export function useThumbnailUrl(photoId: number | null | undefined, sizePx = 320
         const blob = new Blob([buf as ArrayBuffer], { type: 'image/jpeg' });
         return URL.createObjectURL(blob);
       } catch (err) {
-        console.warn('[thumbnail] get_thumbnail failed for photo', photoId, JSON.stringify(err), err);
+        warn('[thumbnail] get_thumbnail failed for photo', photoId, err);
         return null;
       }
     },
     staleTime: 60 * 60_000,
-    gcTime: 30 * 60_000,
+    gcTime: 5 * 60_000,
   });
 }
 
@@ -449,9 +468,8 @@ export function useCleanupExecute() {
     mutationFn: ({ planId, confirmToken }: { planId: string; confirmToken: string }) =>
       cleanupExecute(planId, confirmToken),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['sources'] });
+      resetCatalogContentQueries(qc);
       qc.invalidateQueries({ queryKey: ['cleanup'] });
-      qc.invalidateQueries({ queryKey: ['photos'] });
     },
   });
 }
@@ -469,8 +487,7 @@ export function useLiftShiftExecute() {
   return useMutation<LiftReceipt, Error, { planId: string; confirmToken: string }>({
     mutationFn: ({ planId, confirmToken }) => liftShiftExecute(planId, confirmToken),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['sources'] });
-      qc.invalidateQueries({ queryKey: ['photos'] });
+      resetCatalogContentQueries(qc);
     },
   });
 }
@@ -495,6 +512,15 @@ export function useFaceClusters(limit = 60) {
   });
 }
 
+export function useFacesForPhoto(photoId: number | null | undefined) {
+  return useQuery<PhotoFaceRow[], Error>({
+    queryKey: ['photo_faces', photoId],
+    enabled: typeof photoId === 'number',
+    queryFn: () => (typeof photoId === 'number' ? listFacesForPhoto(photoId) : Promise.resolve([])),
+    staleTime: 60_000,
+  });
+}
+
 export function useFaceClusterName() {
   const qc = useQueryClient();
   return useMutation<void, Error, { clusterId: number; name: string }>({
@@ -511,6 +537,42 @@ export function useFaceClusterMerge() {
     mutationFn: ({ a, b }) => faceClusterMerge(a, b),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['face-clusters'] });
+    },
+  });
+}
+
+export function useFaceAssignCluster() {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { faceId: number; clusterId: number; photoId?: number }>({
+    mutationFn: ({ faceId, clusterId }) => faceAssignCluster(faceId, clusterId),
+    onSuccess: (_result, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
+      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
+      if (typeof photoId === 'number') qc.invalidateQueries({ queryKey: ['photo_faces', photoId] });
+    },
+  });
+}
+
+export function useFaceCreatePersonFromFace() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { faceId: number; name: string; photoId?: number }>({
+    mutationFn: ({ faceId, name }) => faceCreatePersonFromFace(faceId, name),
+    onSuccess: (_clusterId, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
+      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
+      if (typeof photoId === 'number') qc.invalidateQueries({ queryKey: ['photo_faces', photoId] });
+    },
+  });
+}
+
+export function useFaceUnassign() {
+  const qc = useQueryClient();
+  return useMutation<void, Error, { faceId: number; photoId?: number }>({
+    mutationFn: ({ faceId }) => faceUnassign(faceId),
+    onSuccess: (_result, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['face-clusters'] });
+      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
+      if (typeof photoId === 'number') qc.invalidateQueries({ queryKey: ['photo_faces', photoId] });
     },
   });
 }
@@ -586,7 +648,7 @@ export function useRebuildThumbnails() {
   return useMutation<RebuildReceipt, Error, void>({
     mutationFn: () => rebuildThumbnails(),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['thumbnail'] });
+      qc.removeQueries({ queryKey: ['thumbnail'] });
       qc.invalidateQueries({ queryKey: ['photos'] });
     },
   });
@@ -686,7 +748,7 @@ export function useCullBin(filter?: CullBinFilter) {
 export function useCullBinSummary() {
   return useQuery({
     queryKey: ['cull_bin_summary'],
-    queryFn: () => cullBinSummary(),
+    queryFn: async () => (await cullBinSummary()) ?? { total_count: 0, total_bytes: 0, by_reason: [] },
   });
 }
 
@@ -793,22 +855,50 @@ export function useRenameUserTag() {
 // ── Phase 3: Develop ──────────────────────────────────────────────────────────
 
 import {
+  type AiEditRefreshReceipt,
+  type AiEditRow,
+  aiEditRefresh,
+  aiEditStatus,
+  type DevelopHistoryRow,
+  type DevelopMask,
+  type DevelopMaskCreateRequest,
+  type DevelopMaskUpdateRequest,
   type DevelopOpenResponse,
   type DevelopOperations,
   type DevelopPreset,
+  developAdaptivePresetApply,
   developApply,
   developCopyEdits,
+  developHistoryList,
+  developMaskApplyPreview,
+  developMaskCreate,
+  developMaskDelete,
+  developMasksList,
+  developMaskUpdate,
   developOpen,
   developPasteEdits,
   developPresetApply,
   developReset,
   developSave,
+  developSnapshotSave,
   type PastedReceipt,
   presetsList,
   type RenderReceipt,
 } from '../tauri/invoke';
 
-export type { DevelopOpenResponse, DevelopOperations, DevelopPreset, PastedReceipt, RenderReceipt };
+export type {
+  AiEditRefreshReceipt,
+  AiEditRow,
+  DevelopHistoryRow,
+  DevelopMask,
+  DevelopMaskCreateRequest,
+  DevelopMaskUpdateRequest,
+  DevelopOpenResponse,
+  DevelopOperations,
+  DevelopPreset,
+  PastedReceipt,
+  RenderReceipt,
+};
 
 export function useDevelopOpen(photoId: number | null) {
   return useQuery({
@@ -831,6 +921,25 @@ export function useDevelopSave() {
     onSuccess: (_id, { photoId }) => {
       qc.invalidateQueries({ queryKey: ['develop_open', photoId] });
     },
+  });
+}
+
+export function useDevelopSnapshotSave() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { photoId: number; operations: DevelopOperations; label?: string }>({
+    mutationFn: ({ photoId, operations, label }) => developSnapshotSave(photoId, operations, label),
+    onSuccess: (_id, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['develop_open', photoId] });
+      qc.invalidateQueries({ queryKey: ['develop_history', photoId] });
+    },
+  });
+}
+
+export function useDevelopHistory(photoId: number | null) {
+  return useQuery<DevelopHistoryRow[], Error>({
+    queryKey: ['develop_history', photoId],
+    queryFn: () => developHistoryList(photoId as number),
+    enabled: photoId != null,
   });
 }
 
@@ -868,9 +977,85 @@ export function useDevelopPresetApply() {
   });
 }
 
+export function useDevelopAdaptivePresetApply() {
+  const qc = useQueryClient();
+  return useMutation<RenderReceipt, Error, { photoId: number; presetId: number; strength: number }>({
+    mutationFn: ({ photoId, presetId, strength }) => developAdaptivePresetApply(photoId, presetId, strength),
+    onSuccess: (_receipt, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['develop_masks', photoId] });
+      qc.invalidateQueries({ queryKey: ['develop_open', photoId] });
+    },
+  });
+}
+
 export function usePresets(group?: string) {
   return useQuery({
     queryKey: ['presets', group ?? 'all'],
     queryFn: () => presetsList(group),
+  });
+}
+
+export function useDevelopMasks(photoId: number | null) {
+  return useQuery<DevelopMask[], Error>({
+    queryKey: ['develop_masks', photoId],
+    queryFn: () => developMasksList(photoId as number),
+    enabled: photoId != null,
+  });
+}
+
+export function useDevelopMaskCreate() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, DevelopMaskCreateRequest>({
+    mutationFn: (req) => developMaskCreate(req),
+    onSuccess: (_id, req) => {
+      qc.invalidateQueries({ queryKey: ['develop_masks', req.photo_id] });
+      qc.invalidateQueries({ queryKey: ['develop_open', req.photo_id] });
+    },
+  });
+}
+
+export function useDevelopMaskUpdate() {
+  const qc = useQueryClient();
+  return useMutation<DevelopMask, Error, DevelopMaskUpdateRequest>({
+    mutationFn: (req) => developMaskUpdate(req),
+    onSuccess: (mask) => {
+      qc.invalidateQueries({ queryKey: ['develop_masks', mask.photo_id] });
+      qc.invalidateQueries({ queryKey: ['develop_open', mask.photo_id] });
+    },
+  });
+}
+
+export function useDevelopMaskDelete() {
+  const qc = useQueryClient();
+  return useMutation<number, Error, { maskId: number; photoId: number }>({
+    mutationFn: ({ maskId }) => developMaskDelete(maskId),
+    onSuccess: (_deleted, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['develop_masks', photoId] });
+      qc.invalidateQueries({ queryKey: ['develop_open', photoId] });
+    },
+  });
+}
+
+export function useDevelopMaskApplyPreview() {
+  return useMutation<RenderReceipt, Error, { photoId: number; operations: DevelopOperations }>({
+    mutationFn: ({ photoId, operations }) => developMaskApplyPreview(photoId, operations),
+  });
+}
+
+export function useAiEditStatus(photoId: number | null) {
+  return useQuery<AiEditRow[], Error>({
+    queryKey: ['ai_edit_status', photoId],
+    queryFn: () => aiEditStatus(photoId as number),
+    enabled: photoId != null,
+  });
+}
+
+export function useAiEditRefresh() {
+  const qc = useQueryClient();
+  return useMutation<AiEditRefreshReceipt, Error, { photoId: number; feature: string }>({
+    mutationFn: ({ photoId, feature }) => aiEditRefresh(photoId, feature),
+    onSuccess: (_receipt, { photoId }) => {
+      qc.invalidateQueries({ queryKey: ['ai_edit_status', photoId] });
+    },
   });
 }

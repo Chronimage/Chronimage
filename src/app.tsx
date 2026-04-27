@@ -1,4 +1,3 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { Rail } from './chrome/Rail';
 import { StatusBar } from './chrome/StatusBar';
@@ -6,7 +5,6 @@ import { Titlebar } from './chrome/Titlebar';
 import { ShortcutOverlay, useShortcutOverlay } from './primitives/ShortcutOverlay';
 import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
 import { CullScreen, CullSidePanel } from './screens/cull';
-import { CullBinScreen, CullBinSidePanel } from './screens/cullbin';
 import { DevelopScreen, DevelopSidePanel } from './screens/develop';
 import { MapScreen } from './screens/map/MapScreen';
 import { PeopleScreen } from './screens/PeopleScreen';
@@ -16,10 +14,6 @@ import { useSourceDeleteProgressListener } from './state/sourceDelete';
 import { useUi } from './state/ui';
 import { appVersion, currentChannel } from './tauri/invoke';
 import { error as logError } from './util/log';
-
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
-});
 
 // `useImportProgressListener` depends on `useQueryClient()` to invalidate
 // catalog queries live as an import streams in. Split into its own component
@@ -76,12 +70,8 @@ export function App() {
       mainPanel = <CatalogScreen albumId={albumId} />;
       break;
     case 'cull':
-      sidePanel = <CullSidePanel total={40} />;
+      sidePanel = <CullSidePanel />;
       mainPanel = <CullScreen />;
-      break;
-    case 'cullbin':
-      sidePanel = <CullBinSidePanel />;
-      mainPanel = <CullBinScreen />;
       break;
     case 'develop':
       sidePanel = <DevelopSidePanel />;
@@ -99,7 +89,7 @@ export function App() {
   }
 
   return (
-    <QueryClientProvider client={queryClient}>
+    <>
       <ImportProgressBridge />
       <div
         className="app compact"
@@ -123,6 +113,6 @@ export function App() {
         <StatusBar screen={screen} version={version} channel={channel} />
       </div>
       <ShortcutOverlay open={shortcutOpen} onClose={closeShortcutOverlay} />
-    </QueryClientProvider>
+    </>
   );
 }
