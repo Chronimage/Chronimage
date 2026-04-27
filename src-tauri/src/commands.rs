@@ -1200,28 +1200,15 @@ async fn delete_source_impl(
     };
 
     emit("collecting", 0, 0);
-    // Collect orphan original-source paths BEFORE we mutate, so we can
-    // recycle them after. "Orphan" here ignores the managed catalog source —
-    // a photo whose only remaining non-managed source is this one is gone
-    // from the catalog regardless of where the consolidated bytes live.
-    let orphan_paths: Vec<String> = sqlx::query_scalar::<_, String>(
-        "SELECT sc.path FROM source_copies sc
-         WHERE sc.source_id = ?1
-           AND sc.path IS NOT NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM source_copies sc2
-             JOIN sources s2 ON s2.id = sc2.source_id
-             WHERE sc2.photo_id = sc.photo_id
-               AND sc2.source_id != ?1
-               AND COALESCE(json_extract(s2.config_json, '$.managed'), 0) = 0
-           )",
-    )
-    .bind(source_id)
-    .fetch_all(pool)
-    .await?;
-
     // Collect orphan photo ids + sha256 so we can nuke their thumb-cache files
     // and sqlite-vec rowids after the transaction commits.
+    //
+    // Disconnect deliberately does NOT recycle the user's original-source
+    // files (Google Photos / iCloud / iPhone-backup folder). Chronimage
+    // never touches those paths — they belong to the user's external
+    // album and are off-limits. We only own the consolidated catalog copy
+    // under the managed "Chronimage Local" source, which is collected
+    // below as `catalog_copy_paths` and recycled post-commit.
     let orphan_meta: Vec<(i64, String)> = sqlx::query_as::<_, (i64, String)>(
         "SELECT p.id, p.sha256
          FROM photos p
@@ -1374,17 +1361,14 @@ async fn delete_source_impl(
         emit("thumb_cleanup", removed_thumbnails, orphan_total);
     }
 
-    // Recycle every physical file tied to an orphan photo: the original
-    // album path AND the consolidated catalog copy. Disconnect = the photo
-    // leaves the catalog completely, including its bytes on disk.
-    let mut recycle_targets: Vec<&str> = catalog_copy_paths.iter().map(String::as_str).collect();
-    recycle_targets.extend(orphan_paths.iter().map(String::as_str));
-
-    if !recycle_targets.is_empty() {
-        let recycle_total = recycle_targets.len() as i64;
+    // Recycle the consolidated catalog copies for orphan photos. The
+    // user's original-source files are NOT in this list — see the
+    // `orphan_meta` collection comment for why.
+    if !catalog_copy_paths.is_empty() {
+        let recycle_total = catalog_copy_paths.len() as i64;
         emit("recycling", 0, recycle_total);
         let recycle_step = (recycle_total / 64).max(1) as usize;
-        for (i, path) in recycle_targets.iter().enumerate() {
+        for (i, path) in catalog_copy_paths.iter().enumerate() {
             let p = std::path::Path::new(path);
             if p.exists() {
                 if let Err(e) = trash::delete(p) {
@@ -1403,7 +1387,6 @@ async fn delete_source_impl(
         source_id,
         removed_photos,
         removed_thumbnails,
-        recycled_originals = orphan_paths.len(),
         recycled_catalog_copies = catalog_copy_paths.len(),
         "source deleted"
     );
@@ -1446,9 +1429,16 @@ async fn remove_photos_preview_impl(
         .join(",");
     let photo_count = photo_ids.len() as i64;
 
+    // `local_files` and `total_bytes` reflect **only managed catalog
+    // copies** — those are what `recycle_source_copies` actually deletes.
+    // Counting non-managed source files here would mislead the user into
+    // thinking their iPhone-backup originals were about to be recycled.
     let local_files: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM source_copies
-         WHERE photo_id IN ({id_list}) AND path IS NOT NULL"
+        "SELECT COUNT(*) FROM source_copies sc
+         JOIN sources s ON s.id = sc.source_id
+         WHERE sc.photo_id IN ({id_list})
+           AND sc.path IS NOT NULL
+           AND COALESCE(json_extract(s.config_json, '$.managed'), 0) = 1"
     ))
     .fetch_one(pool)
     .await?;
@@ -1456,11 +1446,21 @@ async fn remove_photos_preview_impl(
     let total_bytes: i64 = sqlx::query_scalar(&format!(
         "SELECT COALESCE(SUM(p.size_bytes), 0) FROM photos p
          WHERE p.id IN ({id_list})
-           AND EXISTS (SELECT 1 FROM source_copies sc WHERE sc.photo_id = p.id AND sc.path IS NOT NULL)"
+           AND EXISTS (
+             SELECT 1 FROM source_copies sc
+             JOIN sources s ON s.id = sc.source_id
+             WHERE sc.photo_id = p.id
+               AND sc.path IS NOT NULL
+               AND COALESCE(json_extract(s.config_json, '$.managed'), 0) = 1
+           )"
     ))
     .fetch_one(pool)
     .await?;
 
+    // `cloud_only_photos` keeps its original meaning: photos that have no
+    // local copy *at all* (any source). These show as "no file to recycle"
+    // in the dialog footer. Photos with only a non-managed local source
+    // are NOT cloud-only — they exist on disk, we just don't touch them.
     let cloud_only_photos: i64 = sqlx::query_scalar(&format!(
         "SELECT COUNT(*) FROM photos p
          WHERE p.id IN ({id_list})
@@ -1566,7 +1566,18 @@ async fn remove_photos_from_catalog_impl(
     })
 }
 
-/// Send the on-disk files for the given photos to the Windows Recycle Bin.
+/// Send the on-disk catalog copies for the given photos to the Recycle
+/// Bin. Only the **managed** "Chronimage Local" source's files are
+/// touched — the user's originals (Google Photos / iCloud / iPhone
+/// folder / etc.) are deliberately left alone.
+///
+/// Per-photo delete = "I don't want this photo in my catalog anymore".
+/// The catalog copy is app-managed storage so we recycle it; the
+/// originals belong to the user's external album and removing them
+/// would be destructive in a way they didn't ask for. (Disconnecting
+/// the entire source is the explicit "drop the album" path; that one
+/// does recycle originals.)
+///
 /// Does NOT touch the catalog DB — caller is responsible for a separate
 /// `remove_photos_from_catalog` call if they also want catalog removal.
 #[tauri::command]
@@ -1594,9 +1605,15 @@ async fn recycle_source_copies_impl(
         .map(|id| id.to_string())
         .collect::<Vec<_>>()
         .join(",");
+    // Managed-source-only filter — see the docstring above. The original-
+    // source rows for the same photo are intentionally NOT in this result
+    // set, so `trash::delete` never sees a path under the user's album.
     let paths: Vec<String> = sqlx::query_scalar::<_, String>(&format!(
-        "SELECT path FROM source_copies
-         WHERE photo_id IN ({id_list}) AND path IS NOT NULL"
+        "SELECT sc.path FROM source_copies sc
+         JOIN sources s ON s.id = sc.source_id
+         WHERE sc.photo_id IN ({id_list})
+           AND sc.path IS NOT NULL
+           AND COALESCE(json_extract(s.config_json, '$.managed'), 0) = 1"
     ))
     .fetch_all(pool)
     .await?;
@@ -2893,20 +2910,25 @@ pub fn detect_hardware() -> crate::ai::budget::HardwareInfo {
 
 /// Embed a single image using SigLIP-B/16.
 /// Returns 768 f32 values. Errors when the model file is not yet downloaded.
+///
+/// One-shot ad-hoc command — no AI-preview cache hint, since the caller
+/// passes an arbitrary on-disk path that may not be a catalog photo.
 #[tauri::command]
 pub fn embed_image(path: String) -> AppResult<Vec<f32>> {
     let model_path = crate::util::paths::models_dir()?.join("siglip-b16-image.onnx");
     let session = crate::ai::siglip::get_or_load(&model_path)?;
-    session.embed_image(std::path::Path::new(&path))
+    session.embed_image(std::path::Path::new(&path), None)
 }
 
 /// Score a single image for aesthetic quality (1.0–10.0).
 /// Errors when the model file is not yet downloaded.
+///
+/// One-shot ad-hoc command — see `embed_image` for the cache rationale.
 #[tauri::command]
 pub fn score_aesthetic(path: String) -> AppResult<f32> {
     let model_path = crate::util::paths::models_dir()?.join("nima.onnx");
     let session = crate::ai::aesthetic::get_or_load(&model_path)?;
-    session.score(std::path::Path::new(&path))
+    session.score(std::path::Path::new(&path), None)
 }
 
 /// Download one or more AI models to the local models directory.
@@ -7197,13 +7219,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_source_recycles_both_original_and_catalog_copy() {
+    async fn delete_source_recycles_catalog_copy_but_leaves_original_alone() {
         // Consolidated-album scenario: photo lives in an original Google
         // Photos source AND in the managed Chronimage Local source. The user
         // disconnects the Google Photos source. The photo must leave the
         // catalog (the managed copy is just storage, not a peer source) and
-        // both the original file AND the catalog copy must go to the Recycle
-        // Bin — disconnect = the photo's bytes leave the catalog completely.
+        // the catalog copy on disk must be recycled. The user's
+        // original-source file is OFF-LIMITS — Chronimage never touches
+        // bytes under their external album folder, even on disconnect.
         let _guard = lock_thumbs_env();
         let thumbs_tmp = tempfile::TempDir::new().expect("thumbs tmp");
         std::env::set_var("CHRONIMAGE_THUMBNAILS_DIR", thumbs_tmp.path());
@@ -7266,8 +7289,8 @@ mod tests {
 
         assert!(!catalog_file.exists(), "catalog copy must be recycled");
         assert!(
-            !original_file.exists(),
-            "original source file must be recycled too"
+            original_file.exists(),
+            "original-source file must NOT be touched by disconnect"
         );
     }
 
@@ -7345,23 +7368,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_photos_preview_splits_local_and_cloud_only() {
+    async fn remove_photos_preview_counts_only_managed_local_files() {
+        // Preview must reflect what `recycle_source_copies` will actually
+        // recycle — managed catalog copies, NOT the user's originals.
+        // p_consol has both an original-source and a managed copy → counts as 1 local file.
+        // p_orig_only has only a non-managed source → not in `local_files`.
+        // p_cloud has no path anywhere → cloud_only.
         let pool = test_pool().await;
-        let src = insert_source(&pool, "A", "local").await;
+        let original_src = insert_source(&pool, "iPhone Backup", "local").await;
+        let catalog_src = insert_managed_source(&pool, "Chronimage Local", "/tmp/cat").await;
 
-        let p_local = insert_photo(&pool, "L", 100).await;
-        insert_source_copy(&pool, p_local, src, Some("/tmp/L.jpg"), "L").await;
+        let p_consol = insert_photo(&pool, "consol", 100).await;
+        insert_source_copy(&pool, p_consol, original_src, Some("/orig/c.jpg"), "consol").await;
+        insert_source_copy(&pool, p_consol, catalog_src, Some("/cat/c.jpg"), "consol").await;
 
-        let p_cloud = insert_photo(&pool, "C", 200).await;
-        insert_source_copy(&pool, p_cloud, src, None, "C").await;
+        let p_orig_only = insert_photo(&pool, "origonly", 50).await;
+        insert_source_copy(
+            &pool,
+            p_orig_only,
+            original_src,
+            Some("/orig/o.jpg"),
+            "origonly",
+        )
+        .await;
 
-        let preview = remove_photos_preview_impl(&pool, &[p_local, p_cloud])
+        let p_cloud = insert_photo(&pool, "cloud", 200).await;
+        insert_source_copy(&pool, p_cloud, original_src, None, "cloud").await;
+
+        let preview = remove_photos_preview_impl(&pool, &[p_consol, p_orig_only, p_cloud])
             .await
             .expect("preview");
-        assert_eq!(preview.photo_count, 2);
-        assert_eq!(preview.local_files, 1);
-        assert_eq!(preview.cloud_only_photos, 1);
-        assert_eq!(preview.total_bytes, 100, "only p_local contributes bytes");
+        assert_eq!(preview.photo_count, 3);
+        assert_eq!(
+            preview.local_files, 1,
+            "only the managed catalog copy counts as a recyclable local file"
+        );
+        assert_eq!(
+            preview.cloud_only_photos, 1,
+            "p_cloud has no local path anywhere"
+        );
+        assert_eq!(
+            preview.total_bytes, 100,
+            "only photos with a managed copy contribute bytes"
+        );
     }
 
     #[tokio::test]
@@ -7408,7 +7457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recycle_source_copies_sends_local_files_to_trash_and_reports() {
+    async fn recycle_source_copies_sends_managed_catalog_copies_to_trash_and_reports() {
         let pool = test_pool().await;
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let file_a = tmp.path().join("a.jpg");
@@ -7416,11 +7465,14 @@ mod tests {
         std::fs::write(&file_a, b"aaa").unwrap();
         std::fs::write(&file_b, b"bbb").unwrap();
 
-        let src = insert_source(&pool, "A", "local").await;
+        // The recycle target is the managed catalog source — these are
+        // app-managed bytes that we own and clean up on remove.
+        let catalog_src =
+            insert_managed_source(&pool, "Chronimage Local", tmp.path().to_str().unwrap()).await;
         let pa = insert_photo(&pool, "a", 3).await;
-        insert_source_copy(&pool, pa, src, Some(file_a.to_str().unwrap()), "a").await;
+        insert_source_copy(&pool, pa, catalog_src, Some(file_a.to_str().unwrap()), "a").await;
         let pb = insert_photo(&pool, "b", 3).await;
-        insert_source_copy(&pool, pb, src, Some(file_b.to_str().unwrap()), "b").await;
+        insert_source_copy(&pool, pb, catalog_src, Some(file_b.to_str().unwrap()), "b").await;
 
         let receipt = recycle_source_copies_impl(&pool, &[pa, pb])
             .await
@@ -7448,11 +7500,18 @@ mod tests {
     #[tokio::test]
     async fn recycle_source_copies_skips_missing_and_empty_input() {
         let pool = test_pool().await;
-        let src = insert_source(&pool, "A", "local").await;
+        let catalog_src = insert_managed_source(&pool, "Chronimage Local", "/tmp/cat").await;
 
-        // Photo with a path that doesn't exist on disk.
+        // Photo with a managed-source path that doesn't exist on disk.
         let p = insert_photo(&pool, "ghost", 1).await;
-        insert_source_copy(&pool, p, src, Some("/nonexistent/ghost.jpg"), "ghost").await;
+        insert_source_copy(
+            &pool,
+            p,
+            catalog_src,
+            Some("/nonexistent/ghost.jpg"),
+            "ghost",
+        )
+        .await;
 
         let receipt = recycle_source_copies_impl(&pool, &[p])
             .await
@@ -7467,5 +7526,61 @@ mod tests {
         let empty = recycle_source_copies_impl(&pool, &[]).await.unwrap();
         assert_eq!(empty.recycled_count, 0);
         assert_eq!(empty.skipped_count, 0);
+    }
+
+    #[tokio::test]
+    async fn recycle_source_copies_does_not_touch_non_managed_originals() {
+        // Regression: previously this command recycled every source_copies
+        // path, including the user's original-source files. After the fix
+        // it must leave non-managed paths alone — those are the user's
+        // album files and only `delete_source` is allowed to touch them.
+        let pool = test_pool().await;
+        let original_root = tempfile::TempDir::new().expect("orig tmp");
+        let catalog_root = tempfile::TempDir::new().expect("catalog tmp");
+
+        let original_file = original_root.path().join("IMG.jpg");
+        let catalog_file = catalog_root.path().join("IMG.jpg");
+        std::fs::write(&original_file, b"orig").unwrap();
+        std::fs::write(&catalog_file, b"copy").unwrap();
+
+        let original_src = insert_source(&pool, "iPhone Backup", "local").await;
+        let catalog_src = insert_managed_source(
+            &pool,
+            "Chronimage Local",
+            catalog_root.path().to_str().unwrap(),
+        )
+        .await;
+
+        let photo_id = insert_photo(&pool, "consol", 100).await;
+        insert_source_copy(
+            &pool,
+            photo_id,
+            original_src,
+            Some(original_file.to_str().unwrap()),
+            "consol",
+        )
+        .await;
+        insert_source_copy(
+            &pool,
+            photo_id,
+            catalog_src,
+            Some(catalog_file.to_str().unwrap()),
+            "consol",
+        )
+        .await;
+
+        let receipt = recycle_source_copies_impl(&pool, &[photo_id])
+            .await
+            .expect("recycle");
+
+        assert_eq!(
+            receipt.recycled_count, 1,
+            "exactly one file (the catalog copy) should be recycled"
+        );
+        assert!(!catalog_file.exists(), "catalog copy must be recycled");
+        assert!(
+            original_file.exists(),
+            "original-source file must NOT be touched"
+        );
     }
 }

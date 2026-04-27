@@ -305,7 +305,11 @@ async fn execute_pipeline(
                         &meta_path,
                         exif.orientation,
                     );
-                    let phash = crate::dedupe::phash::compute(&meta_path);
+                    // Stage 2.5 runs before the AI-preview cache is written
+                    // in stage 2.6, so we pass None and let phash decode via
+                    // the full open_any cascade. For HEIC this is one WIC
+                    // decode here; the cache benefits stages 4 and 5.
+                    let phash = crate::dedupe::phash::compute(&meta_path, None);
                     (exif, phash)
                 })
                 .await
@@ -392,6 +396,15 @@ async fn execute_pipeline(
                     // Apply EXIF orientation BEFORE resizing so the cached
                     // thumb lands in display-correct orientation.
                     let img = crate::ai::image_util::apply_exif_orientation(img, thumb_orientation);
+
+                    // While we have the full-res decode in memory, also seed
+                    // the AI-preview cache. Subsequent AI/dedupe stages
+                    // (faces, siglip, nima, phash) read this JPEG instead of
+                    // re-decoding the source — critical for HEIC, where
+                    // every redecode goes through Microsoft's WIC HEVC codec
+                    // and is slow + flaky under concurrency.
+                    crate::ai::image_util::write_ai_preview_cache(&thumbs_dir, &thumb_sha, &img);
+
                     let resized = img.thumbnail(320, 320);
 
                     if !cache_path.exists() {
@@ -465,13 +478,16 @@ async fn execute_pipeline(
     }
 
     // Collect results; track newly-inserted photos for the AI stage.
+    // `new_photos` carries the sha256 so stages 4 and 5 can pass it as a
+    // hint to `open_for_ai` and read the AI-preview cache instead of
+    // re-decoding HEIC/RAW from the original.
     let mut path_hash_id: Vec<(PathBuf, String, i64)> = Vec::new();
-    let mut new_photos: Vec<(PathBuf, i64)> = Vec::new();
+    let mut new_photos: Vec<(PathBuf, String, i64)> = Vec::new();
     for h in handles {
         match h.await {
             Ok(Ok((path, hash, photo_id, was_inserted))) => {
                 if was_inserted {
-                    new_photos.push((path.clone(), photo_id));
+                    new_photos.push((path.clone(), hash.clone(), photo_id));
                 }
                 path_hash_id.push((path, hash, photo_id));
             }
@@ -573,8 +589,9 @@ async fn execute_pipeline(
                 let ai_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_AI_TASKS));
                 let mut handles = Vec::with_capacity(new_photos.len());
 
-                for (path, photo_id) in &new_photos {
+                for (path, sha256, photo_id) in &new_photos {
                     let path = path.clone();
+                    let sha256 = sha256.clone();
                     let photo_id = *photo_id;
                     let pool = pool.clone();
                     let sem = Arc::clone(&ai_sem);
@@ -596,7 +613,10 @@ async fn execute_pipeline(
                         let nima_start = Instant::now();
                         if let Some(nima) = nima_opt {
                             let p = path.clone();
-                            match tokio::task::spawn_blocking(move || nima.score(&p)).await {
+                            let sha = sha256.clone();
+                            match tokio::task::spawn_blocking(move || nima.score(&p, Some(&sha)))
+                                .await
+                            {
                                 Ok(Ok(score)) => {
                                     if let Err(e) = sqlx::query(
                                         "UPDATE photos SET aesthetic_score = ?1 WHERE id = ?2",
@@ -624,7 +644,11 @@ async fn execute_pipeline(
                         let siglip_start = Instant::now();
                         if let (Some(siglip), Some(model_id)) = (siglip_opt, model_id_opt) {
                             let p = path.clone();
-                            match tokio::task::spawn_blocking(move || siglip.embed_image(&p)).await
+                            let sha = sha256.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                siglip.embed_image(&p, Some(&sha))
+                            })
+                            .await
                             {
                                 Ok(Ok(vec)) => {
                                     let bytes: Vec<u8> =
@@ -750,8 +774,9 @@ async fn execute_pipeline(
             let face_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_AI_TASKS));
             let mut handles = Vec::with_capacity(new_photos.len());
 
-            for (path, photo_id) in &new_photos {
+            for (path, sha256, photo_id) in &new_photos {
                 let path = path.clone();
+                let sha256 = sha256.clone();
                 let photo_id = *photo_id;
                 let pool = pool.clone();
                 let sem = Arc::clone(&face_sem);
@@ -767,9 +792,11 @@ async fn execute_pipeline(
                     };
 
                     let path_c = path.clone();
-                    let detect_result =
-                        tokio::task::spawn_blocking(move || faces_session.detect_faces(&path_c))
-                            .await;
+                    let sha_for_detect = sha256.clone();
+                    let detect_result = tokio::task::spawn_blocking(move || {
+                        faces_session.detect_faces(&path_c, Some(&sha_for_detect))
+                    })
+                    .await;
                     let faces = match detect_result {
                         Ok(Ok(f)) => f,
                         Ok(Err(e)) => {
@@ -784,9 +811,10 @@ async fn execute_pipeline(
                     let now_ts = Utc::now().to_rfc3339();
                     for face in faces {
                         let path_c = path.clone();
+                        let sha_for_embed = sha256.clone();
                         let face_for_embed = face.clone();
                         let embed_result = tokio::task::spawn_blocking(move || {
-                            faces_session.embed_face(&path_c, &face_for_embed)
+                            faces_session.embed_face(&path_c, Some(&sha_for_embed), &face_for_embed)
                         })
                         .await;
                         let embedding = match embed_result {

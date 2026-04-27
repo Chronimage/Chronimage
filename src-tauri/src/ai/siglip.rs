@@ -156,15 +156,17 @@ impl SigLipSession {
 
     /// Embed a single image. Resize → normalise → forward pass → 768-dim f32.
     ///
-    /// Returns `AppError::Internal` when running as a stub (image session absent).
-    pub fn embed_image(&self, image_path: &Path) -> AppResult<Vec<f32>> {
+    /// Returns `AppError::Internal` when running as a stub (image session
+    /// absent). `sha256` is an optional cache hint — when set, the
+    /// AI-preview cache is consulted first to avoid redecoding HEIC/RAW.
+    pub fn embed_image(&self, image_path: &Path, sha256: Option<&str>) -> AppResult<Vec<f32>> {
         if self.is_stub {
             return Err(AppError::Internal(
                 "siglip image session is stub — cannot embed images without the model".into(),
             ));
         }
 
-        let pixel_values = preprocess_image(image_path)?;
+        let pixel_values = preprocess_image(image_path, sha256)?;
         let shape = vec![1i64, 3, INPUT_SIZE as i64, INPUT_SIZE as i64];
         let input_tensor = ort::value::Tensor::<f32>::from_array((shape, pixel_values))
             .map_err(|e| AppError::Internal(format!("ort tensor (siglip image): {e}")))?;
@@ -243,8 +245,9 @@ impl SigLipSession {
 
 /// Resize to 224×224 (bilinear), convert to RGB f32 channels-first, normalise
 /// to `[-1, 1]` via `(x/255.0 − 0.5) / 0.5`.
-fn preprocess_image(path: &Path) -> AppResult<Vec<f32>> {
-    let img = image::open(path).map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+fn preprocess_image(path: &Path, sha256: Option<&str>) -> AppResult<Vec<f32>> {
+    let img = crate::ai::image_util::open_for_ai(path, sha256)
+        .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
     let rgb = img
         .resize_exact(INPUT_SIZE, INPUT_SIZE, FilterType::Triangle)
         .into_rgb8();
@@ -483,7 +486,7 @@ mod tests {
     fn stub_embed_image_returns_error() {
         let sess = SigLipSession::load_or_stub(None, None, None);
         let err = sess
-            .embed_image(Path::new("/nonexistent/photo.jpg"))
+            .embed_image(Path::new("/nonexistent/photo.jpg"), None)
             .unwrap_err();
         assert!(
             matches!(err, AppError::Internal(_)),
@@ -548,7 +551,7 @@ mod tests {
 
     #[test]
     fn preprocess_image_wrong_path_returns_io_error() {
-        let err = preprocess_image(Path::new("/no/such/file.jpg")).unwrap_err();
+        let err = preprocess_image(Path::new("/no/such/file.jpg"), None).unwrap_err();
         assert!(
             matches!(err, AppError::Io(_)),
             "expected Io error, got: {err:?}"
@@ -568,7 +571,7 @@ mod tests {
         img.save_with_format(tmp.path(), ImageFormat::Png)
             .expect("save png");
 
-        let pixels = preprocess_image(tmp.path()).expect("preprocess");
+        let pixels = preprocess_image(tmp.path(), None).expect("preprocess");
         // 3 channels × 224 × 224
         assert_eq!(pixels.len(), 3 * 224 * 224);
         // All values in [-1, 1]
@@ -623,7 +626,7 @@ mod tests {
             return;
         }
 
-        let emb = sess.embed_image(&fixture).expect("embed_image");
+        let emb = sess.embed_image(&fixture, None).expect("embed_image");
         assert_eq!(emb.len(), EMBED_DIM, "embedding must be 768-dim");
         let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(

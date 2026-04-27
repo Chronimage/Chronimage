@@ -125,7 +125,7 @@ fn scan_dir(
         photos_seen += 1;
         eprintln!("[{photos_seen}] {photo_path:?}");
 
-        let boxes = match session.detect_faces(&photo_path) {
+        let boxes = match session.detect_faces(&photo_path, None) {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("  detect error: {e} — skipping");
@@ -134,7 +134,7 @@ fn scan_dir(
         };
         eprintln!("  {} face(s)", boxes.len());
 
-        let img = match image::open(&photo_path) {
+        let img = match chronimage::ai::image_util::open_any(&photo_path) {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("  image decode error: {e} — skipping");
