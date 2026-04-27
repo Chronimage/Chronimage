@@ -15,8 +15,8 @@ import { useDevelopUi } from '../../state/develop';
 import {
   type DevelopOperations,
   useDevelopApply,
-  useDevelopCopyEdits,
   useDevelopOpen,
+  useDevelopPasteEdits,
   useDevelopReset,
   useDevelopSave,
   usePhotos,
@@ -33,9 +33,9 @@ import {
 import { warn } from '../../util/log';
 import { EditorInspector } from './EditorInspector';
 import {
-  DEFAULT_DEVELOP_VALUES,
   type DevelopTab,
   type DevelopValues,
+  defaultDevelopValues,
   operationsToValues,
   valuesToOperations,
 } from './types';
@@ -44,13 +44,19 @@ export function DevelopScreen() {
   const { data: photos = [], isLoading } = usePhotos();
   const [focusedIdx, setFocusedIdx] = useState(0);
   const [tab, setTab] = useState<DevelopTab>('develop');
-  const [values, setValues] = useState<DevelopValues>(DEFAULT_DEVELOP_VALUES);
+  const [values, setValues] = useState<DevelopValues>(() => defaultDevelopValues());
   const [preview, setPreview] = useState<string | null>(null);
+  const [copiedOps, setCopiedOps] = useState<DevelopOperations | null>(null);
   const [promptText, setPromptText] = useState(
     'Lift shadows slightly, keep skin tones natural, subtle dehaze on sky.',
   );
   const [promptStrength, setPromptStrength] = useState(65);
   const [promptConstraints, setPromptConstraints] = useState<string[]>(['keep faces sharp', 'natural tones']);
+  const valuesRef = useRef(values);
+  const focusedPhotoIdRef = useRef<number | null>(null);
+  const applySeqRef = useRef(0);
+  const userEditedRef = useRef(false);
+  const debounceTimer = useRef<number | null>(null);
 
   const photo = photos[focusedIdx] ?? null;
   const focusedPhotoId = photo?.id ?? null;
@@ -61,10 +67,23 @@ export function DevelopScreen() {
   // returned preview back into the stage.
   const setSharedFocus = useDevelopUi((s) => s.setFocusedPhotoId);
   const setSharedPreview = useDevelopUi((s) => s.setPreview);
+  const setSharedOperations = useDevelopUi((s) => s.setOperations);
   const sharedPreview = useDevelopUi((s) => s.preview);
+  const sharedOperations = useDevelopUi((s) => s.operations);
+  const operationSource = useDevelopUi((s) => s.operationSource);
   useEffect(() => {
+    focusedPhotoIdRef.current = focusedPhotoId;
+    applySeqRef.current += 1;
+    userEditedRef.current = false;
+    if (debounceTimer.current !== null) {
+      window.clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
     setSharedFocus(focusedPhotoId);
-  }, [focusedPhotoId, setSharedFocus]);
+    setSharedPreview(null);
+    setSharedOperations(null, 'screen');
+    setPreview(null);
+  }, [focusedPhotoId, setSharedFocus, setSharedOperations, setSharedPreview]);
 
   // Load the photo's current edit state + baseline preview ONCE per photo.
   // Re-fetching `opened` on every render would wipe unsaved slider
@@ -75,43 +94,73 @@ export function DevelopScreen() {
   const seededForPhotoRef = useRef<number | null>(null);
   useEffect(() => {
     if (!opened) return;
+    if (opened.photo_id !== focusedPhotoIdRef.current) return;
     if (seededForPhotoRef.current === opened.photo_id) return;
     seededForPhotoRef.current = opened.photo_id;
-    setValues(operationsToValues(opened.operations));
+    const sharedState = useDevelopUi.getState();
+    if (sharedState.operationSource === 'sidepanel' && sharedState.operations) {
+      userEditedRef.current = true;
+      return;
+    }
+    if (userEditedRef.current) return;
+    const nextValues = operationsToValues(opened.operations);
+    valuesRef.current = nextValues;
+    setValues(nextValues);
     setPreview(opened.preview_data_url);
     setSharedPreview(opened.preview_data_url);
-  }, [opened, setSharedPreview]);
+    setSharedOperations(opened.operations, 'screen');
+  }, [opened, setSharedOperations, setSharedPreview]);
 
   // If the sidepanel pushed a new preview (preset apply), surface it.
   useEffect(() => {
     if (sharedPreview && sharedPreview !== preview) setPreview(sharedPreview);
   }, [sharedPreview, preview]);
 
+  useEffect(() => {
+    if (operationSource !== 'sidepanel' || !sharedOperations) return;
+    const nextValues = operationsToValues(sharedOperations);
+    userEditedRef.current = true;
+    valuesRef.current = nextValues;
+    setValues(nextValues);
+  }, [operationSource, sharedOperations]);
+
   const applyMut = useDevelopApply();
   const saveMut = useDevelopSave();
   const resetMut = useDevelopReset();
-  const copyMut = useDevelopCopyEdits();
+  const pasteMut = useDevelopPasteEdits();
 
   // Debounce slider input → backend render. 80 ms feels responsive; the
   // rayon pipeline at 1280 long-edge runs ~30–60 ms on i5.
-  const debounceTimer = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (debounceTimer.current !== null) window.clearTimeout(debounceTimer.current);
+    };
+  }, []);
+
   const scheduleApply = useCallback(
     (ops: DevelopOperations) => {
       if (focusedPhotoId == null) return;
+      const photoId = focusedPhotoId;
+      const seq = ++applySeqRef.current;
       if (debounceTimer.current !== null) {
         window.clearTimeout(debounceTimer.current);
       }
       debounceTimer.current = window.setTimeout(() => {
         applyMut.mutate(
-          { photoId: focusedPhotoId, operations: ops },
+          { photoId, operations: ops },
           {
-            onSuccess: (r) => setPreview(r.preview_data_url),
+            onSuccess: (r) => {
+              if (seq !== applySeqRef.current) return;
+              if (focusedPhotoIdRef.current !== r.photo_id) return;
+              setPreview(r.preview_data_url);
+              setSharedPreview(r.preview_data_url);
+            },
             onError: (e) => warn('develop_apply failed', e),
           },
         );
       }, 80);
     },
-    [applyMut, focusedPhotoId],
+    [applyMut, focusedPhotoId, setSharedPreview],
   );
 
   // Keep a ref on the latest values so `updateValue` can compute the
@@ -122,7 +171,6 @@ export function DevelopScreen() {
   // The ref is updated *synchronously* inside updateValue so two slider
   // drags dispatched in the same event tick don't both compute `next`
   // from the same stale snapshot.
-  const valuesRef = useRef(values);
   // Sync the ref whenever React commits a new `values` from elsewhere
   // (preset apply / reset / paste / opened seed). Slider drags update
   // the ref synchronously below so they don't depend on this effect.
@@ -132,25 +180,32 @@ export function DevelopScreen() {
 
   const updateValue = useCallback(
     (key: keyof DevelopValues, value: number) => {
+      userEditedRef.current = true;
       const next = { ...valuesRef.current, [key]: value };
       valuesRef.current = next;
       setValues(next);
-      scheduleApply(valuesToOperations(next));
+      const ops = valuesToOperations(next);
+      setSharedOperations(ops, 'screen');
+      scheduleApply(ops);
     },
-    [scheduleApply],
+    [scheduleApply, setSharedOperations],
   );
 
   const updateCurves = useCallback(
     (curves: DevelopValues['curves']) => {
+      userEditedRef.current = true;
       const next: DevelopValues = { ...valuesRef.current, curves };
       valuesRef.current = next;
       setValues(next);
-      scheduleApply(valuesToOperations(next));
+      const ops = valuesToOperations(next);
+      setSharedOperations(ops, 'screen');
+      scheduleApply(ops);
     },
-    [scheduleApply],
+    [scheduleApply, setSharedOperations],
   );
 
   const autoLight = useCallback(() => {
+    userEditedRef.current = true;
     const next: DevelopValues = {
       ...valuesRef.current,
       exp: 12,
@@ -168,32 +223,57 @@ export function DevelopScreen() {
     };
     valuesRef.current = next;
     setValues(next);
-    scheduleApply(valuesToOperations(next));
-  }, [scheduleApply]);
+    const ops = valuesToOperations(next);
+    setSharedOperations(ops, 'screen');
+    scheduleApply(ops);
+  }, [scheduleApply, setSharedOperations]);
 
   const resetEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
     resetMut.mutate(focusedPhotoId, {
       onSuccess: () => {
-        setValues(DEFAULT_DEVELOP_VALUES);
-        scheduleApply(valuesToOperations(DEFAULT_DEVELOP_VALUES));
+        const next = defaultDevelopValues();
+        const ops = valuesToOperations(next);
+        userEditedRef.current = true;
+        valuesRef.current = next;
+        setValues(next);
+        setSharedOperations(ops, 'screen');
+        scheduleApply(ops);
       },
     });
-  }, [focusedPhotoId, resetMut, scheduleApply]);
+  }, [focusedPhotoId, resetMut, scheduleApply, setSharedOperations]);
+
+  const currentOperations = useCallback(() => {
+    return useDevelopUi.getState().operations ?? valuesToOperations(valuesRef.current);
+  }, []);
 
   const saveEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
-    saveMut.mutate({ photoId: focusedPhotoId, operations: valuesToOperations(values) });
-  }, [focusedPhotoId, saveMut, values]);
+    saveMut.mutate({ photoId: focusedPhotoId, operations: currentOperations() });
+  }, [currentOperations, focusedPhotoId, saveMut]);
 
   const copyEdits = useCallback(() => {
-    if (focusedPhotoId == null) return;
-    copyMut.mutate(focusedPhotoId, {
-      onSuccess: (ops) => {
-        setValues(operationsToValues(ops));
+    setCopiedOps(currentOperations());
+  }, [currentOperations]);
+
+  const pasteEdits = useCallback(() => {
+    if (focusedPhotoId == null || !copiedOps) return;
+    pasteMut.mutate(
+      { photoIds: [focusedPhotoId], operations: copiedOps },
+      {
+        onSuccess: (receipt) => {
+          if (receipt.skipped.includes(focusedPhotoId)) return;
+          const next = operationsToValues(copiedOps);
+          userEditedRef.current = true;
+          valuesRef.current = next;
+          setValues(next);
+          setSharedOperations(copiedOps, 'screen');
+          scheduleApply(copiedOps);
+        },
+        onError: (e) => warn('develop_paste_edits failed', e),
       },
-    });
-  }, [focusedPhotoId, copyMut]);
+    );
+  }, [copiedOps, focusedPhotoId, pasteMut, scheduleApply, setSharedOperations]);
 
   if (isLoading) {
     return (
@@ -248,6 +328,10 @@ export function DevelopScreen() {
         megapixels={megapixels}
         tab={tab}
         setTab={setTab}
+        canPrev={focusedIdx > 0}
+        canNext={focusedIdx < photos.length - 1}
+        onPrev={() => setFocusedIdx((i) => Math.max(0, i - 1))}
+        onNext={() => setFocusedIdx((i) => Math.min(photos.length - 1, i + 1))}
         onSave={saveEdits}
         onCopy={copyEdits}
         saving={saveMut.isPending}
@@ -265,6 +349,9 @@ export function DevelopScreen() {
           onCurvesChange={updateCurves}
           onAutoLight={autoLight}
           onReset={resetEdits}
+          onCopy={copyEdits}
+          onPaste={pasteEdits}
+          canPaste={!!copiedOps && !pasteMut.isPending}
           preview={preview}
         />
       ) : (
@@ -287,18 +374,50 @@ interface DevelopToolbarProps {
   megapixels: string;
   tab: DevelopTab;
   setTab: (tab: DevelopTab) => void;
+  canPrev: boolean;
+  canNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
   onSave: () => void;
   onCopy: () => void;
   saving: boolean;
 }
 
-function DevelopToolbar({ photo, megapixels, tab, setTab, onSave, onCopy, saving }: DevelopToolbarProps) {
+function DevelopToolbar({
+  photo,
+  megapixels,
+  tab,
+  setTab,
+  canPrev,
+  canNext,
+  onPrev,
+  onNext,
+  onSave,
+  onCopy,
+  saving,
+}: DevelopToolbarProps) {
   return (
     <div className="toolbar">
-      <button type="button" className="btn" style={{ padding: '5px 8px' }} title="Previous photo">
+      <button
+        type="button"
+        className="btn"
+        style={{ padding: '5px 8px' }}
+        title="Previous photo"
+        onClick={onPrev}
+        disabled={!canPrev}
+        aria-disabled={!canPrev}
+      >
         <Icon name="chevL" size={13} />
       </button>
-      <button type="button" className="btn" style={{ padding: '5px 8px' }} title="Next photo">
+      <button
+        type="button"
+        className="btn"
+        style={{ padding: '5px 8px' }}
+        title="Next photo"
+        onClick={onNext}
+        disabled={!canNext}
+        aria-disabled={!canNext}
+      >
         <Icon name="chevR" size={13} />
       </button>
       <div className="divider" />
@@ -363,6 +482,9 @@ interface DevelopStageSplitProps {
   onCurvesChange: (curves: DevelopValues['curves']) => void;
   onAutoLight: () => void;
   onReset: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
+  canPaste: boolean;
   preview: string | null;
 }
 
@@ -377,6 +499,9 @@ function DevelopStageSplit({
   onCurvesChange,
   onAutoLight,
   onReset,
+  onCopy,
+  onPaste,
+  canPaste,
   preview,
 }: DevelopStageSplitProps) {
   return (
@@ -460,6 +585,9 @@ function DevelopStageSplit({
         onCurvesChange={onCurvesChange}
         onAutoLight={onAutoLight}
         onReset={onReset}
+        onCopy={onCopy}
+        onPaste={onPaste}
+        canPaste={canPaste}
       />
     </div>
   );

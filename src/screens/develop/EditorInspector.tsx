@@ -13,6 +13,9 @@ export interface EditorInspectorProps {
   onCurvesChange: (next: DevelopCurves) => void;
   onAutoLight: () => void;
   onReset: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
+  canPaste: boolean;
 }
 
 export function EditorInspector({
@@ -22,6 +25,9 @@ export function EditorInspector({
   onCurvesChange,
   onAutoLight,
   onReset,
+  onCopy,
+  onPaste,
+  canPaste,
 }: EditorInspectorProps) {
   const [curveChannel, setCurveChannel] = useState<CurveChannel>('rgb');
   const megapixels =
@@ -46,9 +52,7 @@ export function EditorInspector({
           <button
             type="button"
             title="Copy edits"
-            className="phase-gated"
-            disabled
-            aria-disabled="true"
+            onClick={onCopy}
             style={{ color: 'var(--fg-mute)', padding: 4 }}
           >
             <Icon name="layers" size={13} />
@@ -150,10 +154,9 @@ export function EditorInspector({
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
             <button
               type="button"
-              className="btn phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Coming in Phase 3 · edits clipboard"
+              className="btn"
+              onClick={onCopy}
+              title="Copy current edits"
               style={{ padding: '7px', fontSize: 11.5, justifyContent: 'center' }}
             >
               Copy{' '}
@@ -163,10 +166,11 @@ export function EditorInspector({
             </button>
             <button
               type="button"
-              className="btn phase-gated"
-              disabled
-              aria-disabled="true"
-              title="Coming in Phase 3 · edits clipboard"
+              className={canPaste ? 'btn' : 'btn phase-gated'}
+              disabled={!canPaste}
+              aria-disabled={!canPaste}
+              onClick={onPaste}
+              title={canPaste ? 'Paste copied edits onto this photo' : 'Copy edits from a photo first'}
               style={{ padding: '7px', fontSize: 11.5, justifyContent: 'center' }}
             >
               Paste{' '}

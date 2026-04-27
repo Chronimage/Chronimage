@@ -1,7 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useDevelopUi } from '../../state/develop';
+import { type DevelopOperations, identityOperations } from '../../tauri/invoke';
 import { DevelopScreen } from './DevelopScreen';
 import { DevelopSidePanel } from './DevelopSidePanel';
 
@@ -38,6 +40,66 @@ function photoFixture(id: number, overrides: Record<string, unknown> = {}) {
   };
 }
 
+function previewReceipt(photoId: number) {
+  return { photo_id: photoId, preview_data_url: 'data:image/jpeg;base64,test', elapsed_ms: 4 };
+}
+
+async function mockDevelopInvoke(
+  photos: ReturnType<typeof photoFixture>[],
+  presets: Array<{
+    id: number;
+    name: string;
+    group_name: string;
+    description: string | null;
+    operations_json: string;
+    is_system: boolean;
+    created_at: string;
+    updated_at: string;
+  }> = [],
+) {
+  const { invoke } = await import('@tauri-apps/api/core');
+  vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+    const callArgs = (args ?? {}) as Record<string, unknown>;
+    if (cmd === 'list_photos') return photos;
+    if (cmd === 'develop_open') {
+      const photoId = Number(callArgs.photoId ?? photos[0]?.id ?? 1);
+      return {
+        photo_id: photoId,
+        operations: identityOperations(),
+        preview_data_url: 'data:image/jpeg;base64,test',
+      };
+    }
+    if (cmd === 'develop_apply') return previewReceipt(Number(callArgs.photoId ?? 1));
+    if (cmd === 'develop_save') return 123;
+    if (cmd === 'develop_reset') return 1;
+    if (cmd === 'develop_paste_edits') return { pasted_photo_count: 1, skipped: [] };
+    if (cmd === 'presets_list') return presets;
+    if (cmd === 'get_thumbnail') return [];
+    return [];
+  });
+  return vi.mocked(invoke);
+}
+
+function lastCallArg(
+  invoke: {
+    mock: { calls: unknown[][] };
+  },
+  command: string,
+): Record<string, unknown> {
+  const call = invoke.mock.calls.filter(([cmd]) => cmd === command).at(-1);
+  if (!call) throw new Error(`missing ${command} call`);
+  return (call[1] ?? {}) as Record<string, unknown>;
+}
+
+beforeEach(() => {
+  useDevelopUi.setState({
+    focusedPhotoId: null,
+    preview: null,
+    operations: null,
+    operationSource: null,
+  });
+});
+
 describe('DevelopScreen', () => {
   it('renders the pick-a-photo empty state when no catalog photos exist', async () => {
     render(<DevelopScreen />, { wrapper });
@@ -45,11 +107,7 @@ describe('DevelopScreen', () => {
   });
 
   it('renders the develop stage + inspector when a photo is available', async () => {
-    const { invoke } = await import('@tauri-apps/api/core');
-    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_photos') return [photoFixture(1)];
-      return undefined;
-    });
+    await mockDevelopInvoke([photoFixture(1)]);
 
     render(<DevelopScreen />, { wrapper });
 
@@ -58,11 +116,7 @@ describe('DevelopScreen', () => {
   });
 
   it('auto-light sets default values on click', async () => {
-    const { invoke } = await import('@tauri-apps/api/core');
-    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
-      if (cmd === 'list_photos') return [photoFixture(1)];
-      return undefined;
-    });
+    await mockDevelopInvoke([photoFixture(1)]);
 
     render(<DevelopScreen />, { wrapper });
 
@@ -70,6 +124,110 @@ describe('DevelopScreen', () => {
     fireEvent.click(autoLight);
     // Exposure slider should now read +12 after auto-light preset.
     expect(await screen.findByText('+12 EV')).toBeInTheDocument();
+  });
+
+  it('slider edits apply to preview and Save persists the same current operations', async () => {
+    const invoke = await mockDevelopInvoke([photoFixture(1)]);
+    render(<DevelopScreen />, { wrapper });
+
+    fireEvent.change(await screen.findByLabelText('Exposure'), { target: { value: '25' } });
+
+    await waitFor(() => {
+      const applyArgs = lastCallArg(invoke, 'develop_apply');
+      expect((applyArgs.operations as DevelopOperations).exposure).toBe(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => {
+      const saveArgs = lastCallArg(invoke, 'develop_save');
+      expect((saveArgs.operations as DevelopOperations).exposure).toBe(1);
+    });
+  });
+
+  it('copy and paste edits writes the copied operations onto the newly focused photo', async () => {
+    const invoke = await mockDevelopInvoke([photoFixture(1), photoFixture(2)]);
+    render(<DevelopScreen />, { wrapper });
+
+    fireEvent.change(await screen.findByLabelText('Exposure'), { target: { value: '25' } });
+    await waitFor(() => {
+      expect((lastCallArg(invoke, 'develop_apply').operations as DevelopOperations).exposure).toBe(1);
+    });
+
+    fireEvent.click(screen.getByText('Copy edits'));
+    fireEvent.click(screen.getByTitle('IMG_2.ARW'));
+    await waitFor(() => expect(screen.getAllByText(/IMG_2\.ARW/).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole('button', { name: /paste/i }));
+
+    await waitFor(() => {
+      const pasteArgs = lastCallArg(invoke, 'develop_paste_edits');
+      expect(pasteArgs.photoIds).toEqual([2]);
+      expect((pasteArgs.operations as DevelopOperations).exposure).toBe(1);
+    });
+    expect(await screen.findByText('+25 EV')).toBeInTheDocument();
+  });
+
+  it('reset clears UI values and re-renders the identity operations', async () => {
+    const invoke = await mockDevelopInvoke([photoFixture(1)]);
+    render(<DevelopScreen />, { wrapper });
+
+    fireEvent.click(await screen.findByRole('button', { name: /auto light/i }));
+    expect(await screen.findByText('+12 EV')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('Reset edits'));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('develop_reset', { photoId: 1 });
+      const applyArgs = lastCallArg(invoke, 'develop_apply');
+      expect((applyArgs.operations as DevelopOperations).exposure).toBe(0);
+    });
+    expect(await screen.findByText('0 EV')).toBeInTheDocument();
+  });
+
+  it('preset applies update the screen operations so Save persists the previewed edit once', async () => {
+    const presetOps = { ...identityOperations(), exposure: 1, contrast: 20 };
+    const invoke = await mockDevelopInvoke(
+      [photoFixture(1)],
+      [
+        {
+          id: 7,
+          name: 'Enhance sky',
+          group_name: 'Scene',
+          description: 'Deeper blues',
+          operations_json: JSON.stringify(presetOps),
+          is_system: true,
+          created_at: '2026-04-01T00:00:00Z',
+          updated_at: '2026-04-01T00:00:00Z',
+        },
+      ],
+    );
+
+    render(
+      <React.StrictMode>
+        <DevelopSidePanel />
+        <DevelopScreen />
+      </React.StrictMode>,
+      { wrapper },
+    );
+
+    await screen.findByText(/photo 1/i);
+    fireEvent.click(screen.getByRole('button', { name: 'Scene' }));
+    invoke.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: /enhance sky/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => {
+      const applyCalls = invoke.mock.calls.filter(([cmd]) => cmd === 'develop_apply');
+      expect(applyCalls).toHaveLength(1);
+      expect(((applyCalls[0]?.[1] as Record<string, unknown>).operations as DevelopOperations).exposure).toBe(
+        0.75,
+      );
+    });
+
+    await waitFor(() => {
+      const saveArgs = lastCallArg(invoke, 'develop_save');
+      expect((saveArgs.operations as DevelopOperations).exposure).toBe(0.75);
+      expect((saveArgs.operations as DevelopOperations).contrast).toBe(15);
+    });
   });
 });
 
