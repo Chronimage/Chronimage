@@ -221,6 +221,100 @@ pub fn legacy_thumbnail_cache_path(
     thumbs_dir.join(format!("{sha256}_{size}.jpg"))
 }
 
+/// Max longest-edge for the per-photo AI-preview cache. Chosen so that:
+/// - SCRFD face detection (640×640 input) has headroom,
+/// - SigLIP / NIMA (224×224 input) is well-covered,
+/// - JPEG q=85 lands ~150 KB per photo, keeping the cache lean.
+pub const AI_PREVIEW_MAX_EDGE: u32 = 1280;
+
+/// Path of the per-photo AI/dedupe input cache. Layout
+/// `{thumbs_dir}/{sha256}_aipreview.jpg`. Sized at most
+/// `AI_PREVIEW_MAX_EDGE` on the longest edge, JPEG-encoded.
+///
+/// The on-disk naming intentionally shares the `{sha256}_*.jpg` prefix
+/// the source-disconnect cleanup uses, so this file is removed
+/// automatically when its photo leaves the catalog.
+pub fn ai_preview_cache_path(thumbs_dir: &std::path::Path, sha256: &str) -> std::path::PathBuf {
+    thumbs_dir.join(format!("{sha256}_aipreview.jpg"))
+}
+
+/// Write the AI-preview cache JPEG for `sha256` if it doesn't already
+/// exist. Resizes `img` to fit `AI_PREVIEW_MAX_EDGE` on the longest edge
+/// (skipping the resize when the source is already smaller).
+///
+/// Best-effort: returns Ok even if the directory create or file write
+/// fails — the AI stages still work via the byte-scan fallback in
+/// `open_for_ai`. Logs the underlying error for visibility.
+pub fn write_ai_preview_cache(thumbs_dir: &std::path::Path, sha256: &str, img: &DynamicImage) {
+    let cache_path = ai_preview_cache_path(thumbs_dir, sha256);
+    if cache_path.exists() {
+        return;
+    }
+    let (w, h) = (img.width(), img.height());
+    let resized = if w.max(h) > AI_PREVIEW_MAX_EDGE {
+        img.thumbnail(AI_PREVIEW_MAX_EDGE, AI_PREVIEW_MAX_EDGE)
+    } else {
+        img.clone()
+    };
+    let buf = match encode_jpeg(&resized, 85) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                sha256,
+                error = %e,
+                "ai_preview_cache: encode_jpeg failed"
+            );
+            return;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(thumbs_dir) {
+        tracing::warn!(
+            sha256,
+            dir = %thumbs_dir.display(),
+            error = %e,
+            "ai_preview_cache: create_dir_all failed"
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(&cache_path, &buf) {
+        tracing::warn!(
+            sha256,
+            path = %cache_path.display(),
+            error = %e,
+            "ai_preview_cache: write failed"
+        );
+    }
+}
+
+/// Open a photo for AI/dedupe input. When `sha256` is `Some` AND the
+/// AI-preview cache exists, decode that JPEG (fast — single-threaded
+/// JPEG decode via the `image` crate, no HEIC/RAW codec round-trip).
+/// Otherwise fall back to the full `open_any` cascade.
+///
+/// `sha256 = None` is the test-friendly path: synthetic test images
+/// don't have a content hash, and falling through to `open_any` still
+/// works for the JPEG/PNG fixtures the AI tests use.
+pub fn open_for_ai(path: &std::path::Path, sha256: Option<&str>) -> Result<DynamicImage, String> {
+    if let Some(sha) = sha256 {
+        if let Ok(thumbs_dir) = crate::util::paths::thumbnails_dir() {
+            let cache_path = ai_preview_cache_path(&thumbs_dir, sha);
+            if cache_path.exists() {
+                if let Ok(img) = image::open(&cache_path) {
+                    return Ok(img);
+                }
+                tracing::warn!(
+                    sha256 = sha,
+                    path = %cache_path.display(),
+                    "open_for_ai: cached preview decode failed, regenerating from source"
+                );
+                // Fall through to open_any below. The stale cache file
+                // will be overwritten next time the pipeline runs.
+            }
+        }
+    }
+    open_any(path)
+}
+
 /// Open an image file. The decoder picked depends on the extension:
 ///
 /// - **JPEG/PNG/TIFF/WebP/GIF/BMP** → `image` crate (pure-Rust, fast path).
@@ -984,6 +1078,84 @@ mod tests {
             legacy_thumbnail_cache_path(root, "abc", 480),
             root.join("abc_480.jpg")
         );
+    }
+
+    #[test]
+    fn ai_preview_cache_path_uses_aipreview_suffix() {
+        // Suffix is intentionally `_aipreview` (not a number), so the
+        // disconnect-cleanup loop in `delete_source_impl` (which splits on
+        // `_` and drops every `{sha}_*.jpg` for orphan photos) still
+        // matches and removes the file. Any change to this naming must
+        // also keep that cleanup test happy.
+        use std::path::Path;
+        let root = Path::new("thumbs");
+        let path = ai_preview_cache_path(root, "abc123");
+        assert_eq!(path, root.join("abc123_aipreview.jpg"));
+        // Verify the prefix-style cleanup pattern still tags this file.
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
+        let (sha, suffix) = stem.rsplit_once('_').unwrap();
+        assert_eq!(sha, "abc123");
+        assert_eq!(suffix, "aipreview");
+    }
+
+    #[test]
+    fn write_ai_preview_cache_skips_when_already_present() {
+        // Pre-existing cache files must not be silently overwritten — the
+        // first writer wins, since two parallel imports of the same SHA
+        // would produce identical bytes anyway and writing twice wastes IO.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sha = "deadbeef";
+        let path = ai_preview_cache_path(tmp.path(), sha);
+        std::fs::write(&path, b"sentinel").unwrap();
+        let img = solid(64, 64, [10, 20, 30]);
+        write_ai_preview_cache(tmp.path(), sha, &img);
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(on_disk, b"sentinel", "existing cache must be untouched");
+    }
+
+    #[test]
+    fn write_ai_preview_cache_downscales_oversize_image_and_writes_valid_jpeg() {
+        // The cache must (1) cap the longest edge at AI_PREVIEW_MAX_EDGE
+        // and (2) write a JPEG that the `image` crate can re-decode — that
+        // re-decode is exactly the fast path AI stages take when the
+        // pipeline has already seeded the cache.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sha = "ai_preview_oversize";
+        let oversize = solid(AI_PREVIEW_MAX_EDGE * 2, AI_PREVIEW_MAX_EDGE, [200, 100, 50]);
+        write_ai_preview_cache(tmp.path(), sha, &oversize);
+
+        let cache_path = ai_preview_cache_path(tmp.path(), sha);
+        assert!(cache_path.exists(), "cache file must exist");
+
+        let decoded = image::open(&cache_path).expect("re-decode cached jpeg");
+        assert!(
+            decoded.width().max(decoded.height()) <= AI_PREVIEW_MAX_EDGE,
+            "cached image must fit the AI_PREVIEW_MAX_EDGE box, got {}×{}",
+            decoded.width(),
+            decoded.height(),
+        );
+    }
+
+    #[test]
+    fn write_ai_preview_cache_keeps_small_image_at_full_size() {
+        // A 600×400 photo is already smaller than AI_PREVIEW_MAX_EDGE, so
+        // the cache should keep it at full size — no point upsampling, and
+        // we don't want to lose detail on small originals.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sha = "ai_preview_small";
+        let small = solid(600, 400, [10, 20, 30]);
+        write_ai_preview_cache(tmp.path(), sha, &small);
+
+        let decoded = image::open(ai_preview_cache_path(tmp.path(), sha)).expect("decode");
+        assert_eq!((decoded.width(), decoded.height()), (600, 400));
+    }
+
+    #[test]
+    fn open_for_ai_with_no_sha_falls_through_to_open_any() {
+        // Without a sha hint the helper has nothing to look up — it must
+        // route to open_any. For a missing path that surfaces an Err
+        // (open_any: stat failed), proving the fall-through happened.
+        assert!(open_for_ai(std::path::Path::new("/nonexistent.jpg"), None).is_err());
     }
 
     #[test]

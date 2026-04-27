@@ -169,15 +169,16 @@ async fn face_clustering_f1_ge_0_95() {
             // Pre-cropped fixture: embed the whole image as one face.
             let session_c = std::sync::Arc::clone(&session);
             let path_c = path.clone();
-            let emb = tokio::task::spawn_blocking(move || session_c.embed_prealigned_face(&path_c))
-                .await
-                .expect("embed join")
-                .expect("embed result");
+            let emb =
+                tokio::task::spawn_blocking(move || session_c.embed_prealigned_face(&path_c, None))
+                    .await
+                    .expect("embed join")
+                    .expect("embed result");
             vec![emb]
         } else {
             let session_c = std::sync::Arc::clone(&session);
             let path_c = path.clone();
-            let faces = tokio::task::spawn_blocking(move || session_c.detect_faces(&path_c))
+            let faces = tokio::task::spawn_blocking(move || session_c.detect_faces(&path_c, None))
                 .await
                 .expect("detect join")
                 .expect("detect result");
@@ -198,11 +199,12 @@ async fn face_clustering_f1_ge_0_95() {
                 let session_c = std::sync::Arc::clone(&session);
                 let path_c = path.clone();
                 let face_c = face.clone();
-                let emb =
-                    tokio::task::spawn_blocking(move || session_c.embed_face(&path_c, &face_c))
-                        .await
-                        .expect("embed join")
-                        .expect("embed result");
+                let emb = tokio::task::spawn_blocking(move || {
+                    session_c.embed_face(&path_c, None, &face_c)
+                })
+                .await
+                .expect("embed join")
+                .expect("embed result");
                 out.push(emb);
             }
             out

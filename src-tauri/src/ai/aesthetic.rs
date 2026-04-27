@@ -50,9 +50,12 @@ impl NimaSession {
     }
 
     /// Score a single image.
+    ///
     /// Returns the expected aesthetic rating on the range [1.0, 10.0].
-    pub fn score(&self, image_path: &Path) -> AppResult<f32> {
-        let pixel_values = preprocess_image(image_path)?;
+    /// `sha256` is an optional cache hint — when set, the AI-preview
+    /// cache is consulted first to avoid redecoding HEIC/RAW.
+    pub fn score(&self, image_path: &Path, sha256: Option<&str>) -> AppResult<f32> {
+        let pixel_values = preprocess_image(image_path, sha256)?;
         // The bundled NIMA ONNX export uses NHWC (`[1, 224, 224, 3]`), not
         // NCHW. Feeding the model NCHW triggers `ort run: Got invalid
         // dimensions for input` at inference time — caught during the
@@ -105,8 +108,9 @@ fn expected_rating(probs: &[f32]) -> f32 {
 // ── image preprocessing ───────────────────────────────────────────────────
 
 /// Resize to 224×224, convert to RGB f32, ImageNet-normalise, NHWC layout.
-fn preprocess_image(path: &Path) -> AppResult<Vec<f32>> {
-    let img = image::open(path).map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+fn preprocess_image(path: &Path, sha256: Option<&str>) -> AppResult<Vec<f32>> {
+    let img = crate::ai::image_util::open_for_ai(path, sha256)
+        .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
     let rgb = img
         .resize_exact(INPUT_SIZE, INPUT_SIZE, FilterType::Lanczos3)
         .into_rgb8();
@@ -184,7 +188,7 @@ mod tests {
 
     #[test]
     fn preprocess_image_wrong_path_returns_io_error() {
-        let err = preprocess_image(Path::new("/no/such/file.jpg")).unwrap_err();
+        let err = preprocess_image(Path::new("/no/such/file.jpg"), None).unwrap_err();
         assert!(
             matches!(err, AppError::Io(_)),
             "expected Io error, got: {err:?}"
@@ -204,7 +208,7 @@ mod tests {
         img.save_with_format(tmp.path(), ImageFormat::Png)
             .expect("save png");
 
-        let pixels = preprocess_image(tmp.path()).expect("preprocess");
+        let pixels = preprocess_image(tmp.path(), None).expect("preprocess");
         assert_eq!(pixels.len(), 3 * 224 * 224);
         // ImageNet normalisation can push values outside [-1,1], but within ~[-3, 3].
         for v in &pixels {

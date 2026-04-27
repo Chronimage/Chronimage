@@ -253,8 +253,9 @@ impl FacesSession {
     /// Detect faces in `image_path` using default detection parameters.
     ///
     /// Returns `Ok(vec![])` when running as a stub (model absent).
-    pub fn detect_faces(&self, image_path: &Path) -> AppResult<Vec<FaceBox>> {
-        self.detect_faces_with(image_path, &DetectParams::default())
+    /// `sha256` is an optional cache hint for the AI-preview cache.
+    pub fn detect_faces(&self, image_path: &Path, sha256: Option<&str>) -> AppResult<Vec<FaceBox>> {
+        self.detect_faces_with(image_path, sha256, &DetectParams::default())
     }
 
     /// Detect faces with explicit tuning parameters.
@@ -263,16 +264,18 @@ impl FacesSession {
     pub fn detect_faces_with(
         &self,
         image_path: &Path,
+        sha256: Option<&str>,
         params: &DetectParams,
     ) -> AppResult<Vec<FaceBox>> {
         if self.is_stub {
             let _ = image_path;
+            let _ = sha256;
             let _ = params;
             return Ok(vec![]);
         }
 
-        let img = image::open(image_path)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let img = crate::ai::image_util::open_for_ai(image_path, sha256)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         let orig_w = img.width() as f32;
         let orig_h = img.height() as f32;
 
@@ -344,15 +347,22 @@ impl FacesSession {
     /// Returns `Ok(vec![0.0; FACE_EMBED_DIM])` when running as a stub.
     /// When the real model is loaded, the crop is aligned via the 5-point
     /// landmarks and passed through ArcFace; the output is L2-normalised.
-    pub fn embed_face(&self, image_path: &Path, bbox: &FaceBox) -> AppResult<Vec<f32>> {
+    /// `sha256` is an optional cache hint for the AI-preview cache.
+    pub fn embed_face(
+        &self,
+        image_path: &Path,
+        sha256: Option<&str>,
+        bbox: &FaceBox,
+    ) -> AppResult<Vec<f32>> {
         if self.is_stub {
             let _ = image_path;
+            let _ = sha256;
             let _ = bbox;
             return Ok(vec![0.0_f32; FACE_EMBED_DIM]);
         }
 
-        let img = image::open(image_path)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let img = crate::ai::image_util::open_for_ai(image_path, sha256)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
 
         // Build the affine transform from bbox landmarks → ArcFace target points.
         // We use a 3-point solve (left-eye, right-eye, nose) to determine the
@@ -405,14 +415,19 @@ impl FacesSession {
     ///
     /// NOT intended for production — real photos need SCRFD landmarks for
     /// alignment to hit ArcFace's quoted accuracy.
-    pub fn embed_prealigned_face(&self, image_path: &Path) -> AppResult<Vec<f32>> {
+    pub fn embed_prealigned_face(
+        &self,
+        image_path: &Path,
+        sha256: Option<&str>,
+    ) -> AppResult<Vec<f32>> {
         if self.is_stub {
             let _ = image_path;
+            let _ = sha256;
             return Ok(vec![0.0_f32; FACE_EMBED_DIM]);
         }
 
-        let img = image::open(image_path)
-            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+        let img = crate::ai::image_util::open_for_ai(image_path, sha256)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
         // Resize straight to 112×112 (ArcFace input). Triangle filter is a
         // reasonable default for downscale/upscale alike.
         let chip = img
@@ -816,7 +831,7 @@ mod tests {
         let sess = FacesSession::load_or_stub(None, None);
         assert!(sess.is_stub, "load_or_stub(None, None) must be a stub");
         let faces = sess
-            .detect_faces(Path::new("/nonexistent/photo.jpg"))
+            .detect_faces(Path::new("/nonexistent/photo.jpg"), None)
             .expect("stub detect_faces should not error");
         assert!(
             faces.is_empty(),
@@ -842,7 +857,7 @@ mod tests {
             ],
         };
         let emb = sess
-            .embed_face(Path::new("/nonexistent/photo.jpg"), &bbox)
+            .embed_face(Path::new("/nonexistent/photo.jpg"), None, &bbox)
             .expect("stub embed_face should not error");
         assert_eq!(
             emb.len(),
@@ -884,7 +899,7 @@ mod tests {
             nms_iou: 0.3,
         };
         let faces = sess
-            .detect_faces_with(Path::new("/nonexistent/photo.jpg"), &params)
+            .detect_faces_with(Path::new("/nonexistent/photo.jpg"), None, &params)
             .expect("stub should not error");
         assert!(faces.is_empty());
     }
@@ -1097,7 +1112,7 @@ mod tests {
         }
 
         let faces = sess
-            .detect_faces(&fixture)
+            .detect_faces(&fixture, None)
             .expect("detect_faces on real photo");
 
         assert!(
@@ -1108,7 +1123,7 @@ mod tests {
 
         // Also smoke-test embedding on the first detected face.
         let emb = sess
-            .embed_face(&fixture, &faces[0])
+            .embed_face(&fixture, None, &faces[0])
             .expect("embed_face on real photo");
         assert_eq!(emb.len(), FACE_EMBED_DIM);
         let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
