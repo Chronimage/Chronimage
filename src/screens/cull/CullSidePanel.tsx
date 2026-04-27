@@ -1,29 +1,27 @@
 import { Icon } from '../../primitives/Icon';
 import { useCull } from '../../state/cull';
+import { useCullBinSummary, usePhotos } from '../../state/queries';
 
-export interface CullSidePanelProps {
-  readonly total: number;
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-const ISSUE_FILTERS: { label: string }[] = [
-  { label: 'Near-duplicates' },
-  { label: 'Out of focus' },
-  { label: 'Eyes closed' },
-  { label: 'Over/under exp.' },
-  { label: 'Screenshots' },
-  { label: 'Low-res / web' },
-];
-
-export function CullSidePanel({ total }: CullSidePanelProps) {
+export function CullSidePanel() {
   const mode = useCull((s) => s.mode);
   const onModeChange = useCull((s) => s.setMode);
+  const view = useCull((s) => s.view);
+  const onViewChange = useCull((s) => s.setView);
   const idx = useCull((s) => s.idx);
   const kept = useCull((s) => s.kept);
   const rejected = useCull((s) => s.rejected);
-  const activeFilters = useCull((s) => s.activeFilters);
-  const onFilterToggle = useCull((s) => s.toggleFilter);
+  const { data: binSummary } = useCullBinSummary();
+  const { data: photos = [] } = usePhotos();
+  const total = Math.floor(photos.length / 2);
   const pct = total > 0 ? (idx / total) * 100 : 0;
-  const minutesLeft = Math.max(1, Math.round((total - idx) * 0.4));
+  const recoverableCount = binSummary?.total_count ?? 0;
+  const recoverableBytes = binSummary?.total_bytes ?? 0;
   return (
     <div className="sidepanel">
       <div className="head">
@@ -54,12 +52,44 @@ export function CullSidePanel({ total }: CullSidePanelProps) {
           <span>
             {idx}/{total} reviewed
           </span>
-          <span>~{minutesLeft} min left</span>
+          <span>{Math.max(0, total - idx)} left</span>
         </div>
       </div>
 
       <div className="section-label">
-        <span>Mode</span>
+        <span>Workflow</span>
+      </div>
+      <div className="list">
+        {(
+          [
+            { value: 'review', label: 'Review queue', count: Math.max(0, total - idx), icon: 'compare' },
+            { value: 'rejected', label: 'Rejected items', count: recoverableCount, icon: 'flag' },
+            {
+              value: 'cleanup',
+              label: 'Cleanup',
+              count: recoverableBytes > 0 ? formatBytes(recoverableBytes) : '—',
+              icon: 'cull',
+            },
+          ] as const
+        ).map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            className={`item ${view === item.value ? 'active' : ''}`}
+            onClick={() => onViewChange(item.value)}
+            aria-pressed={view === item.value}
+          >
+            <span className="ico">
+              <Icon name={item.icon} size={14} />
+            </span>
+            <span>{item.label}</span>
+            <span className="n">{item.count}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="section-label">
+        <span>Review mode</span>
       </div>
       <div style={{ padding: '0 12px 12px' }}>
         <div className="cull-mode-seg" role="tablist" aria-label="Cull mode">
@@ -82,27 +112,6 @@ export function CullSidePanel({ total }: CullSidePanelProps) {
             </button>
           ))}
         </div>
-      </div>
-
-      <div className="section-label">
-        <span>Filter issues</span>
-      </div>
-      <div className="list">
-        {ISSUE_FILTERS.map((f) => (
-          <button
-            key={f.label}
-            type="button"
-            className={`item ${activeFilters.has(f.label) ? 'active' : ''}`}
-            onClick={() => onFilterToggle(f.label)}
-            aria-pressed={activeFilters.has(f.label)}
-          >
-            <span className="ico">
-              <Icon name="flag" size={14} />
-            </span>
-            <span>{f.label}</span>
-            <span className="n">—</span>
-          </button>
-        ))}
       </div>
 
       <div
@@ -143,10 +152,8 @@ export function CullSidePanel({ total }: CullSidePanelProps) {
         </div>
         <button
           type="button"
-          className="btn primary phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · Cull Bin review"
+          className="btn primary"
+          onClick={() => onViewChange('rejected')}
           style={{ width: '100%', marginTop: 12, justifyContent: 'center' }}
         >
           Review rejects before deleting

@@ -41,7 +41,7 @@ Full rationale: `docs/prds/phase-0.md` § Tech stack. Plan document: `.claude/pl
 .claude/        agents, commands, hooks, settings for Claude Code
 .github/        CI/CD workflows (ci, nightly, release-*, security, release-please)
 docs/
-  prds/         one PRD per phase (phase-0.md … phase-5.md) — authoritative
+  prds/         one PRD per phase (phase-0.md … phase-6.md) — authoritative
   adr/          architecture decision records
   checkpoints/  session handoff notes; latest.md is always current
 src/            React frontend (TypeScript)
@@ -151,7 +151,7 @@ pnpm migrate:run          # apply pending migrations to dev DB
 
 1. Read this file (you just did).
 2. `cat docs/checkpoints/latest.md` — contains: what was just done, what's open, exact next action.
-3. Open the active PRD: `docs/prds/phase-0.md` for Phase 0, `phase-1.md` once Phase 0 exits.
+3. Open the active PRD: `docs/prds/phase-6.md`.
 4. Check `git status` + `git log -5` for uncommitted / recent work.
 5. Run `pnpm typecheck && cargo check --manifest-path src-tauri/Cargo.toml` to confirm the baseline is green before starting.
 
@@ -186,7 +186,7 @@ Full agent definitions: `.claude/agents/*.md`.
 ## Open cross-cutting decisions (not blocking)
 
 - Model distribution: bundle SigLIP in installer vs. download on first run — currently leaning first-run download.
-- Business model: deliberately unscoped. Features use `useEntitlement()` / `ensure_entitlement()` gates that always return `true` in v1. See `src-tauri/src/entitlements.rs`.
+- Business model: deliberately unscoped. There are no active paywall gates in the app; license state currently only gates Insider-channel distribution work.
 - iCloud auth: rely on iCloud-for-Windows sync folder in v1; revisit `pyicloud` later if API access is stable.
 
-See `docs/prds/phase-1.md` § Open questions for the full list.
+See `docs/prds/phase-6.md` § Open questions for the current launch-infrastructure decisions.

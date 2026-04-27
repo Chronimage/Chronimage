@@ -514,6 +514,27 @@ pub fn ping() -> &'static str {
     "pong"
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FrontendLogRequest {
+    pub level: String,
+    pub message: String,
+}
+
+/// Frontend log sink. The React logger calls this fire-and-forget so browser
+/// logs land in the same local rolling files as backend tracing.
+#[tauri::command]
+pub fn frontend_log(req: FrontendLogRequest) {
+    match req.level.as_str() {
+        "debug" => tracing::debug!(target: "chronimage_frontend", message = %req.message),
+        "info" => tracing::info!(target: "chronimage_frontend", message = %req.message),
+        "warn" => tracing::warn!(target: "chronimage_frontend", message = %req.message),
+        "error" => tracing::error!(target: "chronimage_frontend", message = %req.message),
+        other => {
+            tracing::info!(target: "chronimage_frontend", level = %other, message = %req.message)
+        }
+    }
+}
+
 /// Current binary version. Read from Cargo at compile time so it's always in sync.
 #[tauri::command]
 pub async fn app_version() -> AppResult<String> {
@@ -1325,7 +1346,7 @@ async fn delete_source_impl(
     if !orphan_meta.is_empty() {
         emit("thumb_cleanup", 0, orphan_total);
         if let Ok(thumbs_dir) = crate::util::paths::thumbnails_dir() {
-            // Cache layout is `{sha256}_{size}.jpg` (image_util::legacy_thumbnail_cache_path).
+            // Cache layout is `{sha256}_{size}.jpg` (image_util::thumbnail_cache_path).
             // We don't know which sizes were generated, so scan the dir once and
             // drop every variant whose prefix matches an orphan sha. Single pass
             // beats repeated file-exists probes per (sha, size) combination.
@@ -1821,9 +1842,9 @@ pub struct PhotoRow {
     /// Laplacian-variance sharpness score from Stage 2.6. Higher = sharper.
     /// Exposed so the detail inspector can surface it without a second read.
     pub sharpness_score: Option<f64>,
-    /// Phase 2 §1 — 0..=5 star rating set from the detail-view toolbar.
+    /// Phase 2 §1 — 0..=5 rating set from the detail-view toolbar.
     #[serde(default)]
-    pub star_rating: i64,
+    pub rating: i64,
     /// Phase 2 §2 — soft flag toggled via the detail-view `X` key.
     #[serde(default)]
     pub is_flagged: bool,
@@ -1952,7 +1973,7 @@ pub async fn list_photos(
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
          size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
          FROM photos {where_clause} {order_clause} LIMIT ?1 OFFSET ?2"
     );
     let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -2943,7 +2964,7 @@ pub async fn on_this_day(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
          size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+         aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
          FROM photos \
          WHERE captured_at IS NOT NULL \
            AND strftime('%m-%d', captured_at) = ?1 \
@@ -3401,7 +3422,7 @@ pub async fn unseen_photos(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.rating, p.is_flagged \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= ?1) \
@@ -3436,7 +3457,7 @@ pub async fn first_time_on_new_camera(
          ) \
          SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
            p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
+           p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.rating, p.is_flagged \
          FROM photos p \
          JOIN first_seen fs \
            ON fs.camera_make = p.camera_make \
@@ -3465,7 +3486,7 @@ pub async fn unflagged_favorites(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, \
-         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
+         p.iso, p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.rating, p.is_flagged \
          FROM photos p \
          LEFT JOIN photo_views pv ON pv.photo_id = p.id \
          WHERE p.aesthetic_score IS NOT NULL \
@@ -3581,6 +3602,185 @@ pub async fn face_cluster_merge(state: State<'_, AppState>, a: i64, b: i64) -> A
     Ok(a)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoFaceRow {
+    pub id: i64,
+    pub photo_id: i64,
+    pub cluster_id: Option<i64>,
+    pub bbox_x: f64,
+    pub bbox_y: f64,
+    pub bbox_w: f64,
+    pub bbox_h: f64,
+    pub quality: f64,
+    pub eyes_open: Option<f64>,
+    pub cluster_name: Option<String>,
+    pub is_named: bool,
+}
+
+async fn refresh_cluster_summary(pool: &sqlx::SqlitePool, cluster_id: i64) -> AppResult<()> {
+    let cover_face_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM faces \
+         WHERE cluster_id = ?1 \
+         ORDER BY quality DESC, id ASC \
+         LIMIT 1",
+    )
+    .bind(cluster_id)
+    .fetch_optional(pool)
+    .await?;
+    let photo_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(DISTINCT photo_id) FROM faces WHERE cluster_id = ?1")
+            .bind(cluster_id)
+            .fetch_one(pool)
+            .await?;
+    sqlx::query(
+        "UPDATE clusters \
+         SET cover_face_id = ?1, photo_count = ?2, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ?3",
+    )
+    .bind(cover_face_id)
+    .bind(photo_count)
+    .bind(cluster_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// List detected faces for a photo with their current person assignment.
+#[tauri::command]
+pub async fn list_faces_for_photo(
+    photo_id: i64,
+    state: State<'_, AppState>,
+) -> AppResult<Vec<PhotoFaceRow>> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM photos WHERE id = ?1")
+        .bind(photo_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound(format!("photo {photo_id}")));
+    }
+
+    let rows = sqlx::query_as::<_, PhotoFaceRow>(
+        "SELECT f.id,
+                f.photo_id,
+                f.cluster_id,
+                f.bbox_x,
+                f.bbox_y,
+                f.bbox_w,
+                f.bbox_h,
+                f.quality,
+                f.eyes_open,
+                c.name AS cluster_name,
+                COALESCE(c.is_named, 0) AS is_named
+         FROM faces f
+         LEFT JOIN clusters c ON c.id = f.cluster_id
+         WHERE f.photo_id = ?1
+         ORDER BY f.quality DESC, f.id ASC",
+    )
+    .bind(photo_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Assign one detected face to an existing person cluster.
+#[tauri::command]
+pub async fn face_assign_cluster(
+    face_id: i64,
+    cluster_id: i64,
+    state: State<'_, AppState>,
+) -> AppResult<()> {
+    let old_cluster_id: Option<i64> =
+        sqlx::query_scalar("SELECT cluster_id FROM faces WHERE id = ?1")
+            .bind(face_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("face {face_id}")))?;
+    let cluster_exists: Option<i64> = sqlx::query_scalar("SELECT id FROM clusters WHERE id = ?1")
+        .bind(cluster_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if cluster_exists.is_none() {
+        return Err(AppError::NotFound(format!("cluster {cluster_id}")));
+    }
+
+    sqlx::query("UPDATE faces SET cluster_id = ?1 WHERE id = ?2")
+        .bind(cluster_id)
+        .bind(face_id)
+        .execute(&state.pool)
+        .await?;
+
+    if let Some(old_id) = old_cluster_id {
+        refresh_cluster_summary(&state.pool, old_id).await?;
+    }
+    refresh_cluster_summary(&state.pool, cluster_id).await?;
+    Ok(())
+}
+
+/// Create a named person from one face and assign that face to the new cluster.
+#[tauri::command]
+pub async fn face_create_person_from_face(
+    face_id: i64,
+    name: String,
+    state: State<'_, AppState>,
+) -> AppResult<i64> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "person name must not be empty".into(),
+        ));
+    }
+
+    let old_cluster_id: Option<i64> =
+        sqlx::query_scalar("SELECT cluster_id FROM faces WHERE id = ?1")
+            .bind(face_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("face {face_id}")))?;
+
+    let mut tx = state.pool.begin().await?;
+    let cluster_id = sqlx::query(
+        "INSERT INTO clusters (name, is_named, cover_face_id, photo_count, created_at, updated_at) \
+         VALUES (?1, 1, ?2, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    )
+    .bind(&name)
+    .bind(face_id)
+    .execute(&mut *tx)
+    .await?
+    .last_insert_rowid();
+    sqlx::query("UPDATE faces SET cluster_id = ?1 WHERE id = ?2")
+        .bind(cluster_id)
+        .bind(face_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    if let Some(old_id) = old_cluster_id {
+        refresh_cluster_summary(&state.pool, old_id).await?;
+    }
+    refresh_cluster_summary(&state.pool, cluster_id).await?;
+    Ok(cluster_id)
+}
+
+/// Remove a face's person assignment while preserving the detected face row.
+#[tauri::command]
+pub async fn face_unassign(face_id: i64, state: State<'_, AppState>) -> AppResult<()> {
+    let old_cluster_id: Option<i64> =
+        sqlx::query_scalar("SELECT cluster_id FROM faces WHERE id = ?1")
+            .bind(face_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("face {face_id}")))?;
+    sqlx::query("UPDATE faces SET cluster_id = NULL WHERE id = ?1")
+        .bind(face_id)
+        .execute(&state.pool)
+        .await?;
+    if let Some(old_id) = old_cluster_id {
+        refresh_cluster_summary(&state.pool, old_id).await?;
+    }
+    Ok(())
+}
+
 // ── Face-cluster rebuild ──────────────────────────────────────────────────────
 
 /// Event channel for recluster progress.
@@ -3688,15 +3888,10 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
         },
     );
 
-    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
-
     let mut regenerated = 0_i64;
     let mut failed = 0_i64;
 
     for (photo_id, sha, orientation) in &rows {
-        let cache_path = crate::ai::image_util::legacy_thumbnail_cache_path(&thumbs_dir, sha, 320);
-        let _ = std::fs::remove_file(&cache_path);
-
         // Resolve any local path for this photo (prefer is_primary DESC).
         let source_path: Option<String> = sqlx::query_scalar(
             "SELECT path FROM source_copies
@@ -3717,43 +3912,28 @@ pub async fn rebuild_thumbnails<R: tauri::Runtime>(
         }
 
         let stored_orientation_u32 = orientation.and_then(|v| u32::try_from(v).ok());
-        let metadata_orientation_u32 = crate::ai::image_util::effective_orientation_for_path(
-            &path_buf,
-            stored_orientation_u32,
-        );
-        let orientation_u32 =
-            crate::ai::image_util::orientation_for_decoded_path(&path_buf, stored_orientation_u32);
-        let recovered_orientation = if crate::ai::image_util::is_heif_extension(&path_buf)
-            && stored_orientation_u32.unwrap_or(1) == 1
-            && metadata_orientation_u32.unwrap_or(1) != 1
-        {
-            metadata_orientation_u32
-        } else {
-            None
-        };
-        let cache_path_clone = cache_path.clone();
-        let task_result = tokio::task::spawn_blocking(move || -> AppResult<f32> {
-            let img = crate::ai::image_util::open_any(&path_buf)
-                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
-            let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
-            let resized = img.thumbnail(320, 320);
-            let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
-                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
-            std::fs::write(&cache_path_clone, &buf)?;
-            Ok(crate::ai::image_util::laplacian_variance(&resized))
+        let sha = sha.clone();
+        let task_result = tokio::task::spawn_blocking(move || {
+            crate::ai::image_util::write_thumbnail_cache_from_source(
+                &path_buf,
+                &sha,
+                stored_orientation_u32,
+                320,
+                true,
+            )
         })
         .await;
 
         match task_result {
-            Ok(Ok(sharpness)) => {
+            Ok(Ok(result)) => {
                 regenerated += 1;
                 // Also update sharpness_score now that we have the oriented thumb.
                 let _ = sqlx::query("UPDATE photos SET sharpness_score = ?1 WHERE id = ?2")
-                    .bind(sharpness as f64)
+                    .bind(result.sharpness as f64)
                     .bind(photo_id)
                     .execute(&state.pool)
                     .await;
-                if let Some(orientation) = recovered_orientation {
+                if let Some(orientation) = result.recovered_orientation {
                     let _ = sqlx::query("UPDATE photos SET orientation = ?1 WHERE id = ?2")
                         .bind(orientation as i64)
                         .bind(photo_id)
@@ -4027,7 +4207,7 @@ pub async fn search_photos(
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
          is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
-         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
          FROM photos WHERE id IN ({placeholders})"
     );
 
@@ -4067,7 +4247,7 @@ async fn hydrate_photo_rows(
     let sql = format!(
         "SELECT id, sha256, filename, width, height, captured_at, imported_at, \
          is_raw, size_bytes, camera_make, camera_model, aperture, shutter, iso, \
-         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+         focal_mm, aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
          FROM photos WHERE id IN ({placeholders})"
     );
     let mut q = sqlx::query_as::<_, PhotoRow>(&sql);
@@ -4098,14 +4278,360 @@ pub struct TagRow {
 /// user-assigned (`kind = 'user'`) tags.
 #[tauri::command]
 pub async fn list_tags(photo_id: i64, state: State<'_, AppState>) -> AppResult<Vec<TagRow>> {
+    list_tags_for_photo(&state.pool, photo_id).await
+}
+
+async fn list_tags_for_photo(pool: &sqlx::SqlitePool, photo_id: i64) -> AppResult<Vec<TagRow>> {
     let rows = sqlx::query_as::<_, TagRow>(
         "SELECT id, label, kind, confidence FROM tags \
          WHERE photo_id = ?1 ORDER BY confidence DESC, id ASC",
     )
     .bind(photo_id)
-    .fetch_all(&state.pool)
+    .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AiTagCandidate {
+    label: &'static str,
+    kind: &'static str,
+    prompt: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct AiTagTextEmbedding {
+    candidate: AiTagCandidate,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+struct AiTagSelection {
+    label: &'static str,
+    kind: &'static str,
+    confidence: f64,
+}
+
+const AI_TAG_MODEL_NAME: &str = "siglip2-b16-zero-shot-tags";
+const AI_TAG_MODEL_VERSION: &str = "2026-04-27";
+const AI_TAG_MIN_CONFIDENCE: f64 = 0.56;
+const AI_TAG_MAX_RESULTS: usize = 8;
+
+static AI_TAG_TEXT_EMBEDDINGS: Lazy<Mutex<Option<Vec<AiTagTextEmbedding>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+const AI_TAG_CANDIDATES: &[AiTagCandidate] = &[
+    AiTagCandidate {
+        label: "portrait",
+        kind: "auto_scene",
+        prompt: "a portrait photo of a person",
+    },
+    AiTagCandidate {
+        label: "group photo",
+        kind: "auto_scene",
+        prompt: "a group photo of people",
+    },
+    AiTagCandidate {
+        label: "selfie",
+        kind: "auto_scene",
+        prompt: "a selfie photo",
+    },
+    AiTagCandidate {
+        label: "wedding",
+        kind: "event",
+        prompt: "a wedding photo",
+    },
+    AiTagCandidate {
+        label: "birthday",
+        kind: "event",
+        prompt: "a birthday party photo",
+    },
+    AiTagCandidate {
+        label: "concert",
+        kind: "event",
+        prompt: "a concert or live music photo",
+    },
+    AiTagCandidate {
+        label: "sports",
+        kind: "event",
+        prompt: "a sports action photo",
+    },
+    AiTagCandidate {
+        label: "food",
+        kind: "object",
+        prompt: "a photo of food",
+    },
+    AiTagCandidate {
+        label: "drink",
+        kind: "object",
+        prompt: "a photo of a drink",
+    },
+    AiTagCandidate {
+        label: "dog",
+        kind: "object",
+        prompt: "a photo of a dog",
+    },
+    AiTagCandidate {
+        label: "cat",
+        kind: "object",
+        prompt: "a photo of a cat",
+    },
+    AiTagCandidate {
+        label: "bird",
+        kind: "object",
+        prompt: "a photo of a bird",
+    },
+    AiTagCandidate {
+        label: "flower",
+        kind: "object",
+        prompt: "a close-up photo of flowers",
+    },
+    AiTagCandidate {
+        label: "car",
+        kind: "object",
+        prompt: "a photo of a car",
+    },
+    AiTagCandidate {
+        label: "bicycle",
+        kind: "object",
+        prompt: "a photo of a bicycle",
+    },
+    AiTagCandidate {
+        label: "boat",
+        kind: "object",
+        prompt: "a photo of a boat",
+    },
+    AiTagCandidate {
+        label: "airplane",
+        kind: "object",
+        prompt: "a photo of an airplane",
+    },
+    AiTagCandidate {
+        label: "train",
+        kind: "object",
+        prompt: "a photo of a train",
+    },
+    AiTagCandidate {
+        label: "beach",
+        kind: "auto_scene",
+        prompt: "a beach scene",
+    },
+    AiTagCandidate {
+        label: "mountains",
+        kind: "auto_scene",
+        prompt: "a mountain landscape photo",
+    },
+    AiTagCandidate {
+        label: "forest",
+        kind: "auto_scene",
+        prompt: "a forest scene",
+    },
+    AiTagCandidate {
+        label: "waterfall",
+        kind: "auto_scene",
+        prompt: "a waterfall landscape photo",
+    },
+    AiTagCandidate {
+        label: "sunset",
+        kind: "auto_scene",
+        prompt: "a sunset photo",
+    },
+    AiTagCandidate {
+        label: "snow",
+        kind: "auto_scene",
+        prompt: "a snowy winter photo",
+    },
+    AiTagCandidate {
+        label: "city",
+        kind: "auto_scene",
+        prompt: "a city skyline or urban scene",
+    },
+    AiTagCandidate {
+        label: "street",
+        kind: "auto_scene",
+        prompt: "a street photography scene",
+    },
+    AiTagCandidate {
+        label: "night",
+        kind: "auto_scene",
+        prompt: "a night photo",
+    },
+    AiTagCandidate {
+        label: "indoor",
+        kind: "auto_scene",
+        prompt: "an indoor photo",
+    },
+    AiTagCandidate {
+        label: "outdoor",
+        kind: "auto_scene",
+        prompt: "an outdoor photo",
+    },
+    AiTagCandidate {
+        label: "document",
+        kind: "object",
+        prompt: "a photo of a document or paper",
+    },
+    AiTagCandidate {
+        label: "computer",
+        kind: "object",
+        prompt: "a photo of a computer or laptop",
+    },
+    AiTagCandidate {
+        label: "phone",
+        kind: "object",
+        prompt: "a photo of a mobile phone",
+    },
+];
+
+#[tauri::command]
+pub async fn generate_ai_tags(photo_id: i64, state: State<'_, AppState>) -> AppResult<Vec<TagRow>> {
+    generate_ai_tags_for_photo(&state.pool, photo_id).await
+}
+
+async fn generate_ai_tags_for_photo(
+    pool: &sqlx::SqlitePool,
+    photo_id: i64,
+) -> AppResult<Vec<TagRow>> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM photos WHERE id = ?1")
+        .bind(photo_id)
+        .fetch_optional(pool)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound(format!("photo {photo_id}")));
+    }
+
+    let Some(blob) = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT embedding FROM photo_embeddings \
+         WHERE photo_id = ?1 AND embedding IS NOT NULL \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(photo_id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return list_tags_for_photo(pool, photo_id).await;
+    };
+
+    let Some(siglip) = crate::ai::siglip::global_siglip_session() else {
+        return list_tags_for_photo(pool, photo_id).await;
+    };
+
+    let image_embedding = decode_embedding_blob(photo_id, &blob)?;
+    let text_embeddings = ai_tag_text_embeddings(siglip)?;
+    let selections = select_ai_tags(text_embeddings.iter().map(|item| {
+        (
+            item.candidate,
+            dot_product(&image_embedding, &item.embedding),
+        )
+    }));
+
+    let model_id = ensure_ai_tag_model(pool).await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM tags WHERE photo_id = ?1 AND model_id = ?2")
+        .bind(photo_id)
+        .bind(model_id)
+        .execute(&mut *tx)
+        .await?;
+
+    for tag in selections {
+        sqlx::query(
+            "INSERT INTO tags (photo_id, label, kind, confidence, model_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(photo_id, label, kind) DO UPDATE SET \
+               confidence = excluded.confidence, \
+               model_id = excluded.model_id, \
+               created_at = excluded.created_at",
+        )
+        .bind(photo_id)
+        .bind(tag.label)
+        .bind(tag.kind)
+        .bind(tag.confidence)
+        .bind(model_id)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    list_tags_for_photo(pool, photo_id).await
+}
+
+fn decode_embedding_blob(photo_id: i64, blob: &[u8]) -> AppResult<Vec<f32>> {
+    let expected_bytes = crate::ai::EMBED_DIM * std::mem::size_of::<f32>();
+    if blob.len() != expected_bytes {
+        return Err(AppError::Internal(format!(
+            "photo {photo_id} embedding has {} bytes, expected {expected_bytes}",
+            blob.len()
+        )));
+    }
+
+    let mut emb: Vec<f32> = blob
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    l2_normalise(&mut emb);
+    Ok(emb)
+}
+
+fn ai_tag_text_embeddings(
+    siglip: &crate::ai::siglip::SigLipSession,
+) -> AppResult<Vec<AiTagTextEmbedding>> {
+    let mut guard = AI_TAG_TEXT_EMBEDDINGS
+        .lock()
+        .map_err(|_| AppError::Internal("ai tag text embedding cache mutex poisoned".into()))?;
+    if let Some(cached) = guard.as_ref() {
+        return Ok(cached.clone());
+    }
+
+    let mut out = Vec::with_capacity(AI_TAG_CANDIDATES.len());
+    for candidate in AI_TAG_CANDIDATES {
+        let mut embedding = siglip.embed_text(candidate.prompt)?;
+        l2_normalise(&mut embedding);
+        out.push(AiTagTextEmbedding {
+            candidate: *candidate,
+            embedding,
+        });
+    }
+    *guard = Some(out.clone());
+    Ok(out)
+}
+
+fn select_ai_tags(scored: impl IntoIterator<Item = (AiTagCandidate, f32)>) -> Vec<AiTagSelection> {
+    let mut ranked: Vec<AiTagSelection> = scored
+        .into_iter()
+        .map(|(candidate, score)| AiTagSelection {
+            label: candidate.label,
+            kind: candidate.kind,
+            confidence: (((score as f64) + 1.0) / 2.0).clamp(0.0, 1.0),
+        })
+        .filter(|tag| tag.confidence >= AI_TAG_MIN_CONFIDENCE)
+        .collect();
+
+    ranked.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.label.cmp(b.label))
+    });
+    ranked.truncate(AI_TAG_MAX_RESULTS);
+    ranked
+}
+
+async fn ensure_ai_tag_model(pool: &sqlx::SqlitePool) -> AppResult<i64> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO models (name, kind, version, sha256, size_bytes) \
+         VALUES (?1, 'embedding', ?2, 'derived-from-siglip2-b16', 0) \
+         ON CONFLICT(name) DO UPDATE SET \
+           version = excluded.version, \
+           sha256 = excluded.sha256 \
+         RETURNING id",
+    )
+    .bind(AI_TAG_MODEL_NAME)
+    .bind(AI_TAG_MODEL_VERSION)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
 }
 
 /// Photos in which at least one face belongs to the given cluster.
@@ -4123,7 +4649,7 @@ pub async fn list_photos_for_cluster(
     let rows = sqlx::query_as::<_, PhotoRow>(
         "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, p.imported_at, \
          p.is_raw, p.size_bytes, p.camera_make, p.camera_model, p.aperture, p.shutter, p.iso, \
-         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
+         p.focal_mm, p.aesthetic_score, p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.rating, p.is_flagged \
          FROM photos p \
          JOIN ( \
             SELECT photo_id, MAX(quality) AS top_quality \
@@ -4254,7 +4780,7 @@ async fn generate_thumbnail_bytes(
 
     // Fast-cache hit.
     let thumbs_dir = crate::util::paths::thumbnails_dir()?;
-    let cache_path = crate::ai::image_util::legacy_thumbnail_cache_path(&thumbs_dir, &sha256, size);
+    let cache_path = crate::ai::image_util::thumbnail_cache_path(&thumbs_dir, &sha256, size);
     if let Ok(bytes) = std::fs::read(&cache_path) {
         return Ok(bytes);
     }
@@ -4456,7 +4982,7 @@ pub async fn cull_apply_verdict(
 
 #[tauri::command]
 pub async fn rate_photo(state: State<'_, AppState>, photo_id: i64, rating: i64) -> AppResult<()> {
-    crate::cull::verdict::set_star_rating(&state.pool, photo_id, rating).await
+    crate::cull::verdict::set_rating(&state.pool, photo_id, rating).await
 }
 
 #[tauri::command]
@@ -4660,6 +5186,7 @@ pub async fn rename_user_tag(
 //   5. Copy/paste via `develop_copy_edits` + `develop_paste_edits`.
 //   6. Presets via `develop_preset_apply` + `presets_list`.
 
+use crate::develop::masks::{DevelopMask, DevelopMaskCreateRequest, DevelopMaskUpdateRequest};
 use crate::develop::ops::{Operations, PastedReceipt, RenderReceipt};
 use crate::develop::presets::Preset as DevelopPreset;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -4719,6 +5246,24 @@ pub async fn develop_save(
 }
 
 #[tauri::command]
+pub async fn develop_snapshot_save(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    operations: Operations,
+    label: Option<String>,
+) -> AppResult<i64> {
+    crate::develop::history::save_snapshot(&state.pool, photo_id, &operations, label).await
+}
+
+#[tauri::command]
+pub async fn develop_history_list(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Vec<crate::develop::history::EditRow>> {
+    crate::develop::history::list_for_photo(&state.pool, photo_id).await
+}
+
+#[tauri::command]
 pub async fn develop_reset(state: State<'_, AppState>, photo_id: i64) -> AppResult<usize> {
     crate::develop::history::reset(&state.pool, photo_id).await
 }
@@ -4763,6 +5308,91 @@ pub async fn develop_preset_apply(
 }
 
 #[tauri::command]
+pub async fn develop_adaptive_preset_apply(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    preset_id: i64,
+    strength: u8,
+) -> AppResult<RenderReceipt> {
+    let preset = crate::develop::presets::load(&state.pool, preset_id).await?;
+    if preset.scope != "mask" {
+        return develop_preset_apply(state, photo_id, preset_id, strength).await;
+    }
+
+    let local_ops = preset.local_operations()?.unwrap_or(preset.operations()?);
+    let blended = Operations::identity().blend(local_ops, strength);
+    let mask_source = preset.mask_source.as_deref().unwrap_or("subject");
+    let mut payload = preset.mask_options()?;
+    let payload_obj = payload.as_object_mut().ok_or_else(|| {
+        AppError::InvalidInput("adaptive preset mask_options must be an object".into())
+    })?;
+    payload_obj.insert("kind".into(), serde_json::json!(mask_source));
+    payload_obj.insert("adaptive_preset_id".into(), serde_json::json!(preset.id));
+    payload_obj.insert("preset_name".into(), serde_json::json!(preset.name));
+    payload_obj.insert("strength".into(), serde_json::json!(strength));
+
+    let existing_mask_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM develop_masks \
+         WHERE photo_id = ?1 \
+           AND json_extract(mask_payload, '$.adaptive_preset_id') = ?2 \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(photo_id)
+    .bind(preset.id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    match existing_mask_id {
+        Some(mask_id) => {
+            crate::develop::masks::update(
+                &state.pool,
+                DevelopMaskUpdateRequest {
+                    mask_id,
+                    name: Some(preset.name.clone()),
+                    source: Some(mask_source.into()),
+                    mode: Some("normal".into()),
+                    visible: Some(true),
+                    order_index: None,
+                    payload_storage: Some("inline".into()),
+                    mask_payload: Some(payload),
+                    operations: Some(blended),
+                    confidence: preset.confidence_threshold,
+                },
+            )
+            .await?;
+        }
+        None => {
+            crate::develop::masks::create(
+                &state.pool,
+                DevelopMaskCreateRequest {
+                    photo_id,
+                    edit_id: None,
+                    name: Some(preset.name.clone()),
+                    source: mask_source.into(),
+                    mode: Some("normal".into()),
+                    visible: Some(true),
+                    order_index: None,
+                    payload_storage: Some("inline".into()),
+                    mask_payload: payload,
+                    operations: blended,
+                    confidence: preset.confidence_threshold,
+                },
+            )
+            .await?;
+        }
+    }
+
+    let start = std::time::Instant::now();
+    let current_ops = crate::develop::history::load_current(&state.pool, photo_id).await?;
+    let preview_data_url = render_preview(&state.pool, photo_id, &current_ops).await?;
+    Ok(RenderReceipt {
+        photo_id,
+        preview_data_url,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+#[tauri::command]
 pub async fn presets_list(
     state: State<'_, AppState>,
     group: Option<String>,
@@ -4780,6 +5410,91 @@ pub async fn preset_save(
     crate::develop::presets::save_user(&state.pool, &name, &group, &operations).await
 }
 
+#[tauri::command]
+pub async fn develop_masks_list(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Vec<DevelopMask>> {
+    crate::develop::masks::list(&state.pool, photo_id).await
+}
+
+#[tauri::command]
+pub async fn develop_mask_create(
+    state: State<'_, AppState>,
+    req: DevelopMaskCreateRequest,
+) -> AppResult<i64> {
+    crate::develop::masks::create(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn develop_mask_update(
+    state: State<'_, AppState>,
+    req: DevelopMaskUpdateRequest,
+) -> AppResult<DevelopMask> {
+    crate::develop::masks::update(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn develop_mask_delete(state: State<'_, AppState>, mask_id: i64) -> AppResult<u64> {
+    crate::develop::masks::delete(&state.pool, mask_id).await
+}
+
+#[tauri::command]
+pub async fn develop_mask_apply_preview(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    operations: Operations,
+) -> AppResult<RenderReceipt> {
+    develop_apply(state, photo_id, operations).await
+}
+
+#[tauri::command]
+pub async fn ai_edit_status(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Vec<crate::develop::ai_edits::AiEditRow>> {
+    crate::develop::ai_edits::status(&state.pool, photo_id).await
+}
+
+#[tauri::command]
+pub async fn ai_edit_refresh(
+    state: State<'_, AppState>,
+    photo_id: i64,
+    feature: String,
+) -> AppResult<crate::develop::ai_edits::AiEditRefreshReceipt> {
+    crate::develop::ai_edits::refresh(&state.pool, photo_id, &feature).await
+}
+
+#[tauri::command]
+pub async fn merge_job_create(
+    state: State<'_, AppState>,
+    req: crate::merge_capture::MergeJobCreateRequest,
+) -> AppResult<crate::merge_capture::MergeJobRow> {
+    crate::merge_capture::create_merge_job(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn merge_jobs_list(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::merge_capture::MergeJobRow>> {
+    crate::merge_capture::list_merge_jobs(&state.pool).await
+}
+
+#[tauri::command]
+pub async fn tether_source_add(
+    state: State<'_, AppState>,
+    req: crate::merge_capture::TetherSourceCreateRequest,
+) -> AppResult<crate::merge_capture::TetherSourceRow> {
+    crate::merge_capture::add_tether_source(&state.pool, req).await
+}
+
+#[tauri::command]
+pub async fn tether_sources_list(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::merge_capture::TetherSourceRow>> {
+    crate::merge_capture::list_tether_sources(&state.pool).await
+}
+
 /// Generate a preview JPEG for `photo_id` under `ops`. Renders at 1280
 /// long-edge — big enough to look good on-screen, small enough to keep
 /// slider drags at > 10 fps on CPU.
@@ -4794,10 +5509,11 @@ async fn render_preview(
     let decoded = image::load_from_memory(&thumb_bytes)
         .map_err(|e| AppError::Internal(format!("decode thumb for photo {photo_id}: {e}")))?;
     let rgb = decoded.to_rgb8();
-    let processed = if ops.is_identity() {
+    let masks = crate::develop::masks::list_visible(pool, photo_id).await?;
+    let processed = if ops.is_identity() && masks.is_empty() {
         rgb
     } else {
-        crate::develop::pipeline::apply(&rgb, ops)
+        crate::develop::masks::apply_mask_layers(&rgb, ops, &masks)?
     };
     let mut out: Vec<u8> = Vec::with_capacity(200 * 1024);
     let (w, h) = processed.dimensions();
@@ -5463,7 +6179,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
              FROM photos ORDER BY imported_at DESC LIMIT 100 OFFSET 0",
         )
         .fetch_all(&pool)
@@ -5492,7 +6208,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
              FROM photos ORDER BY imported_at DESC LIMIT 3 OFFSET 0",
         )
         .fetch_all(&pool)
@@ -5547,7 +6263,7 @@ mod tests {
         let sql = format!(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
              FROM photos WHERE {frag} ORDER BY imported_at DESC LIMIT 100 OFFSET 0"
         );
         let rows = sqlx::query_as::<_, PhotoRow>(&sql)
@@ -5686,7 +6402,7 @@ mod tests {
         let sql = format!(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged \
              FROM photos WHERE {frag} ORDER BY id ASC LIMIT 100 OFFSET 0"
         );
         sqlx::query_as::<_, PhotoRow>(&sql)
@@ -5986,7 +6702,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged FROM photos \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = strftime('%m-%d', 'now') \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -6035,7 +6751,7 @@ mod tests {
         let rows = sqlx::query_as::<_, PhotoRow>(
             "SELECT id, sha256, filename, width, height, captured_at, imported_at, is_raw, \
              size_bytes, camera_make, camera_model, aperture, shutter, iso, focal_mm, \
-             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, star_rating, is_flagged FROM photos \
+             aesthetic_score, paired_photo_id, raw_format, orientation, sharpness_score, rating, is_flagged FROM photos \
              WHERE captured_at IS NOT NULL \
                AND strftime('%m-%d', captured_at) = ?1 \
                AND strftime('%Y', captured_at) < strftime('%Y', 'now') \
@@ -6075,7 +6791,7 @@ mod tests {
             "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
              p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
              p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
-             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
+             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.rating, p.is_flagged \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -6118,7 +6834,7 @@ mod tests {
             "SELECT p.id, p.sha256, p.filename, p.width, p.height, p.captured_at, \
              p.imported_at, p.is_raw, p.size_bytes, p.camera_make, p.camera_model, \
              p.aperture, p.shutter, p.iso, p.focal_mm, p.aesthetic_score, \
-             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.star_rating, p.is_flagged \
+             p.paired_photo_id, p.raw_format, p.orientation, p.sharpness_score, p.rating, p.is_flagged \
              FROM photos p LEFT JOIN photo_views pv ON pv.photo_id = p.id \
              WHERE (p.aesthetic_score IS NULL OR p.aesthetic_score >= 0.0) \
                AND (pv.photo_id IS NULL \
@@ -7012,6 +7728,71 @@ mod tests {
         assert_eq!(rows[0].label, "beach");
         assert!(rows[0].confidence > rows[1].confidence);
         assert!(rows[1].confidence > rows[2].confidence);
+    }
+
+    #[test]
+    fn select_ai_tags_filters_sorts_and_limits() {
+        let scored = AI_TAG_CANDIDATES
+            .iter()
+            .take(10)
+            .enumerate()
+            .map(|(i, candidate)| (*candidate, 0.5 - (i as f32 * 0.01)));
+        let selected = select_ai_tags(scored);
+
+        assert_eq!(selected.len(), AI_TAG_MAX_RESULTS);
+        assert_eq!(selected[0].confidence, 0.75);
+        assert!(selected[0].confidence >= selected[1].confidence);
+    }
+
+    #[test]
+    fn decode_embedding_blob_rejects_wrong_length() {
+        let err = decode_embedding_blob(7, &[0, 1, 2])
+            .expect_err("short embedding blob should be invalid");
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected Internal for wrong embedding length, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_ai_tags_missing_photo_returns_not_found() {
+        let pool = test_pool().await;
+        let err = generate_ai_tags_for_photo(&pool, 404)
+            .await
+            .expect_err("missing photo should fail");
+        assert!(
+            matches!(err, AppError::NotFound(_)),
+            "expected NotFound for missing photo, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_ai_tags_without_embedding_preserves_existing_tags() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let photo_id: i64 = sqlx::query_scalar(
+            "INSERT INTO photos (sha256, filename, width, height, size_bytes, is_raw, imported_at) \
+             VALUES ('aitag1', 'p.jpg', 10, 10, 1, 0, ?1) RETURNING id",
+        )
+        .bind(&now)
+        .fetch_one(&pool)
+        .await
+        .expect("insert photo");
+        sqlx::query(
+            "INSERT INTO tags (photo_id, label, kind, confidence, created_at) \
+             VALUES (?1, 'manual', 'user', 1.0, ?2)",
+        )
+        .bind(photo_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert tag");
+
+        let rows = generate_ai_tags_for_photo(&pool, photo_id)
+            .await
+            .expect("generate tags without embedding should no-op");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "manual");
     }
 
     // ── get_thumbnail unit tests ──────────────────────────────────────────────

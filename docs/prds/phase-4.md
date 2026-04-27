@@ -128,9 +128,6 @@ CREATE TABLE IF NOT EXISTS trip_photos (
   photo_id  INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
   PRIMARY KEY (trip_id, photo_id)
 );
-
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '5', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 ```
 
 ## API surface (new commands)
@@ -201,7 +198,7 @@ Shipped end-to-end:
 - §6 Keyboard shortcut overlay — `?` opens a read-only overlay of the documented shortcuts; override table exists for a future rebinder UI
 - §7 XMP sidecar import — rating / color label / subjects → catalog rows + tags; idempotent re-import
 - §8 `.chronimage-ignore` — gitignore-style ignore files + sane defaults, honoured by `scan_dir`
-- Migration `20261001000000_phase4_polish.sql` (schema_version → 5)
+- Migration `20261001000000_phase4_polish.sql`
 
 Removed from scope:
 

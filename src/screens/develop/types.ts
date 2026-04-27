@@ -24,6 +24,23 @@ export interface DevelopValues {
   sat: number;
   clarity: number;
   dehaze: number;
+  cropX: number;
+  cropY: number;
+  cropW: number;
+  cropH: number;
+  rotation: number;
+  straighten: number;
+  transformH: number;
+  transformV: number;
+  lensDistortion: number;
+  lensVignette: number;
+  chromaticAberration: number;
+  spotHealCount: number;
+  lensBlurAmount: number;
+  lensBlurFocusNear: number;
+  lensBlurFocusFar: number;
+  lensBlurBokehBoost: number;
+  lensBlurCatEye: number;
   curves: DevelopCurves;
 }
 
@@ -40,6 +57,23 @@ export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
   sat: 0,
   clarity: 0,
   dehaze: 0,
+  cropX: 0,
+  cropY: 0,
+  cropW: 100,
+  cropH: 100,
+  rotation: 0,
+  straighten: 0,
+  transformH: 0,
+  transformV: 0,
+  lensDistortion: 0,
+  lensVignette: 0,
+  chromaticAberration: 0,
+  spotHealCount: 0,
+  lensBlurAmount: 0,
+  lensBlurFocusNear: 0,
+  lensBlurFocusFar: 100,
+  lensBlurBokehBoost: 0,
+  lensBlurCatEye: 0,
   curves: identityCurves(),
 };
 
@@ -64,6 +98,23 @@ export function valuesToOperations(v: DevelopValues): DevelopOperations {
     saturation: v.sat,
     clarity: v.clarity,
     dehaze: v.dehaze,
+    crop_x: v.cropX / 100,
+    crop_y: v.cropY / 100,
+    crop_w: v.cropW / 100,
+    crop_h: v.cropH / 100,
+    rotation: v.rotation,
+    straighten: v.straighten,
+    transform_h: v.transformH,
+    transform_v: v.transformV,
+    lens_distortion: v.lensDistortion,
+    lens_vignette: v.lensVignette,
+    chromatic_aberration: v.chromaticAberration,
+    spot_heal_count: v.spotHealCount,
+    lens_blur_amount: v.lensBlurAmount,
+    lens_blur_focus_near: v.lensBlurFocusNear / 100,
+    lens_blur_focus_far: v.lensBlurFocusFar / 100,
+    lens_blur_bokeh_boost: v.lensBlurBokehBoost,
+    lens_blur_cat_eye: v.lensBlurCatEye,
     curves: v.curves,
   };
 }
@@ -82,6 +133,23 @@ export function operationsToValues(ops: DevelopOperations): DevelopValues {
     sat: ops.saturation,
     clarity: ops.clarity,
     dehaze: ops.dehaze,
+    cropX: (ops.crop_x ?? 0) * 100,
+    cropY: (ops.crop_y ?? 0) * 100,
+    cropW: (ops.crop_w ?? 1) * 100,
+    cropH: (ops.crop_h ?? 1) * 100,
+    rotation: ops.rotation ?? 0,
+    straighten: ops.straighten ?? 0,
+    transformH: ops.transform_h ?? 0,
+    transformV: ops.transform_v ?? 0,
+    lensDistortion: ops.lens_distortion ?? 0,
+    lensVignette: ops.lens_vignette ?? 0,
+    chromaticAberration: ops.chromatic_aberration ?? 0,
+    spotHealCount: ops.spot_heal_count ?? 0,
+    lensBlurAmount: ops.lens_blur_amount ?? 0,
+    lensBlurFocusNear: (ops.lens_blur_focus_near ?? 0) * 100,
+    lensBlurFocusFar: (ops.lens_blur_focus_far ?? 1) * 100,
+    lensBlurBokehBoost: ops.lens_blur_bokeh_boost ?? 0,
+    lensBlurCatEye: ops.lens_blur_cat_eye ?? 0,
     curves: ops.curves ?? identityCurves(),
   };
 }
@@ -126,6 +194,23 @@ export function blendOperations(
     saturation: lerp(base.saturation, target.saturation),
     clarity: lerp(base.clarity, target.clarity),
     dehaze: lerp(base.dehaze, target.dehaze),
+    crop_x: lerp(base.crop_x ?? 0, target.crop_x ?? 0),
+    crop_y: lerp(base.crop_y ?? 0, target.crop_y ?? 0),
+    crop_w: lerp(base.crop_w ?? 1, target.crop_w ?? 1),
+    crop_h: lerp(base.crop_h ?? 1, target.crop_h ?? 1),
+    rotation: lerp(base.rotation ?? 0, target.rotation ?? 0),
+    straighten: lerp(base.straighten ?? 0, target.straighten ?? 0),
+    transform_h: lerp(base.transform_h ?? 0, target.transform_h ?? 0),
+    transform_v: lerp(base.transform_v ?? 0, target.transform_v ?? 0),
+    lens_distortion: lerp(base.lens_distortion ?? 0, target.lens_distortion ?? 0),
+    lens_vignette: lerp(base.lens_vignette ?? 0, target.lens_vignette ?? 0),
+    chromatic_aberration: lerp(base.chromatic_aberration ?? 0, target.chromatic_aberration ?? 0),
+    spot_heal_count: lerp(base.spot_heal_count ?? 0, target.spot_heal_count ?? 0),
+    lens_blur_amount: lerp(base.lens_blur_amount ?? 0, target.lens_blur_amount ?? 0),
+    lens_blur_focus_near: lerp(base.lens_blur_focus_near ?? 0, target.lens_blur_focus_near ?? 0),
+    lens_blur_focus_far: lerp(base.lens_blur_focus_far ?? 1, target.lens_blur_focus_far ?? 1),
+    lens_blur_bokeh_boost: lerp(base.lens_blur_bokeh_boost ?? 0, target.lens_blur_bokeh_boost ?? 0),
+    lens_blur_cat_eye: lerp(base.lens_blur_cat_eye ?? 0, target.lens_blur_cat_eye ?? 0),
     curves: blendCurves(base.curves, target.curves, t),
   };
 }

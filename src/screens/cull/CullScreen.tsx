@@ -1,8 +1,6 @@
 /**
- * CullScreen — Phase 2 cull-review surface. Compare / Grid / Swipe modes with
- * AI-pick chips, issue flags, and keyboard verdicts. Fully interactive UI stub
- * over live catalog photos; verdict buttons are phase-gated until the Cull
- * verdict engine lands (Phase 2 §2).
+ * CullScreen — cull-review surface. Compare / Grid / Swipe modes over live
+ * catalog photos with keyboard verdicts backed by the Cull Bin.
  */
 
 import { useCallback, useEffect, useMemo } from 'react';
@@ -10,23 +8,18 @@ import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 
 import { Seg } from '../../primitives/Seg';
-import { Thumbnail } from '../../primitives/Thumbnail';
+import { Thumbnail, thumbnailSizeForCssBox } from '../../primitives/Thumbnail';
 import { useCull } from '../../state/cull';
-import { useCullApplyVerdict, usePhotos } from '../../state/queries';
+import { useCullApplyVerdict, useCullBinSummary, usePhotos } from '../../state/queries';
 import { useUi } from '../../state/ui';
 import type { PhotoRow } from '../../tauri/invoke';
+import { CullBinScreen } from '../cullbin';
 import type { CullMode, CullPair } from './types';
 
-const FALLBACK_ISSUES_A = ['near-duplicate', 'blur 0.18'];
-const FALLBACK_ISSUES_B = ['blur 0.41'];
-
 /**
- * Build cull-pairs from adjacent photos in the catalog. Once the real
- * `list_cull_pairs` command lands (Phase 2 §2 full scope), this becomes a
- * backend fetch that groups by burst / phash neighbours / sharpness
- * clusters. For now the pairing is adjacency-based but the winner is
- * picked from live `aesthetic_score` (NIMA from Phase 1 stage 3):
- * higher score = AI pick. Ties or missing scores default to A.
+ * Build cull-pairs from adjacent photos in the catalog. The winner is picked
+ * from live `aesthetic_score`: higher score = AI pick. Ties or missing scores
+ * default to A.
  */
 function buildPairs(photos: PhotoRow[]): CullPair[] {
   const pairs: CullPair[] = [];
@@ -34,7 +27,6 @@ function buildPairs(photos: PhotoRow[]): CullPair[] {
     const a = photos[i];
     const b = photos[i + 1];
     if (!a || !b) break;
-    const reasons = ['burst', 'near-duplicate', 'same subject', 'series'] as const;
     // §7: NIMA aesthetic_score picks the winner. Higher score wins.
     // When both photos are missing a score, keep A by convention.
     const aScore = a.aesthetic_score ?? -Infinity;
@@ -42,11 +34,7 @@ function buildPairs(photos: PhotoRow[]): CullPair[] {
     const keep: 0 | 1 = bScore > aScore ? 1 : 0;
     pairs.push({
       ids: [a.id, b.id],
-      reason: reasons[i % reasons.length] ?? 'burst',
-      similarity: 0.7 + ((i * 13) % 30) / 100,
       keep,
-      issues_a: FALLBACK_ISSUES_A,
-      issues_b: FALLBACK_ISSUES_B,
     });
   }
   return pairs;
@@ -61,13 +49,13 @@ function CullCompare({ pair, photosById }: CullStageProps) {
   const a = photosById.get(pair.ids[0]);
   const b = photosById.get(pair.ids[1]);
   const cards = [
-    { photo: a, issues: pair.issues_a, winner: pair.keep === 0, loser: pair.keep === 1, sharp: 0.62 },
-    { photo: b, issues: pair.issues_b, winner: pair.keep === 1, loser: pair.keep === 0, sharp: 0.91 },
+    { photo: a, winner: pair.keep === 0, loser: pair.keep === 1 },
+    { photo: b, winner: pair.keep === 1, loser: pair.keep === 0 },
   ];
 
   return (
     <div className="cull-stage">
-      {cards.map((card, i) => {
+      {cards.map((card) => {
         const photo = card.photo;
         if (!photo) return null;
         const swap = photo.orientation >= 5 && photo.orientation <= 8;
@@ -96,21 +84,19 @@ function CullCompare({ pair, photosById }: CullStageProps) {
             <div className="frame" style={{ aspectRatio }}>
               <Thumbnail
                 photoId={photo.id}
-                sizePx={1280}
+                sizePx={thumbnailSizeForCssBox(720, 720, { maxPx: 1280 })}
                 photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
+                fit="contain"
               />
             </div>
             <div className="tag-row">
               {card.winner && <Chip variant="solid">AI pick · keep</Chip>}
               {card.loser && <Chip tone="warn">Suggested reject</Chip>}
-              {card.issues.map((is) => (
-                <Chip key={is} tone="warn">
-                  {is}
-                </Chip>
-              ))}
-              <span className="mono" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--fg-mute)' }}>
-                sharpness {card.sharp.toFixed(2)} · eyes-open {(0.95 - i * 0.45).toFixed(2)}
-              </span>
+              {photo.sharpness_score != null && (
+                <span className="mono" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--fg-mute)' }}>
+                  sharpness {photo.sharpness_score.toFixed(2)}
+                </span>
+              )}
             </div>
           </div>
         );
@@ -124,34 +110,19 @@ function CullGrid({ photos }: { readonly photos: PhotoRow[] }) {
   return (
     <div style={{ padding: 20, flex: 1, overflow: 'auto' }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
-        {sample.map((p, i) => {
+        {sample.map((p) => {
           const swap = p.orientation >= 5 && p.orientation <= 8;
           const w = swap ? p.height : p.width;
           const h = swap ? p.width : p.height;
           const aspectRatio = w > 0 && h > 0 ? `${w} / ${h}` : '4 / 3';
           return (
             <div key={p.id} style={{ position: 'relative' }}>
-              <div style={{ aspectRatio }}>
+              <div className="cull-grid-thumb" style={{ aspectRatio }}>
                 <Thumbnail
                   photoId={p.id}
-                  sizePx={320}
+                  sizePx={thumbnailSizeForCssBox(360, 270, { maxPx: 960 })}
                   photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
                 />
-              </div>
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 8,
-                  left: 8,
-                  display: 'flex',
-                  gap: 4,
-                  flexWrap: 'wrap',
-                  maxWidth: 'calc(100% - 40px)',
-                }}
-              >
-                {i % 3 === 0 && <Chip tone="warn">duplicate</Chip>}
-                {i % 4 === 1 && <Chip tone="warn">blur</Chip>}
-                {i % 7 === 2 && <Chip tone="warn">eyes closed</Chip>}
               </div>
             </div>
           );
@@ -180,6 +151,7 @@ function CullSwipe({ pair, photosById }: CullStageProps) {
       }}
     >
       <div
+        className="cull-swipe-card"
         style={{
           width: 'min(640px, 80%)',
           aspectRatio,
@@ -189,8 +161,9 @@ function CullSwipe({ pair, photosById }: CullStageProps) {
       >
         <Thumbnail
           photoId={photo.id}
-          sizePx={1280}
+          sizePx={thumbnailSizeForCssBox(640, 800, { maxPx: 1280 })}
           photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
+          fit="contain"
         />
         <div
           style={{
@@ -242,6 +215,8 @@ function CullSwipe({ pair, photosById }: CullStageProps) {
 
 export function CullScreen() {
   const mode = useCull((s) => s.mode);
+  const view = useCull((s) => s.view);
+  const setView = useCull((s) => s.setView);
   const setMode = useCull((s) => s.setMode);
   const idx = useCull((s) => s.idx);
   const kept = useCull((s) => s.kept);
@@ -251,6 +226,7 @@ export function CullScreen() {
   const onNext = useCull((s) => s.next);
 
   const { data: photos = [], isLoading } = usePhotos();
+  const { data: binSummary } = useCullBinSummary();
   const applyVerdict = useCullApplyVerdict();
   const retentionDays = useUi((s) => s.tweaks.cullBinRetentionDays);
 
@@ -337,6 +313,52 @@ export function CullScreen() {
     );
   }
 
+  if (view === 'rejected') {
+    return (
+      <div className="canvas">
+        <CullBinScreen embedded />
+      </div>
+    );
+  }
+
+  if (view === 'cleanup') {
+    const totalCount = binSummary?.total_count ?? 0;
+    const totalBytes = binSummary?.total_bytes ?? 0;
+    const totalGb = (totalBytes / 1024 ** 3).toFixed(2);
+    return (
+      <div className="canvas">
+        <div
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 14,
+            padding: 48,
+            textAlign: 'center',
+          }}
+        >
+          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', letterSpacing: '0.1em' }}>
+            CULL · CLEANUP
+          </div>
+          <h1 className="page-title">
+            Review before deleting
+            <em>.</em>
+          </h1>
+          <p style={{ maxWidth: 560, color: 'var(--fg-dim)', fontSize: 13, lineHeight: 1.5 }}>
+            {totalCount === 0
+              ? 'No rejected photos are waiting. Keep culling, then come back here before you permanently empty anything.'
+              : `${totalCount} rejected photo${totalCount === 1 ? '' : 's'} can reclaim about ${totalGb} GB after review.`}
+          </p>
+          <button type="button" className="btn primary" onClick={() => setView('rejected')}>
+            <Icon name="flag" size={13} /> Review rejected photos
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!pair) {
     return (
       <div className="canvas">
@@ -359,8 +381,7 @@ export function CullScreen() {
             Nothing to cull<em>.</em>
           </h1>
           <p style={{ maxWidth: 540, color: 'var(--fg-dim)', fontSize: 13, lineHeight: 1.5 }}>
-            Import more photos or adjust the duplicate-similarity threshold in Settings. The backend cull-pair
-            detector lands in Phase 2 §2.
+            Import more photos or review the Cull Bin for already rejected items.
           </p>
         </div>
       </div>
@@ -372,14 +393,10 @@ export function CullScreen() {
       <div className="toolbar">
         <div>
           <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', letterSpacing: '0.08em' }}>
-            CULL · {pair.reason.toUpperCase()}
+            CULL · REVIEW
           </div>
           <div style={{ fontSize: 14, marginTop: 2 }}>
-            Similarity{' '}
-            <span className="mono" style={{ color: 'var(--accent)' }}>
-              {(pair.similarity * 100).toFixed(0)}%
-            </span>{' '}
-            · pair {idx + 1} of {totalPairs}
+            Pair {idx + 1} of {totalPairs}
           </div>
         </div>
         <div style={{ flex: 1 }} />
@@ -413,7 +430,7 @@ export function CullScreen() {
             <div key={p.id} className={`thumb ${isActive ? 'active' : ''} ${isDone ? 'done' : ''}`}>
               <Thumbnail
                 photoId={p.id}
-                sizePx={160}
+                sizePx={thumbnailSizeForCssBox(64, 48, { maxPx: 160 })}
                 photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
                 showLabel={false}
               />

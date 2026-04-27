@@ -213,12 +213,58 @@ pub fn decoded_pixels_are_display_oriented(path: &std::path::Path) -> bool {
     }
 }
 
-pub fn legacy_thumbnail_cache_path(
+pub fn thumbnail_cache_path(
     thumbs_dir: &std::path::Path,
     sha256: &str,
     size: u32,
 ) -> std::path::PathBuf {
     thumbs_dir.join(format!("{sha256}_{size}.jpg"))
+}
+
+pub struct ThumbnailCacheWrite {
+    pub sharpness: f32,
+    pub recovered_orientation: Option<u32>,
+}
+
+/// Decode a source image once, apply display orientation, seed the shared
+/// thumbnail and AI-preview caches, and return the sharpness measured from
+/// the oriented thumbnail.
+pub fn write_thumbnail_cache_from_source(
+    source_path: &std::path::Path,
+    sha256: &str,
+    stored_orientation: Option<u32>,
+    size: u32,
+    overwrite: bool,
+) -> crate::AppResult<ThumbnailCacheWrite> {
+    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
+    let cache_path = thumbnail_cache_path(&thumbs_dir, sha256, size);
+    let metadata_orientation = effective_orientation_for_path(source_path, stored_orientation);
+    let decode_orientation = orientation_for_decoded_path(source_path, stored_orientation);
+    let recovered_orientation = if is_heif_extension(source_path)
+        && stored_orientation.unwrap_or(1) == 1
+        && metadata_orientation.unwrap_or(1) != 1
+    {
+        metadata_orientation
+    } else {
+        None
+    };
+
+    let img = open_any(source_path).map_err(|e| crate::AppError::Io(std::io::Error::other(e)))?;
+    let img = apply_exif_orientation(img, decode_orientation);
+    write_ai_preview_cache(&thumbs_dir, sha256, &img);
+
+    let resized = img.thumbnail(size, size);
+    if overwrite || !cache_path.exists() {
+        let buf =
+            encode_jpeg(&resized, 90).map_err(|e| crate::AppError::Io(std::io::Error::other(e)))?;
+        let _ = std::fs::create_dir_all(&thumbs_dir);
+        std::fs::write(&cache_path, &buf)?;
+    }
+
+    Ok(ThumbnailCacheWrite {
+        sharpness: laplacian_variance(&resized),
+        recovered_orientation,
+    })
 }
 
 /// Max longest-edge for the per-photo AI-preview cache. Chosen so that:
@@ -332,7 +378,7 @@ pub fn open_for_ai(path: &std::path::Path, sha256: Option<&str>) -> Result<Dynam
 ///   thumbnail when the dedicated decoder fails.
 ///
 /// Each failure is logged via `tracing::warn!` so the on-disk reason
-/// shows up in Loki — the old code swallowed rawler errors silently and
+/// shows up in local log files — the old code swallowed rawler errors silently and
 /// the user saw purple placeholders with no diagnostic.
 pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
     // Skip the `image` crate entirely for known HEIF/RAW extensions —
@@ -1071,11 +1117,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_thumbnail_cache_path_matches_cache_contract() {
+    fn thumbnail_cache_path_matches_cache_contract() {
         use std::path::Path;
         let root = Path::new("thumbs");
         assert_eq!(
-            legacy_thumbnail_cache_path(root, "abc", 480),
+            thumbnail_cache_path(root, "abc", 480),
             root.join("abc_480.jpg")
         );
     }

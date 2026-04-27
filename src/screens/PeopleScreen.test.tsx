@@ -34,8 +34,7 @@ describe('PeopleScreen', () => {
 
     render(<PeopleScreen />, { wrapper });
 
-    expect(await screen.findByDisplayValue('Alice')).toBeInTheDocument();
-    // second card has no name — its placeholder text includes "cluster 2"
-    expect(await screen.findByPlaceholderText(/cluster 2/i)).toBeInTheDocument();
+    expect(await screen.findByText('Alice')).toBeInTheDocument();
+    expect(await screen.findByText(/unnamed person/i)).toBeInTheDocument();
   });
 });

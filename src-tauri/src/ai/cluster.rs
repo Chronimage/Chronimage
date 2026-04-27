@@ -124,6 +124,25 @@ pub fn cluster_faces(
     let data: Vec<Vec<f32>> = inputs.iter().map(|fi| fi.embedding.clone()).collect();
 
     let min_samples = params.min_samples.unwrap_or(params.min_cluster_size);
+    if params.min_cluster_size == 0 || min_samples == 0 {
+        return Err(AppError::InvalidInput(
+            "min_cluster_size and min_samples must be greater than zero".into(),
+        ));
+    }
+
+    // hdbscan 0.12 indexes the k-th sorted distance directly and panics when
+    // k is larger than the input length. A cluster is impossible in this case,
+    // so return deterministic noise assignments instead of calling the crate.
+    if inputs.len() < params.min_cluster_size || inputs.len() < min_samples {
+        return Ok(inputs
+            .iter()
+            .map(|fi| ClusterAssignment {
+                face_id: fi.face_id,
+                cluster_id: -1,
+                probability: 0.0,
+            })
+            .collect());
+    }
 
     let hyper_params = HdbscanHyperParams::builder()
         .min_cluster_size(params.min_cluster_size)
@@ -227,6 +246,51 @@ mod tests {
         }];
         let err = cluster_faces(&bad_input, &ClusterParams::default())
             .expect_err("should fail on wrong dim");
+        assert!(
+            matches!(err, AppError::InvalidInput(_)),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fewer_faces_than_min_samples_returns_noise_without_panicking() {
+        let inputs: Vec<FaceInput> = (0..4)
+            .map(|i| FaceInput {
+                face_id: i + 1,
+                photo_id: i + 10,
+                embedding: make_embedding(i as f32 + 1.0),
+            })
+            .collect();
+
+        let result = cluster_faces(&inputs, &ClusterParams::default()).expect("should not panic");
+
+        assert_eq!(result.len(), 4);
+        assert!(
+            result.iter().all(|assignment| assignment.cluster_id == -1),
+            "small inputs should be marked noise"
+        );
+        assert!(
+            result
+                .iter()
+                .all(|assignment| assignment.probability == 0.0),
+            "noise assignments should have zero probability"
+        );
+    }
+
+    #[test]
+    fn zero_min_samples_errors() {
+        let inputs = vec![FaceInput {
+            face_id: 1,
+            photo_id: 10,
+            embedding: make_embedding(1.0),
+        }];
+        let params = ClusterParams {
+            min_cluster_size: 1,
+            min_samples: Some(0),
+        };
+
+        let err = cluster_faces(&inputs, &params).expect_err("zero min_samples should fail");
+
         assert!(
             matches!(err, AppError::InvalidInput(_)),
             "expected InvalidInput, got {err:?}"

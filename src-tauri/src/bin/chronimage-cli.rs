@@ -268,15 +268,21 @@ async fn run_doctor() -> Result<(), Box<dyn std::error::Error>> {
         )
         .fetch_one(&pool)
         .await?;
-        let schema: Option<String> =
-            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'schema_version'")
-                .fetch_optional(&pool)
+        let (migration_count, latest_migration): (i64, Option<i64>) =
+            sqlx::query_as("SELECT COUNT(*), MAX(version) FROM _sqlx_migrations WHERE success = 1")
+                .fetch_one(&pool)
                 .await?;
         let license = license::load(&pool).await?;
         pool.close().await;
         println!();
         println!("Catalog");
-        println!("  schema   {}", schema.as_deref().unwrap_or("(unset)"));
+        println!(
+            "  schema   {} migrations, latest {}",
+            migration_count,
+            latest_migration
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "(none)".to_string())
+        );
         println!("  photos   {photos}");
         println!("  tags     {tags}");
         println!("  faces    {faces}");
@@ -316,14 +322,17 @@ async fn run_migrate() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = catalog_db_path()?;
     println!("Migrating {}", db_path.display());
     let pool = open_pool(PoolOptions::new(db_path)).await?;
-    let schema: Option<String> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'schema_version'")
-            .fetch_optional(&pool)
+    let (migration_count, latest_migration): (i64, Option<i64>) =
+        sqlx::query_as("SELECT COUNT(*), MAX(version) FROM _sqlx_migrations WHERE success = 1")
+            .fetch_one(&pool)
             .await?;
     pool.close().await;
     println!(
-        "  schema_version now {}",
-        schema.as_deref().unwrap_or("(unset)")
+        "  schema now {} migrations, latest {}",
+        migration_count,
+        latest_migration
+            .map(|version| version.to_string())
+            .unwrap_or_else(|| "(none)".to_string())
     );
     Ok(())
 }

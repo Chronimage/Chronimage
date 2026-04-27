@@ -149,6 +149,7 @@ export function DuplicatesPanel({ onClose }: DuplicatesPanelProps) {
                       <div key={pid} className="cell" style={{ aspectRatio: '3/2', position: 'relative' }}>
                         <Thumbnail
                           photoId={pid}
+                          sizePx={320}
                           photo={{ hue: (pid * 31) % 360, filename: `#${pid}`, id: String(pid) }}
                           subtle
                         />

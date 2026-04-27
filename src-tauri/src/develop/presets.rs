@@ -22,11 +22,31 @@ pub struct Preset {
     pub is_system: bool,
     pub created_at: String,
     pub updated_at: String,
+    pub scope: String,
+    pub mask_source: Option<String>,
+    pub mask_options_json: Option<String>,
+    pub local_operations_json: Option<String>,
+    pub fallback_operations_json: Option<String>,
+    pub confidence_threshold: Option<f64>,
 }
 
 impl Preset {
     pub fn operations(&self) -> AppResult<Operations> {
         serde_json::from_str(&self.operations_json).map_err(AppError::from)
+    }
+
+    pub fn local_operations(&self) -> AppResult<Option<Operations>> {
+        match &self.local_operations_json {
+            Some(json) => serde_json::from_str(json).map(Some).map_err(AppError::from),
+            None => Ok(None),
+        }
+    }
+
+    pub fn mask_options(&self) -> AppResult<serde_json::Value> {
+        match &self.mask_options_json {
+            Some(json) => serde_json::from_str(json).map_err(AppError::from),
+            None => Ok(serde_json::json!({})),
+        }
     }
 }
 
@@ -71,6 +91,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 whites: 0.0,
                 blacks: 0.0,
                 curves: crate::develop::ops::Curves::identity(),
+                ..Operations::identity()
             },
         ),
         (
@@ -97,6 +118,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                     [0.75, 0.82],
                     [1.0, 1.0],
                 ]),
+                ..Operations::identity()
             },
         ),
         (
@@ -117,6 +139,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 clarity: 28.0,
                 dehaze: 4.0,
                 curves: Curves::identity(),
+                ..Operations::identity()
             },
         ),
         (
@@ -137,6 +160,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 clarity: 20.0,
                 dehaze: 25.0,
                 curves: crate::develop::ops::Curves::identity(),
+                ..Operations::identity()
             },
         ),
         (
@@ -163,6 +187,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                     [0.75, 0.78],
                     [1.0, 1.0],
                 ]),
+                ..Operations::identity()
             },
         ),
         (
@@ -189,6 +214,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                     [0.75, 0.82],
                     [1.0, 1.0],
                 ]),
+                ..Operations::identity()
             },
         ),
         (
@@ -209,6 +235,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 clarity: 5.0,
                 dehaze: 0.0,
                 curves: crate::develop::ops::Curves::identity(),
+                ..Operations::identity()
             },
         ),
         (
@@ -229,6 +256,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 clarity: -36.0,
                 dehaze: -8.0,
                 curves: Curves::identity(),
+                ..Operations::identity()
             },
         ),
         (
@@ -255,6 +283,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                     [0.75, 0.78],
                     [1.0, 1.0],
                 ]),
+                ..Operations::identity()
             },
         ),
         (
@@ -281,6 +310,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                     [0.75, 0.8],
                     [1.0, 1.0],
                 ]),
+                ..Operations::identity()
             },
         ),
         (
@@ -307,6 +337,7 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                     [0.75, 0.75],
                     [1.0, 0.95],
                 ]),
+                ..Operations::identity()
             },
         ),
         (
@@ -327,9 +358,98 @@ pub fn builtin_presets() -> Vec<(&'static str, &'static str, &'static str, Opera
                 clarity: 25.0,
                 dehaze: 10.0,
                 curves: crate::develop::ops::Curves::identity(),
+                ..Operations::identity()
             },
         ),
     ]
+}
+
+fn adaptive_metadata(
+    name: &str,
+) -> (
+    &'static str,
+    Option<&'static str>,
+    serde_json::Value,
+    Option<Operations>,
+    Option<f64>,
+) {
+    match name {
+        "Portrait relight" => (
+            "mask",
+            Some("person"),
+            serde_json::json!({ "kind": "person", "regenerate": true }),
+            Some(Operations {
+                exposure: 0.35,
+                highlights: -25.0,
+                shadows: 35.0,
+                temp: 5.0,
+                ..Operations::identity()
+            }),
+            Some(0.55),
+        ),
+        "Clean up face" | "Skin smooth" => (
+            "mask",
+            Some("person"),
+            serde_json::json!({ "kind": "person", "region": "skin", "regenerate": true }),
+            Some(Operations {
+                clarity: -24.0,
+                contrast: -6.0,
+                highlights: -8.0,
+                ..Operations::identity()
+            }),
+            Some(0.55),
+        ),
+        "Eye pop" => (
+            "mask",
+            Some("person"),
+            serde_json::json!({ "kind": "person", "region": "eyes", "regenerate": true }),
+            Some(Operations {
+                clarity: 35.0,
+                contrast: 12.0,
+                vibrance: 12.0,
+                ..Operations::identity()
+            }),
+            Some(0.55),
+        ),
+        "Whiten teeth" => (
+            "mask",
+            Some("person"),
+            serde_json::json!({ "kind": "person", "region": "teeth", "regenerate": true }),
+            Some(Operations {
+                exposure: 0.12,
+                whites: 30.0,
+                temp: -12.0,
+                saturation: -22.0,
+                ..Operations::identity()
+            }),
+            Some(0.55),
+        ),
+        "Enhance sky" => (
+            "mask",
+            Some("sky"),
+            serde_json::json!({ "kind": "sky", "regenerate": true }),
+            Some(Operations {
+                highlights: -35.0,
+                dehaze: 30.0,
+                saturation: 12.0,
+                clarity: 18.0,
+                ..Operations::identity()
+            }),
+            Some(0.5),
+        ),
+        "Denoise low-light" => (
+            "mask",
+            Some("subject"),
+            serde_json::json!({ "kind": "subject", "feature": "denoise_subject", "regenerate": true }),
+            Some(Operations {
+                clarity: -40.0,
+                dehaze: -8.0,
+                ..Operations::identity()
+            }),
+            Some(0.5),
+        ),
+        _ => ("global", None, serde_json::json!({}), None, None),
+    }
 }
 
 /// Seed the `presets` table with built-ins. Idempotent — upsert by name.
@@ -337,13 +457,28 @@ pub async fn seed_builtins(pool: &SqlitePool) -> AppResult<()> {
     let now = chrono::Utc::now().to_rfc3339();
     for (name, group, desc, ops) in builtin_presets() {
         let ops_json = serde_json::to_string(&ops)?;
+        let (scope, mask_source, mask_options, local_ops, confidence_threshold) =
+            adaptive_metadata(name);
+        let mask_options_json = serde_json::to_string(&mask_options)?;
+        let local_operations_json = match local_ops {
+            Some(local_ops) => Some(serde_json::to_string(&local_ops)?),
+            None => None,
+        };
         sqlx::query(
-            "INSERT INTO presets (name, group_name, description, operations_json, is_system, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5) \
+            "INSERT INTO presets \
+             (name, group_name, description, operations_json, is_system, created_at, updated_at, \
+              scope, mask_source, mask_options_json, local_operations_json, fallback_operations_json, confidence_threshold) \
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5, ?6, ?7, ?8, ?9, ?4, ?10) \
              ON CONFLICT(name) DO UPDATE SET \
                group_name = excluded.group_name, \
                description = excluded.description, \
                operations_json = excluded.operations_json, \
+               scope = excluded.scope, \
+               mask_source = excluded.mask_source, \
+               mask_options_json = excluded.mask_options_json, \
+               local_operations_json = excluded.local_operations_json, \
+               fallback_operations_json = excluded.fallback_operations_json, \
+               confidence_threshold = excluded.confidence_threshold, \
                updated_at = excluded.updated_at",
         )
         .bind(name)
@@ -351,6 +486,11 @@ pub async fn seed_builtins(pool: &SqlitePool) -> AppResult<()> {
         .bind(desc)
         .bind(&ops_json)
         .bind(&now)
+        .bind(scope)
+        .bind(mask_source)
+        .bind(&mask_options_json)
+        .bind(&local_operations_json)
+        .bind(confidence_threshold)
         .execute(pool)
         .await?;
     }
@@ -362,7 +502,8 @@ pub async fn list(pool: &SqlitePool, group: Option<&str>) -> AppResult<Vec<Prese
     match group {
         Some(g) => sqlx::query_as::<_, Preset>(
             "SELECT id, name, group_name, description, operations_json, is_system, \
-                    created_at, updated_at \
+                    created_at, updated_at, scope, mask_source, mask_options_json, \
+                    local_operations_json, fallback_operations_json, confidence_threshold \
              FROM presets WHERE group_name = ?1 ORDER BY is_system DESC, name ASC",
         )
         .bind(g)
@@ -371,7 +512,8 @@ pub async fn list(pool: &SqlitePool, group: Option<&str>) -> AppResult<Vec<Prese
         .map_err(AppError::from),
         None => sqlx::query_as::<_, Preset>(
             "SELECT id, name, group_name, description, operations_json, is_system, \
-                    created_at, updated_at \
+                    created_at, updated_at, scope, mask_source, mask_options_json, \
+                    local_operations_json, fallback_operations_json, confidence_threshold \
              FROM presets ORDER BY is_system DESC, group_name ASC, name ASC",
         )
         .fetch_all(pool)
@@ -384,7 +526,8 @@ pub async fn list(pool: &SqlitePool, group: Option<&str>) -> AppResult<Vec<Prese
 pub async fn load(pool: &SqlitePool, preset_id: i64) -> AppResult<Preset> {
     sqlx::query_as::<_, Preset>(
         "SELECT id, name, group_name, description, operations_json, is_system, \
-                created_at, updated_at \
+                created_at, updated_at, scope, mask_source, mask_options_json, \
+                local_operations_json, fallback_operations_json, confidence_threshold \
          FROM presets WHERE id = ?1",
     )
     .bind(preset_id)
@@ -410,8 +553,9 @@ pub async fn save_user(
     let now = chrono::Utc::now().to_rfc3339();
     let ops_json = serde_json::to_string(ops)?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO presets (name, group_name, description, operations_json, is_system, created_at, updated_at) \
-         VALUES (?1, ?2, NULL, ?3, 0, ?4, ?4) RETURNING id",
+        "INSERT INTO presets \
+         (name, group_name, description, operations_json, is_system, created_at, updated_at, scope) \
+         VALUES (?1, ?2, NULL, ?3, 0, ?4, ?4, 'global') RETURNING id",
     )
     .bind(name)
     .bind(group)

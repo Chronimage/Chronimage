@@ -25,6 +25,7 @@ import {
   recycleSourceFilesAfterCopy,
 } from '../tauri/invoke';
 import { debug, warn } from '../util/log';
+import { clearPhotoScopedQueries, invalidateCatalogCollections } from './queryInvalidation';
 
 /**
  * Legacy shape kept only so older persisted `default_import_mode`
@@ -215,9 +216,7 @@ export function useImportProgressListener() {
     let cancelled = false;
 
     function refreshCatalog() {
-      qc.invalidateQueries({ queryKey: ['photos'] });
-      qc.invalidateQueries({ queryKey: ['albums'] });
-      qc.invalidateQueries({ queryKey: ['rediscovery'] });
+      invalidateCatalogCollections(qc);
     }
 
     (async () => {
@@ -241,9 +240,8 @@ export function useImportProgressListener() {
           // runs on the backend at this moment).
           if (!wasFinished && nowFinished) {
             lastInvalidateAt.current = now;
+            clearPhotoScopedQueries(qc);
             refreshCatalog();
-            qc.invalidateQueries({ queryKey: ['face-clusters'] });
-            qc.invalidateQueries({ queryKey: ['sources'] });
           }
         });
         if (cancelled) {

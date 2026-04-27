@@ -379,44 +379,14 @@ async fn execute_pipeline(
                 let thumb_sha = hash.clone();
                 let thumb_orientation = exif.orientation;
                 let thumb_task = tokio::task::spawn_blocking(move || -> AppResult<Option<f32>> {
-                    let thumbs_dir = crate::util::paths::thumbnails_dir()?;
-                    let cache_path = crate::ai::image_util::legacy_thumbnail_cache_path(
-                        &thumbs_dir,
-                        &thumb_sha,
-                        320,
-                    );
-                    let thumb_orientation = crate::ai::image_util::orientation_for_decoded_path(
+                    let result = crate::ai::image_util::write_thumbnail_cache_from_source(
                         &thumb_path,
+                        &thumb_sha,
                         thumb_orientation,
+                        320,
+                        false,
                     );
-                    // Always decode + compute sharpness; skip re-writing the
-                    // thumb file if it already exists.
-                    let img = crate::ai::image_util::open_any(&thumb_path)
-                        .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
-                    // Apply EXIF orientation BEFORE resizing so the cached
-                    // thumb lands in display-correct orientation.
-                    let img = crate::ai::image_util::apply_exif_orientation(img, thumb_orientation);
-
-                    // While we have the full-res decode in memory, also seed
-                    // the AI-preview cache. Subsequent AI/dedupe stages
-                    // (faces, siglip, nima, phash) read this JPEG instead of
-                    // re-decoding the source — critical for HEIC, where
-                    // every redecode goes through Microsoft's WIC HEVC codec
-                    // and is slow + flaky under concurrency.
-                    crate::ai::image_util::write_ai_preview_cache(&thumbs_dir, &thumb_sha, &img);
-
-                    let resized = img.thumbnail(320, 320);
-
-                    if !cache_path.exists() {
-                        let buf = crate::ai::image_util::encode_jpeg(&resized, 90)
-                            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
-                        let _ = std::fs::create_dir_all(&thumbs_dir);
-                        std::fs::write(&cache_path, &buf)?;
-                    }
-
-                    // Sharpness from the oriented, resized image.
-                    let sharpness = crate::ai::image_util::laplacian_variance(&resized);
-                    Ok(Some(sharpness))
+                    Ok(Some(result?.sharpness))
                 })
                 .await;
 

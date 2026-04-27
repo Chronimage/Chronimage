@@ -13,10 +13,9 @@
 | `.env.local` (GITHUB_TOKEN, GH_TOKEN, gphotos secret, onedrive secret) | ✅ configured | — |
 | Google Photos OAuth client | ✅ registered (default client id baked in) | — |
 | Google Photos upload scope (`photoslibrary.appendonly`) | ✅ implemented — re-auth on first upload | `gphotos_upload` command |
-| Loki dev log endpoint | 🟡 optional (auto-falls-back to localhost:3101) | dev observability only |
 | Microsoft Graph / OneDrive OAuth app | 🟡 scaffolded — requires Azure app registration | `onedrive_upload` command |
 | GitHub repository secrets (release workflows) | 🟡 partial | nightly/beta/stable/insider releases |
-| Windows EV code-signing cert | ⛔ not acquired | signed stable/beta MSIs (Phase 5 §4) |
+| Windows EV code-signing cert | ⛔ not acquired | signed stable/beta MSIs (Phase 6) |
 | LGPL THIRD_PARTY_LICENSES + rawler source mirror | ⛔ not done | Phase 5 release-prep — see §6.b |
 | Cloudflare R2 for model mirror | 🟡 token ref-ed by workflows, bucket TBD | release-time model upload |
 
@@ -46,7 +45,7 @@ CHRONIMAGE_GPHOTOS_CLIENT_SECRET=GOCSPX-your_secret
 CHRONIMAGE_ONEDRIVE_CLIENT_SECRET=your_azure_client_secret_here
 ```
 
-**Sister file:** `.env.local.example` is committed with placeholder values so a fresh clone can copy → edit → run.
+**Sister file:** `.env.example` is committed with placeholder values so a fresh clone can copy it to `.env.local`, edit, then run.
 
 ## 2. Google Photos OAuth
 
@@ -97,9 +96,9 @@ Referenced by workflows in [`.github/workflows/`](../.github/workflows/). Every 
 | `TAURI_UPDATER_PWD` | nightly, release-beta, release-stable | Password protecting the updater private key | ⛔ TBD |
 | `TAURI_UPDATER_PRIVATE_KEY_INSIDER` | insider | Separate key for the insider channel so a leaked stable key doesn't compromise insider builds | ⛔ TBD |
 | `TAURI_UPDATER_PWD_INSIDER` | insider | Password for insider key | ⛔ TBD |
-| `WINDOWS_SIGN_CERT_PFX_B` | release-beta, release-stable | Base64-encoded `.pfx` of the EV code-signing certificate. `base64 -w 0 < cert.pfx` | ⛔ TBD — EV cert not yet purchased |
+| `WINDOWS_SIGN_CERT_PFX_B64` | release-beta, release-stable, insider | Base64-encoded `.pfx` of the EV code-signing certificate. `base64 -w 0 < cert.pfx` | ⛔ TBD — EV cert not yet purchased |
 | `WINDOWS_SIGN_CERT_PWD` | release-beta, release-stable | `.pfx` file password | ⛔ TBD |
-| `WINDOWS_SIGN_CERT_NIGHTLY_PFX_B` | nightly | Self-signed cert for nightly (acceptable since nightly users accept the SmartScreen warning) | ⛔ TBD |
+| `WINDOWS_SIGN_CERT_NIGHTLY_PFX_B64` | nightly | Self-signed cert for nightly (acceptable since nightly users accept the SmartScreen warning) | ⛔ TBD |
 | `WINDOWS_SIGN_CERT_NIGHTLY_PWD` | nightly | Password for nightly self-signed cert | ⛔ TBD |
 | `CLOUDFLARE_API_TOKEN` | nightly, release-beta, release-stable, insider | Pushes release artifacts + updater manifest to Cloudflare R2 bucket `chronimage-releases`. Scopes: `Workers Scripts:Edit`, `Workers R2 Storage:Edit` | ⛔ TBD |
 | `CODECOV_TOKEN` | CI | Optional — coverage upload to codecov.io. Safe to omit until coverage gating on PRs matters | 🟡 optional |
@@ -115,20 +114,20 @@ Planned architecture (not yet implemented):
 - **API token** stored as `CLOUDFLARE_API_TOKEN` in repo secrets (see §4)
 - **Custom domain:** TBD — recommend `releases.chronimage.app` once the project has a domain
 
-**Status:** token referenced in four workflows but no actual `wrangler` or `aws s3 cp` invocation yet. Bucket + domain creation is a Phase 5 §2 task.
+**Status:** token referenced in four workflows but no actual `wrangler` or `aws s3 cp` invocation yet. Bucket + domain creation is a Phase 6 task.
 
 ## 6. Windows code-signing certificate — **not acquired**
 
 Required for stable + beta to install without SmartScreen warnings.
 
 - **EV cert vendor:** SSL.com or Sectigo (~\$300–500/year). Must be EV (extended validation) for immediate SmartScreen reputation — OV certs need a few hundred installs to earn trust
-- **Format:** `.pfx` with password, base64-encoded → `WINDOWS_SIGN_CERT_PFX_B` secret
+- **Format:** `.pfx` with password, base64-encoded → `WINDOWS_SIGN_CERT_PFX_B64` secret
 - **Timestamp server:** `http://timestamp.sectigo.com` or `http://timestamp.digicert.com` (already configured in `tauri.conf.json`)
 - **Nightly channel fallback:** self-signed cert is fine; users accept the warning for nightlies
 
-**Status:** ⛔ — Phase 5 §4 budget item.
+**Status:** ⛔ — Phase 6 budget item.
 
-### 6.b LGPL distribution obligation (Phase 5 release-prep)
+### 6.b LGPL distribution obligation (release prep)
 
 `rawler` (and any RAW decoder we'd realistically use — they all derive from libraw) is licensed LGPL-2.1. Allowed in `deny.toml`. Implications for distribution:
 
@@ -137,13 +136,12 @@ Required for stable + beta to install without SmartScreen warnings.
 
 Practically simplest for v1 stable: include a `THIRD_PARTY_LICENSES.txt` in the installer + a download link to rawler's source on the release page. This is what most LGPL-using Rust apps do (e.g. several Tauri apps using rawler).
 
-**Status:** ⛔ — defer to Phase 5 release pipeline. Not a v1 dev blocker.
+**Status:** ⛔ — defer to the release pipeline. Not a v1 dev blocker.
 
 ## 7. Optional dev-tool endpoints
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `LOKI_URL` | `http://localhost:3101` | Where the backend ships logs (Grafana Loki). Override to point at a remote or disable (`""`). Used by [`main.rs:35`](../src-tauri/src/main.rs#L35) |
 | `CHRONIMAGE_MODELS_DIR` | platform data dir | Override AI model download location. Useful for CI or shared-drive dev |
 | `CHRONIMAGE_BUNDLED_MODELS_DIR` | installer-resolved | Override bundled-model resolution (dev overrides for testing fallbacks) |
 | `CHRONIMAGE_THUMBNAILS_DIR` | platform data dir | Override thumbnail cache location |

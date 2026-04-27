@@ -1,5 +1,5 @@
 /**
- * StarRater — 5-star row bound to `photos.star_rating` (0..=5).
+ * StarRater — 5-star row bound to `photos.rating` (0..=5).
  * Click a star to set the rating; click the already-selected star to clear.
  * Keyboard `0`–`5` is wired at the DetailView level so it works without focus
  * on a specific star button.

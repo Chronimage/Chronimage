@@ -14,6 +14,13 @@ export async function ping(): Promise<string> {
   return tauriInvoke<string>('ping');
 }
 
+export async function frontendLog(
+  level: 'debug' | 'info' | 'warn' | 'error',
+  message: string,
+): Promise<void> {
+  return tauriInvoke<void>('frontend_log', { req: { level, message } });
+}
+
 export async function appVersion(): Promise<string> {
   return tauriInvoke<string>('app_version');
 }
@@ -86,8 +93,8 @@ export interface PhotoRow {
   orientation: number;
   /** Laplacian-variance sharpness score from Stage 2.6. */
   sharpness_score: number | null;
-  /** Phase 2 §1 — 0..=5 star rating set from the detail-view toolbar. */
-  star_rating: number;
+  /** Phase 2 §1 — 0..=5 rating set from the detail-view toolbar. */
+  rating: number;
   /** Phase 2 §2 — soft flag toggled via the detail-view `X` key. */
   is_flagged: boolean;
 }
@@ -311,29 +318,6 @@ export async function listIphoneDevices(): Promise<UsbDevice[]> {
 
 // ── AI commands ────────────────────────────────────────────────────────────
 
-export type HardwareTier = 'CpuOnly' | 'GpuLow' | 'GpuHigh';
-
-export interface HardwareInfo {
-  tier: HardwareTier;
-  vram_mb: number;
-  adapter_name: string;
-}
-
-/** Detect GPU tier + VRAM (Windows DXGI; stub on other platforms). */
-export async function detectHardware(): Promise<HardwareInfo> {
-  return tauriInvoke<HardwareInfo>('detect_hardware');
-}
-
-/** Embed an image via SigLIP-B/16. Returns 768-dim f32 array. Errors if model not downloaded. */
-export async function embedImage(path: string): Promise<number[]> {
-  return tauriInvoke<number[]>('embed_image', { path });
-}
-
-/** Score a photo 0–10 for aesthetic quality via NIMA. Errors if model not downloaded. */
-export async function scoreAesthetic(path: string): Promise<number> {
-  return tauriInvoke<number>('score_aesthetic', { path });
-}
-
 /** Download AI models to the local models directory.
  *  Pass `names` to download a subset; omit for all known models.
  *  Progress is emitted as `DOWNLOAD_PROGRESS_EVENT` Tauri events.
@@ -445,6 +429,15 @@ export async function listTags(photoId: number): Promise<TagRow[]> {
   return tauriInvoke<TagRow[]>('list_tags', { photoId });
 }
 
+/**
+ * Generate SigLIP zero-shot tags for a photo using its stored image embedding.
+ * Returns the refreshed tag list. If embeddings/models are unavailable, the
+ * backend returns the existing tags unchanged.
+ */
+export async function generateAiTags(photoId: number): Promise<TagRow[]> {
+  return tauriInvoke<TagRow[]>('generate_ai_tags', { photoId });
+}
+
 export interface PhotoQuality {
   aesthetic: number | null;
   sharpness: number | null;
@@ -548,6 +541,20 @@ export interface ClusterRow {
   coverPhotoId: number | null;
 }
 
+export interface PhotoFaceRow {
+  id: number;
+  photoId: number;
+  clusterId: number | null;
+  bboxX: number;
+  bboxY: number;
+  bboxW: number;
+  bboxH: number;
+  quality: number;
+  eyesOpen: number | null;
+  clusterName: string | null;
+  isNamed: boolean;
+}
+
 export async function faceClustersList(limit = 60): Promise<ClusterRow[]> {
   return tauriInvoke<ClusterRow[]>('face_clusters_list', { limit });
 }
@@ -558,6 +565,22 @@ export async function faceClusterName(clusterId: number, name: string): Promise<
 
 export async function faceClusterMerge(a: number, b: number): Promise<number> {
   return tauriInvoke<number>('face_cluster_merge', { a, b });
+}
+
+export async function listFacesForPhoto(photoId: number): Promise<PhotoFaceRow[]> {
+  return tauriInvoke<PhotoFaceRow[]>('list_faces_for_photo', { photoId });
+}
+
+export async function faceAssignCluster(faceId: number, clusterId: number): Promise<void> {
+  return tauriInvoke<void>('face_assign_cluster', { faceId, clusterId });
+}
+
+export async function faceCreatePersonFromFace(faceId: number, name: string): Promise<number> {
+  return tauriInvoke<number>('face_create_person_from_face', { faceId, name });
+}
+
+export async function faceUnassign(faceId: number): Promise<void> {
+  return tauriInvoke<void>('face_unassign', { faceId });
 }
 
 // ── AI Models status ────────────────────────────────────────────────────────
@@ -1101,6 +1124,23 @@ export interface DevelopOperations {
   saturation: number;
   clarity: number;
   dehaze: number;
+  crop_x?: number;
+  crop_y?: number;
+  crop_w?: number;
+  crop_h?: number;
+  rotation?: number;
+  straighten?: number;
+  transform_h?: number;
+  transform_v?: number;
+  lens_distortion?: number;
+  lens_vignette?: number;
+  chromatic_aberration?: number;
+  spot_heal_count?: number;
+  lens_blur_amount?: number;
+  lens_blur_focus_near?: number;
+  lens_blur_focus_far?: number;
+  lens_blur_bokeh_boost?: number;
+  lens_blur_cat_eye?: number;
   curves: DevelopCurves;
 }
 
@@ -1118,6 +1158,23 @@ export function identityOperations(): DevelopOperations {
     saturation: 0,
     clarity: 0,
     dehaze: 0,
+    crop_x: 0,
+    crop_y: 0,
+    crop_w: 1,
+    crop_h: 1,
+    rotation: 0,
+    straighten: 0,
+    transform_h: 0,
+    transform_v: 0,
+    lens_distortion: 0,
+    lens_vignette: 0,
+    chromatic_aberration: 0,
+    spot_heal_count: 0,
+    lens_blur_amount: 0,
+    lens_blur_focus_near: 0,
+    lens_blur_focus_far: 1,
+    lens_blur_bokeh_boost: 0,
+    lens_blur_cat_eye: 0,
     curves: identityCurves(),
   };
 }
@@ -1139,6 +1196,16 @@ export interface PastedReceipt {
   skipped: number[];
 }
 
+export interface DevelopHistoryRow {
+  id: number;
+  photo_id: number;
+  parent_edit_id: number | null;
+  operations_json: string;
+  saved_at: string;
+  is_snapshot: boolean;
+  label: string | null;
+}
+
 export interface DevelopPreset {
   id: number;
   name: string;
@@ -1148,6 +1215,78 @@ export interface DevelopPreset {
   is_system: boolean;
   created_at: string;
   updated_at: string;
+  scope: 'global' | 'mask';
+  mask_source: string | null;
+  mask_options_json: string | null;
+  local_operations_json: string | null;
+  fallback_operations_json: string | null;
+  confidence_threshold: number | null;
+}
+
+export interface DevelopMask {
+  id: number;
+  photo_id: number;
+  edit_id: number | null;
+  name: string;
+  source: string;
+  mode: string;
+  visible: boolean;
+  order_index: number;
+  payload_storage: 'inline' | 'file';
+  mask_payload: string;
+  operations_json: string;
+  confidence: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DevelopMaskCreateRequest {
+  photo_id: number;
+  edit_id?: number | null;
+  name?: string | null;
+  source: string;
+  mode?: string | null;
+  visible?: boolean | null;
+  order_index?: number | null;
+  payload_storage?: 'inline' | 'file' | null;
+  mask_payload: unknown;
+  operations: DevelopOperations;
+  confidence?: number | null;
+}
+
+export interface DevelopMaskUpdateRequest {
+  mask_id: number;
+  name?: string | null;
+  source?: string | null;
+  mode?: string | null;
+  visible?: boolean | null;
+  order_index?: number | null;
+  payload_storage?: 'inline' | 'file' | null;
+  mask_payload?: unknown;
+  operations?: DevelopOperations | null;
+  confidence?: number | null;
+}
+
+export interface AiEditRow {
+  id: number;
+  photo_id: number;
+  feature: string;
+  model_id: string;
+  source_edit_hash: string;
+  output_path: string | null;
+  output_b64: string | null;
+  state: 'current' | 'stale' | 'running' | 'failed';
+  params_json: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AiEditRefreshReceipt {
+  photo_id: number;
+  feature: string;
+  source_edit_hash: string;
+  state: string;
 }
 
 export async function developOpen(photoId: number): Promise<DevelopOpenResponse> {
@@ -1168,6 +1307,22 @@ export async function developSave(
     operations,
     label: label ?? null,
   });
+}
+
+export async function developSnapshotSave(
+  photoId: number,
+  operations: DevelopOperations,
+  label?: string,
+): Promise<number> {
+  return tauriInvoke<number>('develop_snapshot_save', {
+    photoId,
+    operations,
+    label: label ?? null,
+  });
+}
+
+export async function developHistoryList(photoId: number): Promise<DevelopHistoryRow[]> {
+  return tauriInvoke<DevelopHistoryRow[]>('develop_history_list', { photoId });
 }
 
 export async function developReset(photoId: number): Promise<number> {
@@ -1193,6 +1348,14 @@ export async function developPresetApply(
   return tauriInvoke<RenderReceipt>('develop_preset_apply', { photoId, presetId, strength });
 }
 
+export async function developAdaptivePresetApply(
+  photoId: number,
+  presetId: number,
+  strength: number,
+): Promise<RenderReceipt> {
+  return tauriInvoke<RenderReceipt>('develop_adaptive_preset_apply', { photoId, presetId, strength });
+}
+
 export async function presetsList(group?: string): Promise<DevelopPreset[]> {
   return tauriInvoke<DevelopPreset[]>('presets_list', { group: group ?? null });
 }
@@ -1203,6 +1366,37 @@ export async function presetSave(
   operations: DevelopOperations,
 ): Promise<number> {
   return tauriInvoke<number>('preset_save', { name, group, operations });
+}
+
+export async function developMasksList(photoId: number): Promise<DevelopMask[]> {
+  return tauriInvoke<DevelopMask[]>('develop_masks_list', { photoId });
+}
+
+export async function developMaskCreate(req: DevelopMaskCreateRequest): Promise<number> {
+  return tauriInvoke<number>('develop_mask_create', { req });
+}
+
+export async function developMaskUpdate(req: DevelopMaskUpdateRequest): Promise<DevelopMask> {
+  return tauriInvoke<DevelopMask>('develop_mask_update', { req });
+}
+
+export async function developMaskDelete(maskId: number): Promise<number> {
+  return tauriInvoke<number>('develop_mask_delete', { maskId });
+}
+
+export async function developMaskApplyPreview(
+  photoId: number,
+  operations: DevelopOperations,
+): Promise<RenderReceipt> {
+  return tauriInvoke<RenderReceipt>('develop_mask_apply_preview', { photoId, operations });
+}
+
+export async function aiEditStatus(photoId: number): Promise<AiEditRow[]> {
+  return tauriInvoke<AiEditRow[]>('ai_edit_status', { photoId });
+}
+
+export async function aiEditRefresh(photoId: number, feature: string): Promise<AiEditRefreshReceipt> {
+  return tauriInvoke<AiEditRefreshReceipt>('ai_edit_refresh', { photoId, feature });
 }
 
 export async function onedriveUpload(photoIds: number[], remoteFolder: string): Promise<UploadReceipt> {

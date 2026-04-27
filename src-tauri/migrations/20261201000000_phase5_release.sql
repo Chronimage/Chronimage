@@ -25,6 +25,3 @@ INSERT OR IGNORE INTO license_state(id, plan) VALUES (1, 'community');
 -- the user flips this explicitly via the first-run dialog or Settings.
 INSERT OR IGNORE INTO settings(key, value, updated_at)
 VALUES ('telemetry.enabled', '0', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '8', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

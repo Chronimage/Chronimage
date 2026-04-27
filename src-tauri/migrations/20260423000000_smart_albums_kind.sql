@@ -15,7 +15,3 @@
 ALTER TABLE smart_albums ADD COLUMN kind TEXT;  -- NULL | 'rediscovery_today'
 
 CREATE INDEX IF NOT EXISTS idx_smart_albums_kind ON smart_albums(kind) WHERE kind IS NOT NULL;
-
--- Schema version bump
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '4', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

@@ -170,6 +170,7 @@ libheif-rs = { version = "2", optional = true }
 # higher-quality JPEG encoding (better size/quality tradeoff vs. the image
 # crate's built-in encoder).
 mozjpeg = { version = "0.10", optional = true }
+tracing-appender = "0.2.5"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.6"

@@ -89,38 +89,6 @@ export function CullBinSidePanel() {
         </span>
         . Nothing leaves your disk without confirmation.
       </div>
-
-      <div
-        style={{
-          marginTop: 'auto',
-          padding: 12,
-          borderTop: '1px solid var(--stroke)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 6,
-        }}
-      >
-        <button
-          type="button"
-          className="btn phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · Cull Bin restore"
-          style={{ width: '100%', justifyContent: 'center' }}
-        >
-          Restore all to catalog
-        </button>
-        <button
-          type="button"
-          className="btn danger phase-gated"
-          disabled
-          aria-disabled="true"
-          title="Coming in Phase 2 · Cull Bin empty"
-          style={{ width: '100%', justifyContent: 'center' }}
-        >
-          <Icon name="reject" size={13} /> Empty bin permanently
-        </button>
-      </div>
     </div>
   );
 }

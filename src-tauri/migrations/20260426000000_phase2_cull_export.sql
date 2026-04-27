@@ -2,7 +2,7 @@
 -- Phase: 2 — Cull + Cull Bin + Export
 --
 -- Adds:
---   1. `photos.star_rating` (0..5) for the detail-view Rate action (phase-2 §1)
+--   1. `photos.rating` (0..5) for the detail-view Rate action (phase-2 §1)
 --   2. `photos.is_flagged` shortcut (phase-2 §2 Flag button from detail view)
 --   3. `cull_bin` — rejected photos pending permanent delete (phase-2 §3/§4)
 --   4. `export_jobs` + `export_job_items` — persisted export queue (phase-2 §5/§6)
@@ -10,10 +10,10 @@
 -- Forward-only. Do NOT edit once merged.
 -- sqlx wraps each migration in its own transaction; no BEGIN/COMMIT here.
 
--- ── photos: star_rating + is_flagged ────────────────────────────────────────
+-- ── photos: rating + is_flagged ─────────────────────────────────────────────
 
-ALTER TABLE photos ADD COLUMN star_rating INTEGER NOT NULL DEFAULT 0
-    CHECK (star_rating BETWEEN 0 AND 5);
+ALTER TABLE photos ADD COLUMN rating INTEGER NOT NULL DEFAULT 0
+    CHECK (rating BETWEEN 0 AND 5);
 
 ALTER TABLE photos ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0
     CHECK (is_flagged IN (0, 1));
@@ -21,8 +21,8 @@ ALTER TABLE photos ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0
 ALTER TABLE photos ADD COLUMN flagged_at TEXT;   -- RFC3339 when flagged, NULL otherwise
 
 -- Partial indexes: scans over the (rare) non-zero rows only.
-CREATE INDEX IF NOT EXISTS idx_photos_star_rating
-    ON photos(star_rating) WHERE star_rating > 0;
+CREATE INDEX IF NOT EXISTS idx_photos_rating
+    ON photos(rating) WHERE rating > 0;
 CREATE INDEX IF NOT EXISTS idx_photos_is_flagged
     ON photos(is_flagged) WHERE is_flagged = 1;
 
@@ -77,7 +77,3 @@ CREATE TABLE IF NOT EXISTS export_job_items (
 
 CREATE INDEX IF NOT EXISTS idx_export_job_items_job    ON export_job_items(job_id);
 CREATE INDEX IF NOT EXISTS idx_export_job_items_status ON export_job_items(status);
-
--- Bump schema_version to reflect phase-2 tables.
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '3', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

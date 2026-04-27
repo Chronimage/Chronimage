@@ -17,7 +17,7 @@ Three tracks that were originally Phase-2 backlog items but shipped during the w
 - **Two-scope deletion infrastructure** — explicit "Remove from catalog" vs "Move files to Recycle Bin" flows with confirmation modals, dry-run preview counts, `trash` crate routing, and transactional FK-cascade. Covers source-disconnect, bulk-photo-remove, and orphan-recycle. See [ADR 0006](../adr/0006-explicit-scope-deletion.md). **Remove Phase-2-backlog items that covered the same ground** (source-cleanup confirmation modal, on-disk delete route) — they're done.
 - **FTS5 delete trigger fix** — Phase-1 migration had a dormant bug (`DELETE FROM photos_fts` on a contentless FTS5 table); no Phase-1 code ever tripped it because `DELETE FROM photos` was never exercised. Fixed by migration `20260425000000` + app-level contentless-FTS5 cleanup before every photo delete. See [ADR 0006](../adr/0006-explicit-scope-deletion.md) §FTS5.
 - **Mock smart-album cleanup** — `SYSTEM_ALBUMS` seed list trimmed from 12 personalised design placeholders (`Kids — Ari & Leo`, `Milo (golden retriever)`, `Japan · Autumn '25`, etc.) to 2 rule-based (`Night & Low Light`, `Out-of-focus`). Migration `20260425000001` removes the 10 mock albums from existing databases, gated on `is_system = 1`.
-- **Debug tooling** — new `debug-import` skill ([.claude/commands/debug-import.md](../../.claude/commands/debug-import.md)) + `scripts/debug-import.sh` + integration test at `src-tauri/tests/debug_import.rs` drive the real pipeline against a folder and pull per-stage timings from Loki. Replaces the Playwright-over-tauri-driver path (which isn't installed on dev).
+- **Debug tooling** — new `debug-import` skill ([.claude/commands/debug-import.md](../../.claude/commands/debug-import.md)) + `scripts/debug-import.sh` + integration test at `src-tauri/tests/debug_import.rs` drive the real pipeline against a folder and inspect per-stage timings from stdout/file logs. Replaces the Playwright-over-tauri-driver path (which isn't installed on dev).
 
 These items are **out of scope for the rest of the Phase 2 backlog below** — they're listed here so the scope map stays honest.
 
@@ -42,7 +42,7 @@ These items are **out of scope for the rest of the Phase 2 backlog below** — t
 - [x] Issue filters: Near-duplicates · Out of focus · Eyes closed · Over/under exposed · Screenshots · Low-res/web (sidebar chips toggle state; real server-side filtering of the pair queue lands once `list_cull_pairs` backend command ships)
 - [x] Session summary card: kept / rejected / time remaining / estimated minutes left
 - [x] "Review rejects before deleting" exit action that routes to Cull Bin
-- [x] **Rate 1–5 stars from the catalog detail view** — `StarRater` primitive + keys `1`–`5` (0 to clear); persists to `photos.star_rating`
+- [x] **Rate 1–5 stars from the catalog detail view** — `StarRater` primitive + keys `1`–`5` (0 to clear); persists to `photos.rating`
 
 ### 2. Cull verdict engine (Rust)
 - [x] `src-tauri/src/cull/verdict.rs` — `apply_verdict(photo_id, verdict)` where `verdict ∈ { Keep, RejectA, RejectB, RejectBoth, Skip }`
@@ -181,10 +181,6 @@ CREATE TABLE IF NOT EXISTS export_job_items (
 
 CREATE INDEX IF NOT EXISTS idx_export_job_items_job ON export_job_items(job_id);
 CREATE INDEX IF NOT EXISTS idx_export_job_items_status ON export_job_items(status);
-
--- Bump schema_version → 3.
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '3', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 ```
 
 ## API surface (new commands)

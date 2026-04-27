@@ -11,6 +11,3 @@
 ALTER TABLE photos ADD COLUMN place_label TEXT;
 CREATE INDEX IF NOT EXISTS idx_photos_place_label
     ON photos(place_label) WHERE place_label IS NOT NULL;
-
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '7', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));

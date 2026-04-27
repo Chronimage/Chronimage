@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { loadPersisted, savePersisted } from '../util/store';
 
-export type ScreenId = 'catalog' | 'cull' | 'cullbin' | 'develop' | 'map' | 'people' | 'settings';
+export type ScreenId = 'catalog' | 'cull' | 'develop' | 'map' | 'people' | 'settings';
 
 export interface Screen {
   id: ScreenId;
@@ -11,7 +11,6 @@ export interface Screen {
 export const SCREENS: Record<ScreenId, Screen> = {
   catalog: { id: 'catalog', label: 'Catalog' },
   cull: { id: 'cull', label: 'Cull' },
-  cullbin: { id: 'cullbin', label: 'Cull Bin' },
   develop: { id: 'develop', label: 'Develop' },
   map: { id: 'map', label: 'Map' },
   people: { id: 'people', label: 'People' },

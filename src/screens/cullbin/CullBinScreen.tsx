@@ -54,9 +54,10 @@ function fmtAge(iso: string): string {
 
 export interface CullBinScreenProps {
   filter?: CullBinFilter;
+  embedded?: boolean;
 }
 
-export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
+export function CullBinScreen({ filter, embedded = false }: CullBinScreenProps = {}) {
   const { data: rows = [], isLoading } = useCullBin(filter);
   const { data: _summary } = useCullBinSummary();
   const restore = useCullBinRestore();
@@ -105,53 +106,51 @@ export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
   }, [rows, deleteForever]);
 
   if (isLoading) {
-    return (
-      <div className="canvas">
-        <div style={{ padding: 40, color: 'var(--fg-mute)', fontSize: 13 }}>Loading cull bin…</div>
-      </div>
+    const content = (
+      <div style={{ padding: 40, color: 'var(--fg-mute)', fontSize: 13 }}>Loading rejected photos…</div>
     );
+    return embedded ? content : <div className="canvas">{content}</div>;
   }
 
   if (rows.length === 0) {
-    return (
-      <div className="canvas">
-        <div
-          style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 14,
-            padding: 48,
-            textAlign: 'center',
-          }}
-        >
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', letterSpacing: '0.1em' }}>
-            CULL BIN · EMPTY
-          </div>
-          <h1 className="page-title">
-            Nothing rejected
-            <em>.</em>
-          </h1>
-          <p style={{ maxWidth: 540, color: 'var(--fg-dim)', fontSize: 13, lineHeight: 1.5 }}>
-            When you reject a photo from the Cull screen or tap Flag in the detail view, it lands here for 30
-            days before permanent deletion. No data loss possible until you explicitly empty the bin.
-          </p>
+    const content = (
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 14,
+          padding: 48,
+          textAlign: 'center',
+        }}
+      >
+        <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', letterSpacing: '0.1em' }}>
+          REJECTED · EMPTY
         </div>
+        <h1 className="page-title">
+          Nothing rejected
+          <em>.</em>
+        </h1>
+        <p style={{ maxWidth: 540, color: 'var(--fg-dim)', fontSize: 13, lineHeight: 1.5 }}>
+          Rejected photos stay recoverable here before permanent deletion. Review them from this Cull workflow
+          before you empty anything.
+        </p>
       </div>
     );
+    return embedded ? content : <div className="canvas">{content}</div>;
   }
 
-  return (
-    <div className="canvas">
+  const content = (
+    <>
       <div className="toolbar">
         <div>
           <div className="mono" style={{ fontSize: 11, color: 'var(--fg-mute)', letterSpacing: '0.08em' }}>
-            CULL BIN · RECOVERABLE
+            CULL · REJECTED
           </div>
           <div style={{ fontSize: 14, marginTop: 2 }}>
-            {rows.length} items · {totalGb} GB · kept until you confirm
+            {rows.length} recoverable items · {totalGb} GB · kept until you confirm
           </div>
         </div>
         <div style={{ flex: 1 }} />
@@ -205,14 +204,7 @@ export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
           const isSel = selected.has(row.photo_id);
           const sizeMb = row.size_bytes != null ? (row.size_bytes / 1024 / 1024).toFixed(1) : '—';
           return (
-            <button
-              key={row.photo_id}
-              type="button"
-              className="cullbin-row"
-              onClick={() => toggleSelect(row.photo_id)}
-              aria-pressed={isSel}
-              data-selected={isSel}
-            >
+            <div key={row.photo_id} className="cullbin-row" data-selected={isSel}>
               <div style={{ width: 80, height: 60, flexShrink: 0, position: 'relative' }}>
                 <Thumbnail
                   photoId={row.photo_id}
@@ -266,6 +258,15 @@ export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
                   type="button"
                   className="btn"
                   style={{ fontSize: 11.5 }}
+                  onClick={() => toggleSelect(row.photo_id)}
+                  aria-pressed={isSel}
+                >
+                  {isSel ? 'Selected' : 'Select'}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ fontSize: 11.5 }}
                   onClick={(e) => {
                     e.stopPropagation();
                     restore.mutate([row.photo_id]);
@@ -287,7 +288,7 @@ export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
                   Delete
                 </button>
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -311,6 +312,8 @@ export function CullBinScreen({ filter }: CullBinScreenProps = {}) {
         onConfirm={onDeleteSelected}
         onCancel={() => setConfirmDeleteSelected(false)}
       />
-    </div>
+    </>
   );
+
+  return embedded ? content : <div className="canvas">{content}</div>;
 }

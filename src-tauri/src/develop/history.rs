@@ -64,6 +64,25 @@ pub async fn save(
     ops: &Operations,
     label: Option<String>,
 ) -> AppResult<i64> {
+    save_with_snapshot_flag(pool, photo_id, ops, label, false).await
+}
+
+pub async fn save_snapshot(
+    pool: &SqlitePool,
+    photo_id: i64,
+    ops: &Operations,
+    label: Option<String>,
+) -> AppResult<i64> {
+    save_with_snapshot_flag(pool, photo_id, ops, label, true).await
+}
+
+async fn save_with_snapshot_flag(
+    pool: &SqlitePool,
+    photo_id: i64,
+    ops: &Operations,
+    label: Option<String>,
+    is_snapshot: bool,
+) -> AppResult<i64> {
     // Validate photo exists.
     let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM photos WHERE id = ?1")
         .bind(photo_id)
@@ -86,12 +105,13 @@ pub async fn save(
     let mut tx = pool.begin().await?;
     let new_id: i64 = sqlx::query_scalar(
         "INSERT INTO edits (photo_id, parent_edit_id, operations_json, saved_at, is_snapshot, label) \
-         VALUES (?1, ?2, ?3, ?4, 0, ?5) RETURNING id",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
     )
     .bind(photo_id)
     .bind(parent_id)
     .bind(&ops_json)
     .bind(&now)
+    .bind(is_snapshot)
     .bind(label)
     .fetch_one(&mut *tx)
     .await?;

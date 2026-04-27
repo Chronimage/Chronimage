@@ -50,17 +50,9 @@ pnpm tauri dev
 
 Full onboarding: [`CLAUDE.md`](./CLAUDE.md) (agent-readable) — humans can read it too.
 
-### Local observability (optional)
+### Local logs
 
-A Loki + Grafana stack under `docker/` captures tracing events from both the Rust backend and the React frontend during `pnpm tauri dev`. Start it with:
-
-```bash
-docker compose up -d
-# Grafana: http://localhost:3001  (anonymous admin, explore → Loki)
-# Loki:    http://localhost:3101
-```
-
-`src-tauri/src/main.rs::install_tracing` ships log lines to Loki only in debug builds; production installs never touch this stack. Stop it with `docker compose down` when you don't need it.
+Chronimage writes backend and frontend logs to rolling local files under the app data directory (`%LOCALAPPDATA%\app.chronimage.desktop\logs` on Windows). Dev builds also mirror logs to the terminal for convenience; no log shipping service is required.
 
 ## Release channels
 

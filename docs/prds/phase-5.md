@@ -99,12 +99,9 @@ CREATE TABLE IF NOT EXISTS license_state (
 );
 
 INSERT OR IGNORE INTO license_state(id, plan) VALUES (1, 'community');
-
-INSERT OR REPLACE INTO settings(key, value, updated_at)
-VALUES ('schema_version', '8', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 ```
 
-> Note: the actual shipped migration bumps `schema_version` to **8** (not 6 as drafted), since Phases 3 / 4 landed more schema changes between drafting and shipping Phase 5.
+> Note: sqlx migration metadata is the schema source of truth; the old `settings.schema_version` breadcrumb was removed during the reset cleanup.
 
 ## API surface (shipped commands)
 

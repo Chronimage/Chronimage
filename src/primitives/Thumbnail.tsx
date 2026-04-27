@@ -4,7 +4,6 @@
  * the thumbnail is unavailable (missing local copy, unsupported format, etc.).
  */
 
-import { useEffect, useRef } from 'react';
 import { useThumbnailUrl } from '../state/queries';
 import { Placeholder, type PlaceholderProps } from './Placeholder';
 
@@ -12,23 +11,33 @@ export interface ThumbnailProps extends PlaceholderProps {
   photoId: number;
   sizePx?: number;
   alt?: string;
+  fit?: 'cover' | 'contain';
 }
 
-export function Thumbnail({ photoId, sizePx = 480, alt, ...placeholderProps }: ThumbnailProps) {
-  const { data: url } = useThumbnailUrl(photoId, sizePx);
+const THUMBNAIL_SIZE_BUCKETS = [160, 240, 320, 480, 640, 960, 1280] as const;
 
-  // Revoke the *previous* blob URL only when the URL changes — not on unmount.
-  // Revoking on unmount would invalidate the string still held in React Query's
-  // cache; if the component re-mounts before gcTime expires the cached URL is
-  // dead and the image silently fails.
-  const prevUrlRef = useRef<string | null | undefined>(undefined);
-  useEffect(() => {
-    const prev = prevUrlRef.current;
-    prevUrlRef.current = url;
-    if (prev && prev !== url) {
-      URL.revokeObjectURL(prev);
-    }
-  }, [url]);
+export function thumbnailSizeForCssBox(
+  widthPx: number,
+  heightPx = widthPx,
+  options: { maxPx?: number; minPx?: number; dpr?: number } = {},
+) {
+  const dpr =
+    options.dpr ??
+    (typeof window === 'undefined' ? 1 : Math.min(2, Math.max(1, window.devicePixelRatio || 1)));
+  const target = Math.max(options.minPx ?? 160, Math.ceil(Math.max(widthPx, heightPx) * dpr));
+  const maxPx = options.maxPx ?? 960;
+  const buckets = THUMBNAIL_SIZE_BUCKETS.filter((bucket) => bucket <= maxPx);
+  return buckets.find((bucket) => bucket >= target) ?? buckets.at(-1) ?? 320;
+}
+
+export function Thumbnail({
+  photoId,
+  sizePx = 320,
+  alt,
+  fit = 'cover',
+  ...placeholderProps
+}: ThumbnailProps) {
+  const { data: url } = useThumbnailUrl(photoId, sizePx);
 
   if (!url) {
     return <Placeholder {...placeholderProps} />;
@@ -47,7 +56,7 @@ export function Thumbnail({ photoId, sizePx = 480, alt, ...placeholderProps }: T
           inset: 0,
           width: '100%',
           height: '100%',
-          objectFit: 'cover',
+          objectFit: fit,
           display: 'block',
         }}
       />
