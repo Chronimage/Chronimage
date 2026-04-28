@@ -87,10 +87,173 @@ pub struct Operations {
     pub lens_blur_bokeh_boost: f32,
     #[serde(default)]
     pub lens_blur_cat_eye: f32,
+    /// Mid-frequency local-contrast slider, distinct from `clarity` which
+    /// works on a smaller scale. -100..100; matches Lightroom Texture.
+    #[serde(default)]
+    pub texture: f32,
+    /// Capture sharpening (post-decode). All fields zero is a no-op.
+    #[serde(default)]
+    pub sharpening: Sharpening,
+    /// Procedural luma grain. Identity is amount=0.
+    #[serde(default)]
+    pub grain: Grain,
+    /// Per-hue-band Hue / Saturation / Luminance offsets — Lightroom's
+    /// "Color Mixer" panel. Eight bands centered at red/orange/yellow/
+    /// green/aqua/blue/purple/magenta.
+    #[serde(default)]
+    pub color_mixer: ColorMixer,
+    /// 3-zone tone-weighted hue/saturation/luminance shifts — Lightroom's
+    /// "Color Grading" panel. Identity is every wheel + the global wheel
+    /// at saturation=0 (hue is then irrelevant) and balance=0.
+    #[serde(default)]
+    pub color_grading: ColorGrading,
+    /// Defringe (chromatic aberration cleanup) — purple + green channels
+    /// independently, each with an amount and hue-band range.
+    #[serde(default)]
+    pub defringe: Defringe,
     /// Tone curves — master RGB + per-channel R/G/B + luma. Default is
     /// identity on every channel (no-op). See module doc.
     #[serde(default)]
     pub curves: Curves,
+}
+
+/// Capture sharpening parameters (Lightroom's Detail panel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Sharpening {
+    /// 0..150 (Lightroom uses 0..150). 0 = off.
+    #[serde(default)]
+    pub amount: f32,
+    /// Gaussian radius in px. Lightroom range 0.5..3.0; default 1.0.
+    #[serde(default)]
+    pub radius: f32,
+    /// 0..100. Higher = sharpens fine details, lower = sharpens edges.
+    #[serde(default)]
+    pub detail: f32,
+    /// 0..100. Edge mask threshold — gates sharpening to high-contrast
+    /// regions, leaving smooth tonal areas (skin, sky) unsharpened.
+    #[serde(default)]
+    pub masking: f32,
+}
+
+/// Procedural luma grain (Lightroom's Effects panel).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Grain {
+    /// 0..100. 0 = off.
+    #[serde(default)]
+    pub amount: f32,
+    /// 0..100. Larger size = chunkier grain.
+    #[serde(default)]
+    pub size: f32,
+    /// 0..100. Variance of the grain pattern.
+    #[serde(default)]
+    pub roughness: f32,
+}
+
+/// Per-pixel HSL offsets for one Color Mixer band.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct HslAdjust {
+    /// -100..100, mapped to ±30° hue shift inside the band.
+    #[serde(default)]
+    pub hue: f32,
+    /// -100..100. Negative desaturates, positive boosts.
+    #[serde(default)]
+    pub saturation: f32,
+    /// -100..100. Lightens or darkens the band.
+    #[serde(default)]
+    pub luminance: f32,
+}
+
+/// 8-band Color Mixer — the colors are fixed at the standard Lightroom
+/// hue centers (every 45°): red 0°, orange 30°, yellow 60°, green 120°,
+/// aqua 180°, blue 240°, purple 270°, magenta 300°.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ColorMixer {
+    #[serde(default)]
+    pub red: HslAdjust,
+    #[serde(default)]
+    pub orange: HslAdjust,
+    #[serde(default)]
+    pub yellow: HslAdjust,
+    #[serde(default)]
+    pub green: HslAdjust,
+    #[serde(default)]
+    pub aqua: HslAdjust,
+    #[serde(default)]
+    pub blue: HslAdjust,
+    #[serde(default)]
+    pub purple: HslAdjust,
+    #[serde(default)]
+    pub magenta: HslAdjust,
+}
+
+/// Hue/Sat/Luminance wheel for one Color Grading zone.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct HslWheel {
+    /// 0..360. Irrelevant when saturation = 0.
+    #[serde(default)]
+    pub hue: f32,
+    /// 0..100. 0 = neutral (no tint).
+    #[serde(default)]
+    pub saturation: f32,
+    /// -100..100. Lightens or darkens the zone.
+    #[serde(default)]
+    pub luminance: f32,
+}
+
+/// 3-zone Color Grading: shadows / midtones / highlights, plus a global
+/// wheel applied across the whole image. `blending` controls how much
+/// adjacent zones overlap; `balance` shifts the luminance threshold
+/// between shadows and highlights.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorGrading {
+    #[serde(default)]
+    pub shadows: HslWheel,
+    #[serde(default)]
+    pub midtones: HslWheel,
+    #[serde(default)]
+    pub highlights: HslWheel,
+    #[serde(default)]
+    pub global: HslWheel,
+    /// 0..100; identity when 50 (default — overlap matches Lightroom).
+    #[serde(default = "default_blending")]
+    pub blending: f32,
+    /// -100..100. Identity = 0.
+    #[serde(default)]
+    pub balance: f32,
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        Self {
+            shadows: HslWheel::default(),
+            midtones: HslWheel::default(),
+            highlights: HslWheel::default(),
+            global: HslWheel::default(),
+            blending: default_blending(),
+            balance: 0.0,
+        }
+    }
+}
+
+fn default_blending() -> f32 {
+    50.0
+}
+
+/// Defringe (chromatic aberration cleanup).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Defringe {
+    /// Purple amount, 0..20. 0 = off.
+    #[serde(default)]
+    pub purple_amount: f32,
+    /// Purple hue-band width, 0..100.
+    #[serde(default)]
+    pub purple_hue_range: f32,
+    /// Green amount, 0..20. 0 = off.
+    #[serde(default)]
+    pub green_amount: f32,
+    /// Green hue-band width, 0..100.
+    #[serde(default)]
+    pub green_hue_range: f32,
 }
 
 /// Variable-length curve for one channel: 2..=16 control points in
@@ -256,6 +419,15 @@ impl Operations {
             lens_blur_focus_far: 1.0,
             lens_blur_bokeh_boost: 0.0,
             lens_blur_cat_eye: 0.0,
+            texture: 0.0,
+            sharpening: Sharpening::default(),
+            grain: Grain::default(),
+            color_mixer: ColorMixer::default(),
+            color_grading: ColorGrading {
+                blending: 50.0,
+                ..ColorGrading::default()
+            },
+            defringe: Defringe::default(),
             curves: Curves::identity(),
         }
     }
@@ -301,8 +473,84 @@ impl Operations {
             lens_blur_focus_far: lerp(self.lens_blur_focus_far, target.lens_blur_focus_far),
             lens_blur_bokeh_boost: lerp(self.lens_blur_bokeh_boost, target.lens_blur_bokeh_boost),
             lens_blur_cat_eye: lerp(self.lens_blur_cat_eye, target.lens_blur_cat_eye),
+            texture: lerp(self.texture, target.texture),
+            sharpening: blend_sharpening(&self.sharpening, &target.sharpening, t),
+            grain: blend_grain(&self.grain, &target.grain, t),
+            color_mixer: blend_color_mixer(&self.color_mixer, &target.color_mixer, t),
+            color_grading: blend_color_grading(&self.color_grading, &target.color_grading, t),
+            defringe: blend_defringe(&self.defringe, &target.defringe, t),
             curves: self.curves.blend(&target.curves, t),
         }
+    }
+}
+
+fn lerp_field(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn blend_sharpening(a: &Sharpening, b: &Sharpening, t: f32) -> Sharpening {
+    Sharpening {
+        amount: lerp_field(a.amount, b.amount, t),
+        radius: lerp_field(a.radius, b.radius, t),
+        detail: lerp_field(a.detail, b.detail, t),
+        masking: lerp_field(a.masking, b.masking, t),
+    }
+}
+
+fn blend_grain(a: &Grain, b: &Grain, t: f32) -> Grain {
+    Grain {
+        amount: lerp_field(a.amount, b.amount, t),
+        size: lerp_field(a.size, b.size, t),
+        roughness: lerp_field(a.roughness, b.roughness, t),
+    }
+}
+
+fn blend_hsl(a: &HslAdjust, b: &HslAdjust, t: f32) -> HslAdjust {
+    HslAdjust {
+        hue: lerp_field(a.hue, b.hue, t),
+        saturation: lerp_field(a.saturation, b.saturation, t),
+        luminance: lerp_field(a.luminance, b.luminance, t),
+    }
+}
+
+fn blend_color_mixer(a: &ColorMixer, b: &ColorMixer, t: f32) -> ColorMixer {
+    ColorMixer {
+        red: blend_hsl(&a.red, &b.red, t),
+        orange: blend_hsl(&a.orange, &b.orange, t),
+        yellow: blend_hsl(&a.yellow, &b.yellow, t),
+        green: blend_hsl(&a.green, &b.green, t),
+        aqua: blend_hsl(&a.aqua, &b.aqua, t),
+        blue: blend_hsl(&a.blue, &b.blue, t),
+        purple: blend_hsl(&a.purple, &b.purple, t),
+        magenta: blend_hsl(&a.magenta, &b.magenta, t),
+    }
+}
+
+fn blend_wheel(a: &HslWheel, b: &HslWheel, t: f32) -> HslWheel {
+    HslWheel {
+        hue: lerp_field(a.hue, b.hue, t),
+        saturation: lerp_field(a.saturation, b.saturation, t),
+        luminance: lerp_field(a.luminance, b.luminance, t),
+    }
+}
+
+fn blend_color_grading(a: &ColorGrading, b: &ColorGrading, t: f32) -> ColorGrading {
+    ColorGrading {
+        shadows: blend_wheel(&a.shadows, &b.shadows, t),
+        midtones: blend_wheel(&a.midtones, &b.midtones, t),
+        highlights: blend_wheel(&a.highlights, &b.highlights, t),
+        global: blend_wheel(&a.global, &b.global, t),
+        blending: lerp_field(a.blending, b.blending, t),
+        balance: lerp_field(a.balance, b.balance, t),
+    }
+}
+
+fn blend_defringe(a: &Defringe, b: &Defringe, t: f32) -> Defringe {
+    Defringe {
+        purple_amount: lerp_field(a.purple_amount, b.purple_amount, t),
+        purple_hue_range: lerp_field(a.purple_hue_range, b.purple_hue_range, t),
+        green_amount: lerp_field(a.green_amount, b.green_amount, t),
+        green_hue_range: lerp_field(a.green_hue_range, b.green_hue_range, t),
     }
 }
 

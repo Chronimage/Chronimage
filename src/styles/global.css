@@ -2180,6 +2180,116 @@ select {
   background: var(--bg-chrome);
   color: var(--fg);
 }
+
+/* ── Color band selector (Color Mixer) ───────────────────────────────────── */
+.color-band-row {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px 2px 8px;
+}
+.color-band-pill {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.color-band-pill .color-band-fill {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background 0.12s;
+}
+.color-band-pill[data-active="true"] {
+  box-shadow: 0 0 0 2px var(--bg);
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.color-band-pill[data-modified="true"]::after {
+  content: "";
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* ── Color Grading wheels ────────────────────────────────────────────────── */
+.color-wheel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.color-wheel-label {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+.color-wheel-disc {
+  position: relative;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    #e54545,
+    #f08a3c,
+    #e8c93c,
+    #5fc15a,
+    #54c8c8,
+    #5b8cd6,
+    #a05ccd,
+    #d05ca8,
+    #e54545
+  );
+  /* White-out the center to show "no tint at zero saturation" — same
+   * affordance as Lightroom's wheel. */
+  -webkit-mask-image: radial-gradient(circle, transparent 0%, black 100%);
+  mask-image: radial-gradient(circle, transparent 0%, black 100%);
+  cursor: crosshair;
+  touch-action: none;
+}
+.color-wheel-disc::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--bg-chrome) 0%, transparent 80%);
+  pointer-events: none;
+}
+.color-wheel-puck {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bg-chrome);
+  border: 2px solid var(--fg);
+  box-shadow: 0 0 0 1px var(--bg-chrome);
+  pointer-events: none;
+}
+.color-grading-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 6px 0;
+}
+.color-grading-grid > .color-wheel {
+  padding: 4px;
+}
 .develop-canvas-toolbar .btn.on,
 .develop-crop-toolbar .btn.primary {
   background: var(--accent);

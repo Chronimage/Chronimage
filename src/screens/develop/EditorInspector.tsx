@@ -1,8 +1,17 @@
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { CollapsibleSection } from '../../primitives/CollapsibleSection';
+import { ColorBandSelector } from '../../primitives/ColorBandSelector';
+import { ColorWheel } from '../../primitives/ColorWheel';
 import { Icon } from '../../primitives/Icon';
 import { Slider } from '../../primitives/Slider';
-import type { DevelopCurves, PhotoRow } from '../../tauri/invoke';
+import {
+  COLOR_MIXER_BANDS,
+  type ColorMixerBand,
+  type DevelopCurves,
+  type HslAdjust,
+  type HslWheel,
+  type PhotoRow,
+} from '../../tauri/invoke';
 import { type CurveChannel, CurvesPanel } from './CurvesPanel';
 import type { DevelopValues } from './types';
 
@@ -44,7 +53,33 @@ export function EditorInspector({
   canPaste,
 }: EditorInspectorProps) {
   const [curveChannel, setCurveChannel] = useState<CurveChannel>('rgb');
+  const [activeBand, setActiveBand] = useState<ColorMixerBand>('red');
   const isMaskMode = mode === 'mask';
+  const activeBandValue: HslAdjust = values.colorMixer[activeBand];
+  const setBandField = (field: keyof HslAdjust, next: number) => {
+    onChangeMany({
+      colorMixer: {
+        ...values.colorMixer,
+        [activeBand]: { ...values.colorMixer[activeBand], [field]: next },
+      },
+    });
+  };
+  const modifiedBands = useMemo(() => {
+    const set = new Set<ColorMixerBand>();
+    for (const band of COLOR_MIXER_BANDS) {
+      const v = values.colorMixer[band];
+      if (v.hue !== 0 || v.saturation !== 0 || v.luminance !== 0) set.add(band);
+    }
+    return set;
+  }, [values.colorMixer]);
+  const setWheel = (wheel: 'shadows' | 'midtones' | 'highlights' | 'global', next: HslWheel) => {
+    onChangeMany({
+      colorGrading: {
+        ...values.colorGrading,
+        [wheel]: next,
+      },
+    });
+  };
   const megapixels =
     photo.width && photo.height ? ((photo.width * photo.height) / 1_000_000).toFixed(0) : '—';
   const cameraLabel = [photo.camera_make, photo.camera_model].filter(Boolean).join(' ') || 'Camera unknown';
@@ -176,34 +211,168 @@ export function EditorInspector({
           <Slider label="Saturation" value={values.sat} onChange={(v) => onChange('sat', v)} />
         </CollapsibleSection>
 
-        <CollapsibleSection id="color-mixer" title="Color Mixer">
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', lineHeight: 1.4 }}>
-            Per-band Hue / Saturation / Luminance arrives in the next ops update.
-          </div>
+        <CollapsibleSection
+          id="color-mixer"
+          title="Color Mixer"
+          action={resetAction('Color Mixer', {
+            colorMixer: {
+              red: { hue: 0, saturation: 0, luminance: 0 },
+              orange: { hue: 0, saturation: 0, luminance: 0 },
+              yellow: { hue: 0, saturation: 0, luminance: 0 },
+              green: { hue: 0, saturation: 0, luminance: 0 },
+              aqua: { hue: 0, saturation: 0, luminance: 0 },
+              blue: { hue: 0, saturation: 0, luminance: 0 },
+              purple: { hue: 0, saturation: 0, luminance: 0 },
+              magenta: { hue: 0, saturation: 0, luminance: 0 },
+            },
+          })}
+        >
+          <ColorBandSelector active={activeBand} onChange={setActiveBand} modifiedBands={modifiedBands} />
+          <Slider label="Hue" value={activeBandValue.hue} onChange={(v) => setBandField('hue', v)} />
+          <Slider
+            label="Saturation"
+            value={activeBandValue.saturation}
+            onChange={(v) => setBandField('saturation', v)}
+          />
+          <Slider
+            label="Luminance"
+            value={activeBandValue.luminance}
+            onChange={(v) => setBandField('luminance', v)}
+          />
         </CollapsibleSection>
 
-        <CollapsibleSection id="color-grading" title="Color Grading">
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', lineHeight: 1.4 }}>
-            Shadow / Midtone / Highlight wheels arrive in the next ops update.
+        <CollapsibleSection
+          id="color-grading"
+          title="Color Grading"
+          action={resetAction('Color Grading', {
+            colorGrading: {
+              shadows: { hue: 0, saturation: 0, luminance: 0 },
+              midtones: { hue: 0, saturation: 0, luminance: 0 },
+              highlights: { hue: 0, saturation: 0, luminance: 0 },
+              global: { hue: 0, saturation: 0, luminance: 0 },
+              blending: 50,
+              balance: 0,
+            },
+          })}
+        >
+          <div className="color-grading-grid">
+            <ColorWheel
+              label="Shadows"
+              value={values.colorGrading.shadows}
+              onChange={(next) => setWheel('shadows', next)}
+            />
+            <ColorWheel
+              label="Midtones"
+              value={values.colorGrading.midtones}
+              onChange={(next) => setWheel('midtones', next)}
+            />
+            <ColorWheel
+              label="Highlights"
+              value={values.colorGrading.highlights}
+              onChange={(next) => setWheel('highlights', next)}
+            />
+            <ColorWheel
+              label="Global"
+              value={values.colorGrading.global}
+              onChange={(next) => setWheel('global', next)}
+            />
           </div>
+          <Slider
+            label="Blending"
+            value={values.colorGrading.blending}
+            onChange={(v) =>
+              onChangeMany({
+                colorGrading: { ...values.colorGrading, blending: v },
+              })
+            }
+            min={0}
+            max={100}
+          />
+          <Slider
+            label="Balance"
+            value={values.colorGrading.balance}
+            onChange={(v) =>
+              onChangeMany({
+                colorGrading: { ...values.colorGrading, balance: v },
+              })
+            }
+          />
         </CollapsibleSection>
 
         <CollapsibleSection
           id="effects"
           title="Effects"
-          action={resetAction('Effects', { clarity: 0, dehaze: 0 })}
+          action={resetAction('Effects', {
+            clarity: 0,
+            dehaze: 0,
+            texture: 0,
+            grain: { amount: 0, size: 25, roughness: 50 },
+          })}
         >
+          <Slider label="Texture" value={values.texture} onChange={(v) => onChange('texture', v)} />
           <Slider label="Clarity" value={values.clarity} onChange={(v) => onChange('clarity', v)} />
           <Slider label="Dehaze" value={values.dehaze} onChange={(v) => onChange('dehaze', v)} />
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', lineHeight: 1.4 }}>
-            Texture and Grain arrive with the next ops update.
-          </div>
+          <div className="editor-section-subhead">Grain</div>
+          <Slider
+            label="Amount"
+            value={values.grain.amount}
+            onChange={(v) => onChangeMany({ grain: { ...values.grain, amount: v } })}
+            min={0}
+            max={100}
+          />
+          <Slider
+            label="Size"
+            value={values.grain.size}
+            onChange={(v) => onChangeMany({ grain: { ...values.grain, size: v } })}
+            min={0}
+            max={100}
+          />
+          <Slider
+            label="Roughness"
+            value={values.grain.roughness}
+            onChange={(v) => onChangeMany({ grain: { ...values.grain, roughness: v } })}
+            min={0}
+            max={100}
+          />
         </CollapsibleSection>
 
-        <CollapsibleSection id="detail" title="Detail">
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', lineHeight: 1.4 }}>
-            Sharpening sliders arrive with the next ops update.
-          </div>
+        <CollapsibleSection
+          id="detail"
+          title="Detail"
+          action={resetAction('Detail', {
+            sharpening: { amount: 0, radius: 1, detail: 25, masking: 0 },
+          })}
+        >
+          <Slider
+            label="Sharpening"
+            value={values.sharpening.amount}
+            onChange={(v) => onChangeMany({ sharpening: { ...values.sharpening, amount: v } })}
+            min={0}
+            max={150}
+          />
+          <Slider
+            label="Radius"
+            value={values.sharpening.radius}
+            onChange={(v) => onChangeMany({ sharpening: { ...values.sharpening, radius: v } })}
+            min={0.5}
+            max={3}
+            step={0.1}
+            suffix=" px"
+          />
+          <Slider
+            label="Detail"
+            value={values.sharpening.detail}
+            onChange={(v) => onChangeMany({ sharpening: { ...values.sharpening, detail: v } })}
+            min={0}
+            max={100}
+          />
+          <Slider
+            label="Masking"
+            value={values.sharpening.masking}
+            onChange={(v) => onChangeMany({ sharpening: { ...values.sharpening, masking: v } })}
+            min={0}
+            max={100}
+          />
           {disabledRow('Denoise')}
           {disabledRow('Raw Details')}
           {disabledRow('Super Resolution')}
@@ -212,7 +381,12 @@ export function EditorInspector({
         <CollapsibleSection
           id="optics"
           title="Optics"
-          action={resetAction('Optics', { lensVignette: 0, lensDistortion: 0, chromaticAberration: 0 })}
+          action={resetAction('Optics', {
+            lensVignette: 0,
+            lensDistortion: 0,
+            chromaticAberration: 0,
+            defringe: { purple_amount: 0, purple_hue_range: 0, green_amount: 0, green_hue_range: 0 },
+          })}
         >
           <Slider
             label="Vignette"
@@ -231,9 +405,37 @@ export function EditorInspector({
             min={0}
             max={100}
           />
-          <div className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)', lineHeight: 1.4 }}>
-            Defringe (purple / green) arrives with the next ops update.
-          </div>
+          <div className="editor-section-subhead">Defringe</div>
+          <Slider
+            label="Purple amount"
+            value={values.defringe.purple_amount}
+            onChange={(v) => onChangeMany({ defringe: { ...values.defringe, purple_amount: v } })}
+            min={0}
+            max={20}
+            step={0.5}
+          />
+          <Slider
+            label="Purple hue"
+            value={values.defringe.purple_hue_range}
+            onChange={(v) => onChangeMany({ defringe: { ...values.defringe, purple_hue_range: v } })}
+            min={0}
+            max={100}
+          />
+          <Slider
+            label="Green amount"
+            value={values.defringe.green_amount}
+            onChange={(v) => onChangeMany({ defringe: { ...values.defringe, green_amount: v } })}
+            min={0}
+            max={20}
+            step={0.5}
+          />
+          <Slider
+            label="Green hue"
+            value={values.defringe.green_hue_range}
+            onChange={(v) => onChangeMany({ defringe: { ...values.defringe, green_hue_range: v } })}
+            min={0}
+            max={100}
+          />
         </CollapsibleSection>
 
         <CollapsibleSection
