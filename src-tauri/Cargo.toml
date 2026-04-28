@@ -112,7 +112,7 @@ ed25519-dalek = { version = "2", features = ["pkcs8"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
 # Zip extraction for InsightFace buffalo_l.zip bundle (MIT licence)
-zip = "2"
+zip = "4"
 
 # AI / inference
 # ort is the ONNX Runtime Rust binding.
