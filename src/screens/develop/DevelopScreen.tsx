@@ -10,6 +10,7 @@ import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
 import { Seg } from '../../primitives/Seg';
+import { Slider } from '../../primitives/Slider';
 import { Thumbnail, thumbnailSizeForCssBox } from '../../primitives/Thumbnail';
 import { useDevelopUi } from '../../state/develop';
 import {
@@ -42,19 +43,50 @@ import {
   type SidecarStatus,
 } from '../../tauri/invoke';
 import { warn } from '../../util/log';
+import { type CurveChannel, CurvesPanel } from './CurvesPanel';
 import { EditorInspector } from './EditorInspector';
 import {
   type DevelopTab,
   type DevelopValues,
   defaultDevelopValues,
   operationsToValues,
+  parseOperationsJson,
   valuesToOperations,
 } from './types';
+
+interface UpdateValuesOptions {
+  render?: boolean;
+}
+
+function uncroppedPreviewOperations(ops: DevelopOperations): DevelopOperations {
+  return {
+    ...ops,
+    crop_x: 0,
+    crop_y: 0,
+    crop_w: 1,
+    crop_h: 1,
+  };
+}
+
+function sanitizeMaskOperations(ops: DevelopOperations): DevelopOperations {
+  return {
+    ...ops,
+    crop_x: 0,
+    crop_y: 0,
+    crop_w: 1,
+    crop_h: 1,
+    rotation: 0,
+    straighten: 0,
+    transform_h: 0,
+    transform_v: 0,
+  };
+}
 
 export function DevelopScreen() {
   const { data: photos = [], isLoading } = usePhotos();
   const [focusedIdx, setFocusedIdx] = useState(0);
   const [tab, setTab] = useState<DevelopTab>('develop');
+  const [cropMode, setCropModeState] = useState(false);
   const [values, setValues] = useState<DevelopValues>(() => defaultDevelopValues());
   const [preview, setPreview] = useState<string | null>(null);
   const [copiedOps, setCopiedOps] = useState<DevelopOperations | null>(null);
@@ -64,10 +96,13 @@ export function DevelopScreen() {
   const [promptStrength, setPromptStrength] = useState(65);
   const [promptConstraints, setPromptConstraints] = useState<string[]>(['keep faces sharp', 'natural tones']);
   const valuesRef = useRef(values);
+  const cropModeRef = useRef(false);
   const focusedPhotoIdRef = useRef<number | null>(null);
   const applySeqRef = useRef(0);
   const userEditedRef = useRef(false);
   const debounceTimer = useRef<number | null>(null);
+  const maskUpdateTimer = useRef<number | null>(null);
+  const [localMaskOperations, setLocalMaskOperations] = useState<Record<number, DevelopOperations>>({});
 
   const photo = photos[focusedIdx] ?? null;
   const focusedPhotoId = photo?.id ?? null;
@@ -80,11 +115,17 @@ export function DevelopScreen() {
   const setSharedPreview = useDevelopUi((s) => s.setPreview);
   const setSharedOperations = useDevelopUi((s) => s.setOperations);
   const setSharedMask = useDevelopUi((s) => s.setActiveMask);
+  const selectedMaskId = useDevelopUi((s) => s.selectedMaskId);
+  const setSelectedMaskId = useDevelopUi((s) => s.setSelectedMaskId);
+  const maskOverlayVisible = useDevelopUi((s) => s.maskOverlayVisible);
+  const maskOverlayOpacity = useDevelopUi((s) => s.maskOverlayOpacity);
   const sharedPreview = useDevelopUi((s) => s.preview);
   const sharedOperations = useDevelopUi((s) => s.operations);
   const operationSource = useDevelopUi((s) => s.operationSource);
   useEffect(() => {
     focusedPhotoIdRef.current = focusedPhotoId;
+    cropModeRef.current = false;
+    setCropModeState(false);
     applySeqRef.current += 1;
     userEditedRef.current = false;
     if (debounceTimer.current !== null) {
@@ -95,8 +136,17 @@ export function DevelopScreen() {
     setSharedPreview(null);
     setSharedOperations(null, 'screen');
     setSharedMask(null);
+    setSelectedMaskId(null);
     setPreview(null);
-  }, [focusedPhotoId, setSharedFocus, setSharedMask, setSharedOperations, setSharedPreview]);
+    setLocalMaskOperations({});
+  }, [
+    focusedPhotoId,
+    setSelectedMaskId,
+    setSharedFocus,
+    setSharedMask,
+    setSharedOperations,
+    setSharedPreview,
+  ]);
 
   // Load the photo's current edit state + baseline preview ONCE per photo.
   // Re-fetching `opened` on every render would wipe unsaved slider
@@ -104,6 +154,9 @@ export function DevelopScreen() {
   // explicit Save. Keying off `focusedPhotoId` ensures we only seed
   // slider state when the user opens a different photo.
   const { data: opened } = useDevelopOpen(focusedPhotoId);
+  const { data: masks = [] } = useDevelopMasks(focusedPhotoId);
+  const updateMask = useDevelopMaskUpdate();
+  const applyMaskPreview = useDevelopMaskApplyPreview();
   const seededForPhotoRef = useRef<number | null>(null);
   useEffect(() => {
     if (!opened) return;
@@ -137,6 +190,12 @@ export function DevelopScreen() {
     setValues(nextValues);
   }, [operationSource, sharedOperations]);
 
+  useEffect(() => {
+    if (selectedMaskId != null && masks.length > 0 && !masks.some((mask) => mask.id === selectedMaskId)) {
+      setSelectedMaskId(null);
+    }
+  }, [masks, selectedMaskId, setSelectedMaskId]);
+
   const applyMut = useDevelopApply();
   const saveMut = useDevelopSave();
   const snapshotMut = useDevelopSnapshotSave();
@@ -148,6 +207,7 @@ export function DevelopScreen() {
   useEffect(() => {
     return () => {
       if (debounceTimer.current !== null) window.clearTimeout(debounceTimer.current);
+      if (maskUpdateTimer.current !== null) window.clearTimeout(maskUpdateTimer.current);
     };
   }, []);
 
@@ -177,6 +237,33 @@ export function DevelopScreen() {
     [applyMut, focusedPhotoId, setSharedPreview],
   );
 
+  const scheduleEditorPreview = useCallback(
+    (ops: DevelopOperations) => {
+      scheduleApply(cropModeRef.current ? uncroppedPreviewOperations(ops) : ops);
+    },
+    [scheduleApply],
+  );
+
+  const setCropMode = useCallback(
+    (next: boolean) => {
+      cropModeRef.current = next;
+      setCropModeState(next);
+      const ops = valuesToOperations(valuesRef.current);
+      scheduleApply(next ? uncroppedPreviewOperations(ops) : ops);
+    },
+    [scheduleApply],
+  );
+
+  const setDevelopTab = useCallback(
+    (next: DevelopTab) => {
+      setTab(next);
+      if (next !== 'develop' && cropModeRef.current) {
+        setCropMode(false);
+      }
+    },
+    [setCropMode],
+  );
+
   // Keep a ref on the latest values so `updateValue` can compute the
   // next state without closing over a stale `values` snapshot — and so
   // the side-effect (scheduleApply) happens outside `setValues`'s
@@ -200,22 +287,24 @@ export function DevelopScreen() {
       setValues(next);
       const ops = valuesToOperations(next);
       setSharedOperations(ops, 'screen');
-      scheduleApply(ops);
+      scheduleEditorPreview(ops);
     },
-    [scheduleApply, setSharedOperations],
+    [scheduleEditorPreview, setSharedOperations],
   );
 
   const updateValues = useCallback(
-    (patch: Partial<DevelopValues>) => {
+    (patch: Partial<DevelopValues>, options: UpdateValuesOptions = {}) => {
       userEditedRef.current = true;
       const next = { ...valuesRef.current, ...patch };
       valuesRef.current = next;
       setValues(next);
       const ops = valuesToOperations(next);
       setSharedOperations(ops, 'screen');
-      scheduleApply(ops);
+      if (options.render !== false) {
+        scheduleEditorPreview(ops);
+      }
     },
-    [scheduleApply, setSharedOperations],
+    [scheduleEditorPreview, setSharedOperations],
   );
 
   const updateCurves = useCallback(
@@ -226,9 +315,9 @@ export function DevelopScreen() {
       setValues(next);
       const ops = valuesToOperations(next);
       setSharedOperations(ops, 'screen');
-      scheduleApply(ops);
+      scheduleEditorPreview(ops);
     },
-    [scheduleApply, setSharedOperations],
+    [scheduleEditorPreview, setSharedOperations],
   );
 
   const autoLight = useCallback(() => {
@@ -252,8 +341,8 @@ export function DevelopScreen() {
     setValues(next);
     const ops = valuesToOperations(next);
     setSharedOperations(ops, 'screen');
-    scheduleApply(ops);
-  }, [scheduleApply, setSharedOperations]);
+    scheduleEditorPreview(ops);
+  }, [scheduleEditorPreview, setSharedOperations]);
 
   const resetEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
@@ -265,14 +354,95 @@ export function DevelopScreen() {
         valuesRef.current = next;
         setValues(next);
         setSharedOperations(ops, 'screen');
-        scheduleApply(ops);
+        scheduleEditorPreview(ops);
       },
     });
-  }, [focusedPhotoId, resetMut, scheduleApply, setSharedOperations]);
+  }, [focusedPhotoId, resetMut, scheduleEditorPreview, setSharedOperations]);
 
   const currentOperations = useCallback(() => {
     return useDevelopUi.getState().operations ?? valuesToOperations(valuesRef.current);
   }, []);
+
+  const refreshMaskPreview = useCallback(() => {
+    if (focusedPhotoId == null) return;
+    applyMaskPreview.mutate(
+      { photoId: focusedPhotoId, operations: currentOperations() },
+      {
+        onSuccess: (receipt) => {
+          setPreview(receipt.preview_data_url);
+          setSharedPreview(receipt.preview_data_url);
+        },
+        onError: (e) => warn('develop_mask_apply_preview failed', e),
+      },
+    );
+  }, [applyMaskPreview, currentOperations, focusedPhotoId, setSharedPreview]);
+
+  const maskOperations = useCallback(
+    (mask: DevelopMask) =>
+      sanitizeMaskOperations(
+        localMaskOperations[mask.id] ?? parseOperationsJson(mask.operations_json) ?? identityOperations(),
+      ),
+    [localMaskOperations],
+  );
+
+  const selectedMask =
+    selectedMaskId == null ? null : (masks.find((mask) => mask.id === selectedMaskId) ?? null);
+  const selectedMaskOps = selectedMask ? maskOperations(selectedMask) : null;
+  const selectedMaskValues = selectedMaskOps ? operationsToValues(selectedMaskOps) : null;
+
+  const queueMaskOperationUpdate = useCallback(
+    (maskId: number, nextOps: DevelopOperations) => {
+      if (maskUpdateTimer.current !== null) window.clearTimeout(maskUpdateTimer.current);
+      maskUpdateTimer.current = window.setTimeout(() => {
+        updateMask.mutate(
+          { mask_id: maskId, operations: nextOps },
+          {
+            onSuccess: (mask) => {
+              setLocalMaskOperations((current) => ({
+                ...current,
+                [mask.id]: parseOperationsJson(mask.operations_json) ?? nextOps,
+              }));
+              refreshMaskPreview();
+            },
+            onError: (e) => warn('develop_mask_update failed', e),
+          },
+        );
+      }, 120);
+    },
+    [refreshMaskPreview, updateMask],
+  );
+
+  const updateSelectedMaskValues = useCallback(
+    (patch: Partial<DevelopValues>) => {
+      if (!selectedMask || !selectedMaskValues) return;
+      const nextValues = { ...selectedMaskValues, ...patch };
+      const nextOps = sanitizeMaskOperations(valuesToOperations(nextValues));
+      setLocalMaskOperations((local) => ({ ...local, [selectedMask.id]: nextOps }));
+      queueMaskOperationUpdate(selectedMask.id, nextOps);
+    },
+    [queueMaskOperationUpdate, selectedMask, selectedMaskValues],
+  );
+
+  const updateSelectedMaskValue = useCallback(
+    (key: keyof DevelopValues, value: number) => {
+      updateSelectedMaskValues({ [key]: value } as Partial<DevelopValues>);
+    },
+    [updateSelectedMaskValues],
+  );
+
+  const updateSelectedMaskCurves = useCallback(
+    (curves: DevelopValues['curves']) => {
+      updateSelectedMaskValues({ curves });
+    },
+    [updateSelectedMaskValues],
+  );
+
+  const resetSelectedMaskOperations = useCallback(() => {
+    if (!selectedMask) return;
+    const nextOps = sanitizeMaskOperations(identityOperations());
+    setLocalMaskOperations((local) => ({ ...local, [selectedMask.id]: nextOps }));
+    queueMaskOperationUpdate(selectedMask.id, nextOps);
+  }, [queueMaskOperationUpdate, selectedMask]);
 
   const saveEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
@@ -304,12 +474,12 @@ export function DevelopScreen() {
           valuesRef.current = next;
           setValues(next);
           setSharedOperations(copiedOps, 'screen');
-          scheduleApply(copiedOps);
+          scheduleEditorPreview(copiedOps);
         },
         onError: (e) => warn('develop_paste_edits failed', e),
       },
     );
-  }, [copiedOps, focusedPhotoId, pasteMut, scheduleApply, setSharedOperations]);
+  }, [copiedOps, focusedPhotoId, pasteMut, scheduleEditorPreview, setSharedOperations]);
 
   if (isLoading) {
     return (
@@ -356,6 +526,13 @@ export function DevelopScreen() {
   const w = swap ? photo.height : photo.width;
   const h = swap ? photo.width : photo.height;
   const stageAspect = w > 0 && h > 0 ? `${w} / ${h}` : '3 / 2';
+  const cropW = clampNumber(values.cropW / 100, 0.05, 1);
+  const cropH = clampNumber(values.cropH / 100, 0.05, 1);
+  const displayStageAspect = !cropMode && w > 0 && h > 0 ? `${w * cropW} / ${h * cropH}` : stageAspect;
+  const selectedMaskPreview =
+    selectedMask && maskOverlayVisible
+      ? localMaskPreview(selectedMask, maskOverlayOpacity / 100, cropMode ? null : values)
+      : null;
 
   return (
     <div className="canvas">
@@ -363,7 +540,16 @@ export function DevelopScreen() {
         photo={photo}
         megapixels={megapixels}
         tab={tab}
-        setTab={setTab}
+        setTab={setDevelopTab}
+        cropMode={cropMode}
+        onToggleCrop={() => {
+          if (tab !== 'develop') {
+            setTab('develop');
+            setCropMode(true);
+            return;
+          }
+          setCropMode(!cropModeRef.current);
+        }}
         canPrev={focusedIdx > 0}
         canNext={focusedIdx < photos.length - 1}
         onPrev={() => setFocusedIdx((i) => Math.max(0, i - 1))}
@@ -374,36 +560,7 @@ export function DevelopScreen() {
         saving={saveMut.isPending || snapshotMut.isPending}
       />
 
-      {tab === 'develop' ? (
-        <DevelopStageSplit
-          photo={photo}
-          photos={photos}
-          focusedIdx={focusedIdx}
-          setFocusedIdx={setFocusedIdx}
-          stageAspect={stageAspect}
-          values={values}
-          onValueChange={updateValue}
-          onValuesChange={updateValues}
-          onCurvesChange={updateCurves}
-          onAutoLight={autoLight}
-          onReset={resetEdits}
-          onCopy={copyEdits}
-          onPaste={pasteEdits}
-          canPaste={!!copiedOps && !pasteMut.isPending}
-          preview={preview}
-        />
-      ) : tab === 'mask' ? (
-        <MaskStage
-          photo={photo}
-          stageAspect={stageAspect}
-          preview={preview}
-          operations={valuesToOperations(values)}
-          onPreview={(next) => {
-            setPreview(next);
-            setSharedPreview(next);
-          }}
-        />
-      ) : (
+      {tab === 'prompt' ? (
         <PromptStage
           photo={photo}
           promptText={promptText}
@@ -412,6 +569,32 @@ export function DevelopScreen() {
           setPromptStrength={setPromptStrength}
           constraints={promptConstraints}
           setConstraints={setPromptConstraints}
+        />
+      ) : (
+        <DevelopStageSplit
+          photo={photo}
+          photos={photos}
+          focusedIdx={focusedIdx}
+          setFocusedIdx={setFocusedIdx}
+          stageAspect={displayStageAspect}
+          values={selectedMaskValues ?? values}
+          inspectorMode={selectedMask && selectedMaskValues ? 'mask' : 'global'}
+          selectedMask={selectedMask}
+          selectedMaskPreview={selectedMaskPreview}
+          onValueChange={selectedMask && selectedMaskValues ? updateSelectedMaskValue : updateValue}
+          onValuesChange={selectedMask && selectedMaskValues ? updateSelectedMaskValues : updateValues}
+          onCurvesChange={selectedMask && selectedMaskValues ? updateSelectedMaskCurves : updateCurves}
+          onAutoLight={autoLight}
+          onReset={selectedMask && selectedMaskValues ? resetSelectedMaskOperations : resetEdits}
+          onCopy={copyEdits}
+          onPaste={pasteEdits}
+          canPaste={!!copiedOps && !pasteMut.isPending}
+          preview={preview}
+          cropMode={cropMode}
+          globalValues={values}
+          onGlobalValuesChange={updateValues}
+          setCropMode={setCropMode}
+          onClearMaskSelection={() => setSelectedMaskId(null)}
         />
       )}
     </div>
@@ -423,6 +606,8 @@ interface DevelopToolbarProps {
   megapixels: string;
   tab: DevelopTab;
   setTab: (tab: DevelopTab) => void;
+  cropMode: boolean;
+  onToggleCrop: () => void;
   canPrev: boolean;
   canNext: boolean;
   onPrev: () => void;
@@ -438,6 +623,8 @@ function DevelopToolbar({
   megapixels,
   tab,
   setTab,
+  cropMode,
+  onToggleCrop,
   canPrev,
   canNext,
   onPrev,
@@ -487,7 +674,13 @@ function DevelopToolbar({
         ]}
       />
       <div className="divider" />
-      <button type="button" className="btn" title="Crop + transform controls are in the inspector">
+      <button
+        type="button"
+        className={cropMode ? 'btn on' : 'btn'}
+        title={cropMode ? 'Finish crop' : 'Crop directly on the canvas'}
+        aria-pressed={cropMode}
+        onClick={onToggleCrop}
+      >
         <Icon name="crop" size={13} />
       </button>
       <button type="button" className="btn" title="Save a named before/after snapshot" onClick={onSnapshot}>
@@ -517,8 +710,13 @@ interface DevelopStageSplitProps {
   setFocusedIdx: (n: number) => void;
   stageAspect: string;
   values: DevelopValues;
+  globalValues: DevelopValues;
+  inspectorMode: 'global' | 'mask';
+  selectedMask: DevelopMask | null;
+  selectedMaskPreview: { className: string; style: CSSProperties } | null;
   onValueChange: (key: keyof DevelopValues, value: number) => void;
-  onValuesChange: (patch: Partial<DevelopValues>) => void;
+  onValuesChange: (patch: Partial<DevelopValues>, options?: UpdateValuesOptions) => void;
+  onGlobalValuesChange: (patch: Partial<DevelopValues>, options?: UpdateValuesOptions) => void;
   onCurvesChange: (curves: DevelopValues['curves']) => void;
   onAutoLight: () => void;
   onReset: () => void;
@@ -526,6 +724,9 @@ interface DevelopStageSplitProps {
   onPaste: () => void;
   canPaste: boolean;
   preview: string | null;
+  cropMode: boolean;
+  setCropMode: (active: boolean) => void;
+  onClearMaskSelection: () => void;
 }
 
 function DevelopStageSplit({
@@ -535,8 +736,13 @@ function DevelopStageSplit({
   setFocusedIdx,
   stageAspect,
   values,
+  globalValues,
+  inspectorMode,
+  selectedMask,
+  selectedMaskPreview,
   onValueChange,
   onValuesChange,
+  onGlobalValuesChange,
   onCurvesChange,
   onAutoLight,
   onReset,
@@ -544,10 +750,13 @@ function DevelopStageSplit({
   onPaste,
   canPaste,
   preview,
+  cropMode,
+  setCropMode,
+  onClearMaskSelection,
 }: DevelopStageSplitProps) {
   const [zoom, setZoom] = useState(100);
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const [cropDrag, setCropDrag] = useState<{
+  const cropDragRef = useRef<{
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se';
     startX: number;
     startY: number;
@@ -556,21 +765,24 @@ function DevelopStageSplit({
 
   const zoomIn = () => setZoom((z) => clampNumber(z + 25, 25, 300));
   const zoomOut = () => setZoom((z) => clampNumber(z - 25, 25, 300));
-  const resetCrop = () => onValuesChange({ cropX: 0, cropY: 0, cropW: 100, cropH: 100 });
-  const applyAspect = (patch: Partial<DevelopValues>) => onValuesChange(patch);
-  const cropLeft = clampNumber(values.cropX, 0, 95);
-  const cropTop = clampNumber(values.cropY, 0, 95);
-  const cropWidth = clampNumber(values.cropW, 5, 100 - cropLeft);
-  const cropHeight = clampNumber(values.cropH, 5, 100 - cropTop);
+  const resetCrop = () =>
+    onGlobalValuesChange({ cropX: 0, cropY: 0, cropW: 100, cropH: 100 }, { render: !cropMode });
+  const applyAspect = (patch: Partial<DevelopValues>) => onGlobalValuesChange(patch, { render: !cropMode });
+  const cropLeft = clampNumber(globalValues.cropX, 0, 95);
+  const cropTop = clampNumber(globalValues.cropY, 0, 95);
+  const cropWidth = clampNumber(globalValues.cropW, 5, 100 - cropLeft);
+  const cropHeight = clampNumber(globalValues.cropH, 5, 100 - cropTop);
   const isCropping = cropLeft > 0 || cropTop > 0 || cropWidth < 100 || cropHeight < 100;
+  const showCropOverlay = cropMode;
 
   const startCropDrag = (
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se',
     event: PointerEvent<HTMLButtonElement | HTMLDivElement>,
   ) => {
+    if (!cropMode) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setCropDrag({
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const nextDrag = {
       kind,
       startX: event.clientX,
       startY: event.clientY,
@@ -580,26 +792,28 @@ function DevelopStageSplit({
         cropW: cropWidth,
         cropH: cropHeight,
       },
-    });
+    };
+    cropDragRef.current = nextDrag;
   };
 
   const updateCropDrag = (event: PointerEvent<HTMLDivElement>) => {
-    if (!cropDrag || !frameRef.current) return;
+    const activeDrag = cropDragRef.current;
+    if (!activeDrag || !frameRef.current) return;
     const rect = frameRef.current.getBoundingClientRect();
-    const dx = ((event.clientX - cropDrag.startX) / rect.width) * 100;
-    const dy = ((event.clientY - cropDrag.startY) / rect.height) * 100;
-    const start = cropDrag.start;
+    const dx = ((event.clientX - activeDrag.startX) / rect.width) * 100;
+    const dy = ((event.clientY - activeDrag.startY) / rect.height) * 100;
+    const start = activeDrag.start;
     let nextX = start.cropX;
     let nextY = start.cropY;
     let nextW = start.cropW;
     let nextH = start.cropH;
 
-    if (cropDrag.kind === 'move') {
+    if (activeDrag.kind === 'move') {
       nextX = clampNumber(start.cropX + dx, 0, 100 - start.cropW);
       nextY = clampNumber(start.cropY + dy, 0, 100 - start.cropH);
     } else {
-      const east = cropDrag.kind === 'ne' || cropDrag.kind === 'se';
-      const south = cropDrag.kind === 'sw' || cropDrag.kind === 'se';
+      const east = activeDrag.kind === 'ne' || activeDrag.kind === 'se';
+      const south = activeDrag.kind === 'sw' || activeDrag.kind === 'se';
       if (east) {
         nextW = clampNumber(start.cropW + dx, 5, 100 - start.cropX);
       } else {
@@ -616,12 +830,19 @@ function DevelopStageSplit({
       }
     }
 
-    onValuesChange({
-      cropX: Math.round(nextX * 10) / 10,
-      cropY: Math.round(nextY * 10) / 10,
-      cropW: Math.round(nextW * 10) / 10,
-      cropH: Math.round(nextH * 10) / 10,
-    });
+    onGlobalValuesChange(
+      {
+        cropX: Math.round(nextX * 10) / 10,
+        cropY: Math.round(nextY * 10) / 10,
+        cropW: Math.round(nextW * 10) / 10,
+        cropH: Math.round(nextH * 10) / 10,
+      },
+      { render: false },
+    );
+  };
+
+  const stopCropDrag = () => {
+    cropDragRef.current = null;
   };
 
   return (
@@ -644,10 +865,11 @@ function DevelopStageSplit({
           </div>
           <div
             ref={frameRef}
+            data-testid="develop-canvas-frame"
             className="develop-canvas-frame"
             onPointerMove={updateCropDrag}
-            onPointerUp={() => setCropDrag(null)}
-            onPointerCancel={() => setCropDrag(null)}
+            onPointerUp={stopCropDrag}
+            onPointerCancel={stopCropDrag}
             style={{
               width: 'min(100%, 1100px)',
               aspectRatio: stageAspect,
@@ -686,77 +908,86 @@ function DevelopStageSplit({
                 Rendering…
               </div>
             )}
-            <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
-            <div
-              className="crop-dim crop-dim-left"
-              style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
-            />
-            <div
-              className="crop-dim crop-dim-right"
-              style={{
-                top: `${cropTop}%`,
-                left: `${cropLeft + cropWidth}%`,
-                right: 0,
-                height: `${cropHeight}%`,
-              }}
-            />
-            <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
-            <div
-              className="crop-box"
-              style={{
-                left: `${cropLeft}%`,
-                top: `${cropTop}%`,
-                width: `${cropWidth}%`,
-                height: `${cropHeight}%`,
-              }}
-              onPointerDown={(event) => startCropDrag('move', event)}
-              role="presentation"
-            >
-              <div className="crop-grid" />
-              {(['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+            {selectedMaskPreview && (
+              <div
+                className={`local-mask-preview ${selectedMaskPreview.className}`}
+                style={selectedMaskPreview.style}
+                aria-hidden="true"
+                data-testid="selected-mask-overlay"
+              />
+            )}
+            {showCropOverlay && (
+              <>
+                <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
+                <div
+                  className="crop-dim crop-dim-left"
+                  style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
+                />
+                <div
+                  className="crop-dim crop-dim-right"
+                  style={{
+                    top: `${cropTop}%`,
+                    left: `${cropLeft + cropWidth}%`,
+                    right: 0,
+                    height: `${cropHeight}%`,
+                  }}
+                />
+                <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
+                <div
+                  className={cropMode ? 'crop-box active' : 'crop-box passive'}
+                  style={{
+                    left: `${cropLeft}%`,
+                    top: `${cropTop}%`,
+                    width: `${cropWidth}%`,
+                    height: `${cropHeight}%`,
+                  }}
+                  onPointerDown={(event) => startCropDrag('move', event)}
+                  role="presentation"
+                >
+                  <div className="crop-grid" />
+                  {cropMode &&
+                    (['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+                      <button
+                        key={handle}
+                        type="button"
+                        className={`crop-handle ${handle}`}
+                        aria-label={`Resize crop ${handle}`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          startCropDrag(handle, event);
+                        }}
+                      />
+                    ))}
+                </div>
+              </>
+            )}
+          </div>
+          {cropMode && (
+            <div className="develop-crop-toolbar">
+              <span className="mono">Crop</span>
+              {[
+                ['Original', { cropX: 0, cropY: 0, cropW: 100, cropH: 100 }],
+                ['1:1', { cropX: 12.5, cropY: 0, cropW: 75, cropH: 100 }],
+                ['4:5', { cropX: 10, cropY: 0, cropW: 80, cropH: 100 }],
+                ['16:9', { cropX: 0, cropY: 21.9, cropW: 100, cropH: 56.2 }],
+              ].map(([label, patch]) => (
                 <button
-                  key={handle}
+                  key={label as string}
                   type="button"
-                  className={`crop-handle ${handle}`}
-                  aria-label={`Resize crop ${handle}`}
-                  onPointerDown={(event) => startCropDrag(handle, event)}
-                />
+                  className="btn"
+                  onClick={() => applyAspect(patch as Partial<DevelopValues>)}
+                >
+                  {label as string}
+                </button>
               ))}
-            </div>
-            <div className="editor-histogram" aria-hidden="true">
-              <svg viewBox="0 0 100 40" preserveAspectRatio="none">
-                <path
-                  d="M0,40 L5,30 L12,20 L20,14 L30,8 L42,12 L55,18 L65,22 L72,16 L80,24 L88,30 L95,36 L100,40 Z"
-                  fill="rgba(255,255,255,0.25)"
-                />
-                <path
-                  d="M0,40 L6,34 L14,26 L22,22 L33,14 L45,10 L58,14 L68,18 L78,22 L86,28 L94,34 L100,40 Z"
-                  fill="color-mix(in oklch, var(--accent) 40%, transparent)"
-                />
-              </svg>
-            </div>
-          </div>
-          <div className="develop-crop-toolbar">
-            <span className="mono">Crop</span>
-            {[
-              ['Original', { cropX: 0, cropY: 0, cropW: 100, cropH: 100 }],
-              ['1:1', { cropX: 12.5, cropY: 0, cropW: 75, cropH: 100 }],
-              ['4:5', { cropX: 10, cropY: 0, cropW: 80, cropH: 100 }],
-              ['16:9', { cropX: 0, cropY: 21.9, cropW: 100, cropH: 56.2 }],
-            ].map(([label, patch]) => (
-              <button
-                key={label as string}
-                type="button"
-                className="btn"
-                onClick={() => applyAspect(patch as Partial<DevelopValues>)}
-              >
-                {label as string}
+              <button type="button" className="btn" onClick={resetCrop} disabled={!isCropping}>
+                Reset
               </button>
-            ))}
-            <button type="button" className="btn" onClick={resetCrop} disabled={!isCropping}>
-              Reset
-            </button>
-          </div>
+              <button type="button" className="btn primary" onClick={() => setCropMode(false)}>
+                Done
+              </button>
+            </div>
+          )}
         </div>
         <div className="editor-strip">
           {photos.slice(0, 14).map((p, i) => (
@@ -779,6 +1010,16 @@ function DevelopStageSplit({
       <EditorInspector
         photo={photo}
         values={values}
+        mode={inspectorMode}
+        targetName={selectedMask?.name}
+        targetMeta={
+          selectedMask
+            ? `${selectedMask.source.replaceAll('_', ' ')} / ${selectedMask.mode}${selectedMask.visible ? '' : ' / hidden'}`
+            : undefined
+        }
+        cropMode={cropMode}
+        onToggleCropMode={() => setCropMode(!cropMode)}
+        onClearMaskSelection={onClearMaskSelection}
         onChange={onValueChange}
         onChangeMany={onValuesChange}
         onCurvesChange={onCurvesChange}
@@ -820,12 +1061,17 @@ interface MaskStageProps {
   onPreview: (previewDataUrl: string) => void;
 }
 
-function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskStageProps) {
+export function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskStageProps) {
   const [masking, setMasking] = useState(false);
   const [maskError, setMaskError] = useState<string | null>(null);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [maskMode, setMaskMode] = useState<MaskMode>('normal');
   const [selectedMaskId, setSelectedMaskId] = useState<number | null>(null);
+  const [overlayVisible, setOverlayVisible] = useState(true);
+  const [overlayOpacity, setOverlayOpacity] = useState(62);
+  const [curveChannel, setCurveChannel] = useState<CurveChannel>('rgb');
+  const [localMaskOperations, setLocalMaskOperations] = useState<Record<number, DevelopOperations>>({});
+  const maskUpdateTimer = useRef<number | null>(null);
   const activeMask = useDevelopUi((s) => s.activeMask);
   const setActiveMask = useDevelopUi((s) => s.setActiveMask);
   const { data: masks = [] } = useDevelopMasks(photo.id);
@@ -835,9 +1081,64 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
   const deleteMask = useDevelopMaskDelete();
   const applyMaskPreview = useDevelopMaskApplyPreview();
 
+  useEffect(() => {
+    return () => {
+      if (maskUpdateTimer.current !== null) window.clearTimeout(maskUpdateTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (masks.length === 0) {
+      setSelectedMaskId(null);
+      return;
+    }
+    if (selectedMaskId == null || !masks.some((mask) => mask.id === selectedMaskId)) {
+      setSelectedMaskId(masks[0]?.id ?? null);
+    }
+  }, [masks, selectedMaskId]);
+
   const canMask = !masking && !generateMask.isPending;
   const canCreateManualMask = !createMask.isPending;
   const statusLabel = masking ? 'Generating' : 'Local bitmap masks';
+
+  const refreshPreview = useCallback(() => {
+    applyMaskPreview.mutate(
+      { photoId: photo.id, operations },
+      {
+        onSuccess: (receipt) => onPreview(receipt.preview_data_url),
+      },
+    );
+  }, [applyMaskPreview, onPreview, operations, photo.id]);
+
+  const maskOperations = useCallback(
+    (mask: DevelopMask) =>
+      sanitizeMaskOperations(
+        localMaskOperations[mask.id] ?? parseOperationsJson(mask.operations_json) ?? identityOperations(),
+      ),
+    [localMaskOperations],
+  );
+
+  const queueMaskOperationUpdate = useCallback(
+    (maskId: number, nextOps: DevelopOperations) => {
+      if (maskUpdateTimer.current !== null) window.clearTimeout(maskUpdateTimer.current);
+      maskUpdateTimer.current = window.setTimeout(() => {
+        updateMask.mutate(
+          { mask_id: maskId, operations: nextOps },
+          {
+            onSuccess: (mask) => {
+              setLocalMaskOperations((current) => ({
+                ...current,
+                [mask.id]: parseOperationsJson(mask.operations_json) ?? nextOps,
+              }));
+              refreshPreview();
+            },
+            onError: (e) => setMaskError(String(e)),
+          },
+        );
+      }, 120);
+    },
+    [refreshPreview, updateMask],
+  );
 
   const runMask = (preset: MaskPreset) => {
     if (!canMask) return;
@@ -864,17 +1165,6 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
       },
     );
   };
-
-  const maskSrc = activeMask ? `data:image/png;base64,${activeMask.maskB64}` : null;
-
-  function refreshPreview() {
-    applyMaskPreview.mutate(
-      { photoId: photo.id, operations },
-      {
-        onSuccess: (receipt) => onPreview(receipt.preview_data_url),
-      },
-    );
-  }
 
   function createManualMask(kind: 'brush' | 'linear_gradient' | 'radial_gradient') {
     const label =
@@ -904,10 +1194,16 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
   }
 
   function setMaskExposure(maskId: number, exposure: number) {
+    const current = masks.find((mask) => mask.id === maskId);
+    const nextOps = sanitizeMaskOperations({
+      ...(current ? maskOperations(current) : identityOperations()),
+      exposure,
+    });
+    setLocalMaskOperations((local) => ({ ...local, [maskId]: nextOps }));
     updateMask.mutate(
       {
         mask_id: maskId,
-        operations: { ...identityOperations(), exposure },
+        operations: nextOps,
       },
       {
         onSuccess: () => refreshPreview(),
@@ -928,21 +1224,34 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
   }
 
   function maskExposure(mask: (typeof masks)[number]) {
-    try {
-      const parsed: unknown = JSON.parse(mask.operations_json);
-      if (parsed && typeof parsed === 'object' && 'exposure' in parsed) {
-        const exposure = (parsed as { exposure?: unknown }).exposure;
-        return typeof exposure === 'number' ? exposure : 0;
-      }
-    } catch {
-      return 0;
-    }
-    return 0;
+    return maskOperations(mask).exposure;
   }
 
   const selectedMask =
     (selectedMaskId ? masks.find((mask) => mask.id === selectedMaskId) : null) ?? masks[0] ?? null;
-  const selectedMaskPreview = selectedMask ? localMaskPreview(selectedMask) : null;
+  const selectedMaskOps = selectedMask ? maskOperations(selectedMask) : null;
+  const selectedMaskValues = selectedMaskOps ? operationsToValues(selectedMaskOps) : null;
+  const selectedMaskPreview =
+    selectedMask && overlayVisible ? localMaskPreview(selectedMask, overlayOpacity / 100) : null;
+
+  function updateSelectedMaskValues(patch: Partial<DevelopValues>) {
+    if (!selectedMask || !selectedMaskValues) return;
+    const nextValues = { ...selectedMaskValues, ...patch };
+    const nextOps = sanitizeMaskOperations(valuesToOperations(nextValues));
+    setLocalMaskOperations((local) => ({ ...local, [selectedMask.id]: nextOps }));
+    queueMaskOperationUpdate(selectedMask.id, nextOps);
+  }
+
+  function updateSelectedMaskCurves(curves: DevelopValues['curves']) {
+    updateSelectedMaskValues({ curves });
+  }
+
+  function resetSelectedMaskOperations() {
+    if (!selectedMask) return;
+    const nextOps = sanitizeMaskOperations(identityOperations());
+    setLocalMaskOperations((local) => ({ ...local, [selectedMask.id]: nextOps }));
+    queueMaskOperationUpdate(selectedMask.id, nextOps);
+  }
 
   return (
     <div className="mask-stage">
@@ -959,25 +1268,22 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
                 fit="contain"
               />
             )}
-            {selectedMaskPreview &&
-              (selectedMaskPreview.src ? (
-                <img
-                  src={selectedMaskPreview.src}
-                  alt=""
-                  className="local-mask-bitmap mask-overlay"
-                  aria-hidden="true"
-                />
-              ) : (
-                <div
-                  className={`local-mask-preview ${selectedMaskPreview.className}`}
-                  style={selectedMaskPreview.style}
-                  aria-hidden="true"
-                />
-              ))}
-            {maskSrc && <img src={maskSrc} alt="" aria-hidden="true" className="mask-overlay" />}
+            {selectedMaskPreview && (
+              <div
+                className={`local-mask-preview ${selectedMaskPreview.className}`}
+                style={selectedMaskPreview.style}
+                aria-hidden="true"
+                data-testid="selected-mask-overlay"
+              />
+            )}
             <div className="mask-status">
               <Chip variant="solid">Mask · {statusLabel}</Chip>
-              {selectedMask && <Chip>{selectedMask.name}</Chip>}
+              {selectedMask && (
+                <Chip>
+                  {selectedMask.name}
+                  {selectedMask.confidence != null ? ` / ${Math.round(selectedMask.confidence * 100)}%` : ''}
+                </Chip>
+              )}
               {activeMask && (
                 <Chip onClose={() => setActiveMask(null)}>
                   {activeMask.prompt} · {Math.round(activeMask.confidence * 100)}%
@@ -998,13 +1304,14 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
           </div>
           <button
             type="button"
-            className="btn"
-            onClick={() => setActiveMask(null)}
-            disabled={!activeMask}
-            aria-disabled={!activeMask}
+            className={overlayVisible ? 'btn on' : 'btn'}
+            onClick={() => setOverlayVisible((visible) => !visible)}
+            disabled={!selectedMask}
+            aria-disabled={!selectedMask}
+            aria-pressed={overlayVisible}
             style={{ padding: '5px 9px', fontSize: 11.5 }}
           >
-            Clear
+            Overlay
           </button>
         </div>
         <div className="editor-ibody">
@@ -1083,6 +1390,59 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
           </div>
 
           <div className="editor-group">
+            <h4>Selected mask</h4>
+            {selectedMask && selectedMaskValues ? (
+              <div className="mask-adjustments">
+                <div className="mask-selected-card">
+                  <div>
+                    <strong>{selectedMask.name}</strong>
+                    <span className="mono">
+                      {selectedMask.source.replaceAll('_', ' ')} / {selectedMask.mode}
+                      {selectedMask.visible ? '' : ' / hidden'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={resetSelectedMaskOperations}
+                    disabled={updateMask.isPending}
+                  >
+                    Reset
+                  </button>
+                </div>
+                <label className="mask-overlay-toggle">
+                  <input
+                    type="checkbox"
+                    checked={overlayVisible}
+                    onChange={(event) => setOverlayVisible(event.currentTarget.checked)}
+                  />
+                  Show overlay
+                </label>
+                <Slider
+                  label="Overlay opacity"
+                  value={overlayOpacity}
+                  onChange={setOverlayOpacity}
+                  min={10}
+                  max={100}
+                  suffix="%"
+                />
+                <MaskAdjustmentPanel
+                  values={selectedMaskValues}
+                  onChange={(key, value) =>
+                    updateSelectedMaskValues({ [key]: value } as Partial<DevelopValues>)
+                  }
+                  onChangeMany={updateSelectedMaskValues}
+                  onCurvesChange={updateSelectedMaskCurves}
+                  curveChannel={curveChannel}
+                  setCurveChannel={setCurveChannel}
+                />
+              </div>
+            ) : (
+              <div className="mask-empty-state">Select or create a mask to edit local adjustments</div>
+            )}
+          </div>
+
+          <div className="editor-group">
             <h4>Mask layers</h4>
             {masks.length === 0 ? (
               <div className="mask-empty-state">No persistent masks yet</div>
@@ -1096,13 +1456,17 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
                       className={`mask-layer-row ${selectedMask?.id === mask.id ? 'active' : ''}`}
                       data-hidden={!mask.visible}
                     >
-                      <div>
+                      <button
+                        type="button"
+                        className="mask-layer-select"
+                        onClick={() => setSelectedMaskId(mask.id)}
+                      >
                         <strong>{mask.name}</strong>
                         <span className="mono">
-                          {mask.source.replaceAll('_', ' ')} · {mask.mode} · {exposure > 0 ? '+' : ''}
+                          {mask.source.replaceAll('_', ' ')} / {mask.mode} / {exposure > 0 ? '+' : ''}
                           {exposure.toFixed(2)} EV
                         </span>
-                      </div>
+                      </button>
                       <fieldset className="mask-layer-mode">
                         <legend className="mask-mode-legend">Combine mode for {mask.name}</legend>
                         {MASK_MODES.map((mode) => (
@@ -1110,43 +1474,69 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
                             key={mode.id}
                             type="button"
                             className={mask.mode === mode.id ? 'on' : ''}
-                            onClick={() => setMaskModeForLayer(mask.id, mode.id)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setMaskModeForLayer(mask.id, mode.id);
+                            }}
                           >
                             {mode.label}
                           </button>
                         ))}
                       </fieldset>
                       <div className="mask-layer-actions">
-                        <button type="button" className="btn" onClick={() => setSelectedMaskId(mask.id)}>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedMaskId(mask.id);
+                          }}
+                        >
                           Select
                         </button>
                         <button
                           type="button"
                           className="btn"
-                          onClick={() =>
+                          onClick={(event) => {
+                            event.stopPropagation();
                             updateMask.mutate(
                               { mask_id: mask.id, visible: !mask.visible },
                               { onSuccess: () => refreshPreview() },
-                            )
-                          }
+                            );
+                          }}
                         >
                           {mask.visible ? 'Hide' : 'Show'}
                         </button>
-                        <button type="button" className="btn" onClick={() => setMaskExposure(mask.id, 0.35)}>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setMaskExposure(mask.id, 0.35);
+                          }}
+                        >
                           +Light
                         </button>
-                        <button type="button" className="btn" onClick={() => setMaskExposure(mask.id, -0.35)}>
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setMaskExposure(mask.id, -0.35);
+                          }}
+                        >
                           -Dark
                         </button>
                         <button
                           type="button"
                           className="btn danger"
-                          onClick={() =>
+                          onClick={(event) => {
+                            event.stopPropagation();
                             deleteMask.mutate(
                               { maskId: mask.id, photoId: photo.id },
                               { onSuccess: () => refreshPreview() },
-                            )
-                          }
+                            );
+                          }}
                         >
                           Delete
                         </button>
@@ -1176,10 +1566,133 @@ function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskS
   );
 }
 
-function localMaskPreview(mask: DevelopMask): {
+interface MaskAdjustmentPanelProps {
+  values: DevelopValues;
+  onChange: (key: keyof DevelopValues, value: number) => void;
+  onChangeMany: (patch: Partial<DevelopValues>) => void;
+  onCurvesChange: (next: DevelopValues['curves']) => void;
+  curveChannel: CurveChannel;
+  setCurveChannel: (channel: CurveChannel) => void;
+}
+
+function MaskAdjustmentPanel({
+  values,
+  onChange,
+  onChangeMany,
+  onCurvesChange,
+  curveChannel,
+  setCurveChannel,
+}: MaskAdjustmentPanelProps) {
+  const sectionReset = (label: string, patch: Partial<DevelopValues>) => (
+    <button type="button" className="mask-section-reset mono" onClick={() => onChangeMany(patch)}>
+      Reset {label}
+    </button>
+  );
+  const groupHead = (label: string, patch?: Partial<DevelopValues>) => (
+    <div className="mask-adjustment-head">
+      <h5>{label}</h5>
+      {patch ? sectionReset(label, patch) : null}
+    </div>
+  );
+
+  return (
+    <div className="mask-adjustment-stack">
+      <div className="mask-adjustment-group">
+        {groupHead('Light', { exp: 0, con: 0, hi: 0, sh: 0, whites: 0, blacks: 0 })}
+        <Slider label="Exposure" value={values.exp} onChange={(v) => onChange('exp', v)} suffix=" EV" />
+        <Slider label="Contrast" value={values.con} onChange={(v) => onChange('con', v)} />
+        <Slider label="Highlights" value={values.hi} onChange={(v) => onChange('hi', v)} />
+        <Slider label="Shadows" value={values.sh} onChange={(v) => onChange('sh', v)} />
+        <Slider label="Whites" value={values.whites} onChange={(v) => onChange('whites', v)} />
+        <Slider label="Blacks" value={values.blacks} onChange={(v) => onChange('blacks', v)} />
+      </div>
+
+      <div className="mask-adjustment-group">
+        {groupHead('Color', { temp: 0, tint: 0, vib: 0, sat: 0 })}
+        <Slider label="Temp" value={values.temp} onChange={(v) => onChange('temp', v)} suffix="K" />
+        <Slider label="Tint" value={values.tint} onChange={(v) => onChange('tint', v)} />
+        <Slider label="Vibrance" value={values.vib} onChange={(v) => onChange('vib', v)} />
+        <Slider label="Saturation" value={values.sat} onChange={(v) => onChange('sat', v)} />
+      </div>
+
+      <div className="mask-adjustment-group">
+        {groupHead('Detail', { clarity: 0, dehaze: 0 })}
+        <Slider label="Clarity" value={values.clarity} onChange={(v) => onChange('clarity', v)} />
+        <Slider label="Dehaze" value={values.dehaze} onChange={(v) => onChange('dehaze', v)} />
+      </div>
+
+      <div className="mask-adjustment-group">
+        {groupHead('Curves')}
+        <CurvesPanel
+          value={values.curves}
+          onChange={onCurvesChange}
+          channel={curveChannel}
+          setChannel={setCurveChannel}
+        />
+      </div>
+
+      <div className="mask-adjustment-group">
+        {groupHead('Lens Blur', {
+          lensBlurAmount: 0,
+          lensBlurFocusNear: 0,
+          lensBlurFocusFar: 100,
+          lensBlurBokehBoost: 0,
+          lensBlurCatEye: 0,
+        })}
+        <Slider
+          label="Amount"
+          value={values.lensBlurAmount}
+          onChange={(v) => onChange('lensBlurAmount', v)}
+          min={0}
+          max={100}
+        />
+        <Slider
+          label="Focus near"
+          value={values.lensBlurFocusNear}
+          onChange={(v) => onChange('lensBlurFocusNear', v)}
+          min={0}
+          max={100}
+          suffix="%"
+        />
+        <Slider
+          label="Focus far"
+          value={values.lensBlurFocusFar}
+          onChange={(v) => onChange('lensBlurFocusFar', v)}
+          min={0}
+          max={100}
+          suffix="%"
+        />
+        <Slider
+          label="Bokeh boost"
+          value={values.lensBlurBokehBoost}
+          onChange={(v) => onChange('lensBlurBokehBoost', v)}
+          min={0}
+          max={100}
+        />
+        <Slider
+          label="Cat eye"
+          value={values.lensBlurCatEye}
+          onChange={(v) => onChange('lensBlurCatEye', v)}
+          min={0}
+          max={100}
+        />
+      </div>
+
+      <div className="mask-adjustment-group">
+        {groupHead('Effects', { lensVignette: 0 })}
+        <Slider label="Vignette" value={values.lensVignette} onChange={(v) => onChange('lensVignette', v)} />
+      </div>
+    </div>
+  );
+}
+
+function localMaskPreview(
+  mask: DevelopMask,
+  opacity: number,
+  cropValues: DevelopValues | null = null,
+): {
   className: string;
   style: CSSProperties;
-  src: string | null;
 } {
   let payload: Record<string, unknown> = {};
   try {
@@ -1189,18 +1702,32 @@ function localMaskPreview(mask: DevelopMask): {
     payload = {};
   }
   const kind = typeof payload.kind === 'string' ? payload.kind : mask.source;
+  const cropLeft = cropValues ? clampNumber(cropValues.cropX, 0, 95) : 0;
+  const cropTop = cropValues ? clampNumber(cropValues.cropY, 0, 95) : 0;
+  const cropWidth = cropValues ? clampNumber(cropValues.cropW, 5, 100 - cropLeft) : 100;
+  const cropHeight = cropValues ? clampNumber(cropValues.cropH, 5, 100 - cropTop) : 100;
+  const cropStyle: CSSProperties =
+    cropValues == null
+      ? {}
+      : {
+          left: `${-(cropLeft / cropWidth) * 100}%`,
+          top: `${-(cropTop / cropHeight) * 100}%`,
+          right: 'auto',
+          bottom: 'auto',
+          width: `${10000 / cropWidth}%`,
+          height: `${10000 / cropHeight}%`,
+        };
+  const baseStyle = {
+    ...cropStyle,
+    '--mask-opacity': String(clampNumber(opacity, 0.1, 1)),
+  } as CSSProperties & Record<'--mask-opacity', string>;
   if (kind === 'bitmap' && typeof payload.data_b64 === 'string') {
     return {
       className: 'kind-bitmap',
-      style: {},
-      src: `data:image/png;base64,${payload.data_b64}`,
-    };
-  }
-  if (['subject', 'person', 'object', 'sky', 'background', 'foreground', 'landscape'].includes(kind)) {
-    return {
-      className: 'kind-unavailable',
-      style: {},
-      src: null,
+      style: {
+        ...baseStyle,
+        '--mask-image': `url("data:image/png;base64,${payload.data_b64}")`,
+      } as CSSProperties,
     };
   }
   const cx = typeof payload.cx === 'number' ? payload.cx : 0.5;
@@ -1209,6 +1736,7 @@ function localMaskPreview(mask: DevelopMask): {
   const top = typeof payload.top === 'number' ? payload.top : 0;
   const bottom = typeof payload.bottom === 'number' ? payload.bottom : 0.55;
   const style = {
+    ...baseStyle,
     '--mask-cx': `${clampNumber(cx, 0, 1) * 100}%`,
     '--mask-cy': `${clampNumber(cy, 0, 1) * 100}%`,
     '--mask-radius': `${clampNumber(radius, 0.02, 1) * 100}%`,
@@ -1216,7 +1744,7 @@ function localMaskPreview(mask: DevelopMask): {
     '--mask-bottom': `${clampNumber(bottom, 0, 1) * 100}%`,
   } as CSSProperties;
 
-  return { className: `kind-${kind.replaceAll('_', '-')}`, style, src: null };
+  return { className: `kind-${kind.replaceAll('_', '-')}`, style };
 }
 
 interface PromptStageProps {

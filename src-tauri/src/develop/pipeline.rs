@@ -244,6 +244,13 @@ pub(crate) fn apply_spatial(mut img: RgbImage, ops: &Operations) -> RgbImage {
     img
 }
 
+pub(crate) fn apply_local_spatial(mut img: RgbImage, ops: &Operations) -> RgbImage {
+    if ops.lens_blur_amount > 0.0 {
+        img = apply_lens_blur(&img, ops);
+    }
+    img
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn luminance(p: &[f32; 3]) -> f32 {

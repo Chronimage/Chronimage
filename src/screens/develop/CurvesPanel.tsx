@@ -19,6 +19,7 @@
 import { useCallback, useMemo, useRef } from 'react';
 import type { DevelopCurve, DevelopCurves } from '../../tauri/invoke';
 import { identityCurve, MAX_CURVE_POINTS } from '../../tauri/invoke';
+import { CurvesHistogram } from './CurvesHistogram';
 
 export type CurveChannel = 'rgb' | 'r' | 'g' | 'b' | 'l';
 
@@ -254,6 +255,7 @@ export function CurvesPanel({ value, onChange, channel, setChannel }: CurvesPane
         </button>
       </div>
       <div className="curves-box">
+        <CurvesHistogram />
         <svg
           ref={svgRef}
           viewBox={`0 0 ${VB} ${VB}`}
@@ -263,7 +265,7 @@ export function CurvesPanel({ value, onChange, channel, setChannel }: CurvesPane
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerUp}
           onPointerCancel={onPointerUp}
-          style={{ touchAction: 'none', cursor: 'crosshair' }}
+          style={{ touchAction: 'none', cursor: 'crosshair', position: 'relative' }}
           aria-label={`Tone curve — ${channel} channel. Click to add a point, right-click a point to remove it.`}
           role="application"
         >
@@ -272,7 +274,8 @@ export function CurvesPanel({ value, onChange, channel, setChannel }: CurvesPane
               <path d="M 25 0 L 0 0 0 25" fill="none" stroke="var(--stroke)" strokeWidth="0.3" />
             </pattern>
           </defs>
-          <rect width={VB} height={VB} fill="url(#curves-grid)" />
+          {/* Pattern strokes only — fill omitted so the histogram behind shows through. */}
+          <rect width={VB} height={VB} fill="url(#curves-grid)" fillOpacity={0.6} />
 
           {/* Inactive channels, rendered faintly so the user can still see them. */}
           {altChannels.map((c) => (
