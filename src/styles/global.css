@@ -2694,27 +2694,10 @@ select {
   overflow-y: auto;
   padding: 0 8px 12px;
 }
-.sidepanel-section {
-  border-top: 1px solid var(--stroke);
-}
-.sidepanel-section-toggle {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 12px 6px;
-  color: var(--fg);
-  font-size: 12px;
-  text-align: left;
-}
-.sidepanel-section-toggle > span:first-child {
-  font-family: var(--mono-font);
-  font-size: 10.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--fg-mute);
-}
+/* `.sidepanel-section-body` is the inner content wrapper kept inside
+   each <CollapsibleSection> on the left rail (Presets, Masks). The
+   section chrome itself comes from the `.editor-section-*` rules used
+   by the right inspector — same primitive, same look. */
 .sidepanel-section-body {
   display: grid;
   gap: 10px;

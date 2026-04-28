@@ -55,6 +55,7 @@ interface DevelopUiState {
 }
 
 const DEFAULT_PANEL_OPEN: Record<string, boolean> = {
+  // Right inspector
   light: true,
   curves: true,
   color: true,
@@ -65,6 +66,9 @@ const DEFAULT_PANEL_OPEN: Record<string, boolean> = {
   optics: false,
   geometry: false,
   'lens-blur': false,
+  // Left rail (DevelopSidePanel)
+  presets: true,
+  masks: true,
 };
 
 export const useDevelopUi = create<DevelopUiState>((set) => ({
