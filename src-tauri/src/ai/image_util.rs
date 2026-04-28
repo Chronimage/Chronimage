@@ -549,6 +549,69 @@ pub fn open_any(path: &std::path::Path) -> Result<DynamicImage, String> {
     Err(format!("open_any: no decoder accepted {}", path.display()))
 }
 
+/// Full RAW demosaic via rawler's default develop pipeline.
+///
+/// Unlike `open_any`'s rawler branch — which only extracts the *embedded*
+/// JPEG preview (`Decoder::preview_image` / `thumbnail_image`) and is
+/// unreliable on modern Sony bodies — this calls `Decoder::raw_image` to
+/// pull the actual sensor mosaic and runs `RawDevelop::develop_intermediate`
+/// to demosaic + apply the camera color matrix + sRGB-encode. The output
+/// is `DynamicImage::ImageRgb16` at full sensor resolution, so the develop
+/// preview can recover highlight/shadow detail the in-camera JPG clipped.
+///
+/// Cost: ~1–3 s for a 33 MP A7 IV ARW with rayon parallelism (rawler uses
+/// rayon internally for the demosaic loops). Always run this in
+/// `tokio::task::spawn_blocking`. The `DevelopDecodeCache` makes the
+/// per-photo cost a one-time hit on first open; slider drags reuse the
+/// cached `RgbImage`.
+///
+/// Returns the (orientation-applied) developed `DynamicImage` so callers
+/// can choose whether to keep 16-bit precision or downcast to 8-bit.
+pub fn decode_raw_full(
+    path: &std::path::Path,
+    orientation: Option<u32>,
+) -> Result<DynamicImage, String> {
+    use rawler::decoders::RawDecodeParams;
+    use rawler::imgop::develop::RawDevelop;
+    use rawler::rawsource::RawSource;
+
+    let source = RawSource::new(path).map_err(|e| {
+        format!(
+            "decode_raw_full: RawSource::new failed for {}: {e}",
+            path.display()
+        )
+    })?;
+    let decoder = rawler::get_decoder(&source).map_err(|e| {
+        format!(
+            "decode_raw_full: get_decoder failed for {}: {e}",
+            path.display()
+        )
+    })?;
+    let params = RawDecodeParams::default();
+    // The third arg (`dummy`) is `false` — we want real pixel data, not a
+    // metadata-only decode.
+    let rawimage = decoder.raw_image(&source, &params, false).map_err(|e| {
+        format!(
+            "decode_raw_full: raw_image failed for {}: {e}",
+            path.display()
+        )
+    })?;
+    let dev = RawDevelop::default();
+    let intermediate = dev.develop_intermediate(&rawimage).map_err(|e| {
+        format!(
+            "decode_raw_full: develop_intermediate failed for {}: {e}",
+            path.display()
+        )
+    })?;
+    let dyn_img = intermediate.to_dynamic_image().ok_or_else(|| {
+        format!(
+            "decode_raw_full: to_dynamic_image returned None for {}",
+            path.display()
+        )
+    })?;
+    Ok(apply_exif_orientation(dyn_img, orientation))
+}
+
 /// Full HEIF decoder via libheif — handles iPhone HEIC + Android HEIF
 /// main images (which are HEVC-encoded and can't be scanned for JPEG).
 /// Gated behind `cfg(feature = "heic")` so default builds that don't
@@ -1238,5 +1301,40 @@ mod tests {
         let opened = open_any(tmp.path()).expect("open");
         assert_eq!(opened.width(), 16);
         assert_eq!(opened.height(), 16);
+    }
+
+    /// Fixture-gated smoke test for `decode_raw_full`. RAW files are too
+    /// big to commit (a single A7 IV ARW is ~25 MB); set the env var to
+    /// point at a real ARW on disk and re-run with `--ignored` to verify
+    /// rawler's full demosaic chain still works after a rawler upgrade.
+    ///
+    /// ```ignore
+    /// $env:CHRONIMAGE_RAW_DECODE_FIXTURE = 'C:\Users\jayas\OneDrive\Pictures\ram navami\DSC02452.ARW'
+    /// cargo test --manifest-path src-tauri/Cargo.toml --lib decode_raw_full -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "requires CHRONIMAGE_RAW_DECODE_FIXTURE env var pointing at a real RAW"]
+    fn decode_raw_full_demosaics_a_real_raw() {
+        let path = match std::env::var("CHRONIMAGE_RAW_DECODE_FIXTURE") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => {
+                eprintln!("CHRONIMAGE_RAW_DECODE_FIXTURE not set — skipping");
+                return;
+            }
+        };
+        assert!(
+            path.exists(),
+            "fixture path doesn't exist: {}",
+            path.display()
+        );
+        let img = decode_raw_full(&path, None).expect("rawler full decode");
+        // Sony A7 IV is 7008 × 4672. Other RAW bodies will differ; just
+        // assert non-degenerate dimensions so this works on any ARW.
+        assert!(
+            img.width() >= 2000 && img.height() >= 2000,
+            "expected non-degenerate dimensions, got {}×{}",
+            img.width(),
+            img.height()
+        );
     }
 }

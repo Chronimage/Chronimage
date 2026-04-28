@@ -5634,32 +5634,32 @@ pub async fn tether_sources_list(
 
 /// Load the source pixels for the develop pipeline at PREVIEW_LONG_EDGE.
 ///
-/// Skips the thumbnail JPEG roundtrip (`generate_thumbnail_bytes`) — the
-/// previous chain encoded the source to JPEG@Q90, decoded it, ran the
-/// pipeline, then re-encoded at JPEG@Q95. That double-JPEG was a real
-/// quality hit vs Lightroom. Here we open the source directly, apply
-/// EXIF orientation, and downsample with image-rs's Lanczos3 thumbnail
-/// to PREVIEW_LONG_EDGE — a single lossy step (the source itself if it
-/// happens to be a JPEG) instead of two.
+/// RAW files are demosaicked through rawler's full develop chain
+/// (`Decoder::raw_image` → `RawDevelop::develop_intermediate`) — the
+/// 14-bit sensor data is the entire reason the develop module exists.
+/// We do NOT substitute the paired in-camera JPG: editing the JPG would
+/// throw away the dynamic range that makes RAW worth processing.
+///
+/// Non-RAW (JPG/HEIC/etc.) takes `open_any`, which is fast and lossless
+/// up to the source's own compression.
+///
+/// Cost: rawler full demosaic on a 33 MP A7 IV ARW is ~1–3 s with rayon
+/// parallelism. Always runs on `spawn_blocking`. The `DevelopDecodeCache`
+/// makes this a one-time cost per photo open — slider drags hit the
+/// in-memory cache afterwards.
 async fn load_develop_source(pool: &sqlx::SqlitePool, photo_id: i64) -> AppResult<image::RgbImage> {
-    let (is_raw, paired_photo_id, stored_orientation): (bool, Option<i64>, Option<i64>) =
-        sqlx::query_as("SELECT is_raw, paired_photo_id, orientation FROM photos WHERE id = ?1")
+    let stored_orientation: Option<i64> =
+        sqlx::query_scalar("SELECT orientation FROM photos WHERE id = ?1")
             .bind(photo_id)
             .fetch_optional(pool)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
-    // Same source-resolution rule as `generate_thumbnail_bytes`: a RAW
-    // photo prefers its paired JPG until the wgpu RAW pipeline ships.
-    let source_photo_id = match (is_raw, paired_photo_id) {
-        (true, Some(pid)) => pid,
-        _ => photo_id,
-    };
     let source_path: Option<String> = sqlx::query_scalar(
         "SELECT path FROM source_copies \
          WHERE photo_id = ?1 AND path IS NOT NULL \
          ORDER BY is_primary DESC, id ASC LIMIT 1",
     )
-    .bind(source_photo_id)
+    .bind(photo_id)
     .fetch_optional(pool)
     .await?;
     let path = source_path.ok_or_else(|| {
@@ -5671,26 +5671,43 @@ async fn load_develop_source(pool: &sqlx::SqlitePool, photo_id: i64) -> AppResul
             "photo {photo_id}: file not on disk: {path}"
         )));
     }
-    let source_orientation = if source_photo_id == photo_id {
-        stored_orientation.and_then(|v| u32::try_from(v).ok())
-    } else {
-        let orientation: Option<i64> =
-            sqlx::query_scalar("SELECT orientation FROM photos WHERE id = ?1")
-                .bind(source_photo_id)
-                .fetch_optional(pool)
-                .await?;
-        orientation.and_then(|v| u32::try_from(v).ok())
-    };
+    let source_orientation = stored_orientation.and_then(|v| u32::try_from(v).ok());
     let orientation_u32 =
         crate::ai::image_util::orientation_for_decoded_path(&path_buf, source_orientation);
     let long_edge = crate::develop::PREVIEW_LONG_EDGE;
     tokio::task::spawn_blocking(move || -> AppResult<image::RgbImage> {
-        let img = crate::ai::image_util::open_any(&path_buf)
-            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
-        let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
+        let img = if crate::ai::image_util::is_raw_extension(&path_buf) {
+            // Real RAW demosaic. EXIF orientation is applied inside
+            // `decode_raw_full` so we don't double-apply it below.
+            match crate::ai::image_util::decode_raw_full(&path_buf, orientation_u32) {
+                Ok(developed) => developed,
+                Err(e) => {
+                    // Camera unsupported by rawler 0.7, corrupt file, or
+                    // any other demosaic failure — fall through to
+                    // `open_any`, which itself ends in an embedded-JPEG
+                    // byte-scan as a last resort. Better to show *something*
+                    // than to refuse to open the photo.
+                    tracing::warn!(
+                        path = %path_buf.display(),
+                        error = %e,
+                        "develop: rawler full decode failed, falling back to open_any"
+                    );
+                    let fallback = crate::ai::image_util::open_any(&path_buf)
+                        .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
+                    crate::ai::image_util::apply_exif_orientation(fallback, orientation_u32)
+                }
+            }
+        } else {
+            let opened = crate::ai::image_util::open_any(&path_buf)
+                .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
+            crate::ai::image_util::apply_exif_orientation(opened, orientation_u32)
+        };
         // image-rs's `thumbnail` is Lanczos3 — same kernel Lightroom uses
         // for its display proxies. No-ops when the source is already
-        // smaller than `long_edge` on its long side.
+        // smaller than `long_edge` on its long side. We downcast u16 →
+        // u8 here so the cache + CPU pipeline keep their existing
+        // RgbImage interface; 16-bit-throughout editing is a separate,
+        // larger refactor.
         let resized = img.thumbnail(long_edge, long_edge);
         Ok(resized.to_rgb8())
     })
