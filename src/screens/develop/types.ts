@@ -1,4 +1,4 @@
-export type DevelopTab = 'develop' | 'mask' | 'prompt';
+export type DevelopTab = 'develop' | 'prompt';
 
 export type PresetCategory = 'face' | 'scene' | 'quality' | 'style' | 'custom';
 
