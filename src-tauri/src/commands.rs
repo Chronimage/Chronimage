@@ -5632,32 +5632,89 @@ pub async fn tether_sources_list(
     crate::merge_capture::list_tether_sources(&state.pool).await
 }
 
-/// Generate a preview JPEG for `photo_id` under `ops`. Renders at 1280
-/// long-edge — big enough to look good on-screen, small enough to keep
-/// slider drags at > 10 fps on CPU.
+/// Load the source pixels for the develop pipeline at PREVIEW_LONG_EDGE.
+///
+/// Skips the thumbnail JPEG roundtrip (`generate_thumbnail_bytes`) — the
+/// previous chain encoded the source to JPEG@Q90, decoded it, ran the
+/// pipeline, then re-encoded at JPEG@Q95. That double-JPEG was a real
+/// quality hit vs Lightroom. Here we open the source directly, apply
+/// EXIF orientation, and downsample with image-rs's Lanczos3 thumbnail
+/// to PREVIEW_LONG_EDGE — a single lossy step (the source itself if it
+/// happens to be a JPEG) instead of two.
+async fn load_develop_source(pool: &sqlx::SqlitePool, photo_id: i64) -> AppResult<image::RgbImage> {
+    let (is_raw, paired_photo_id, stored_orientation): (bool, Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT is_raw, paired_photo_id, orientation FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("photo {photo_id}")))?;
+    // Same source-resolution rule as `generate_thumbnail_bytes`: a RAW
+    // photo prefers its paired JPG until the wgpu RAW pipeline ships.
+    let source_photo_id = match (is_raw, paired_photo_id) {
+        (true, Some(pid)) => pid,
+        _ => photo_id,
+    };
+    let source_path: Option<String> = sqlx::query_scalar(
+        "SELECT path FROM source_copies \
+         WHERE photo_id = ?1 AND path IS NOT NULL \
+         ORDER BY is_primary DESC, id ASC LIMIT 1",
+    )
+    .bind(source_photo_id)
+    .fetch_optional(pool)
+    .await?;
+    let path = source_path.ok_or_else(|| {
+        AppError::NotFound(format!("photo {photo_id}: no local path in source_copies"))
+    })?;
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.exists() {
+        return Err(AppError::NotFound(format!(
+            "photo {photo_id}: file not on disk: {path}"
+        )));
+    }
+    let source_orientation = if source_photo_id == photo_id {
+        stored_orientation.and_then(|v| u32::try_from(v).ok())
+    } else {
+        let orientation: Option<i64> =
+            sqlx::query_scalar("SELECT orientation FROM photos WHERE id = ?1")
+                .bind(source_photo_id)
+                .fetch_optional(pool)
+                .await?;
+        orientation.and_then(|v| u32::try_from(v).ok())
+    };
+    let orientation_u32 =
+        crate::ai::image_util::orientation_for_decoded_path(&path_buf, source_orientation);
+    let long_edge = crate::develop::PREVIEW_LONG_EDGE;
+    tokio::task::spawn_blocking(move || -> AppResult<image::RgbImage> {
+        let img = crate::ai::image_util::open_any(&path_buf)
+            .map_err(|e| AppError::Io(std::io::Error::other(e)))?;
+        let img = crate::ai::image_util::apply_exif_orientation(img, orientation_u32);
+        // image-rs's `thumbnail` is Lanczos3 — same kernel Lightroom uses
+        // for its display proxies. No-ops when the source is already
+        // smaller than `long_edge` on its long side.
+        let resized = img.thumbnail(long_edge, long_edge);
+        Ok(resized.to_rgb8())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("develop source decode join: {e}")))?
+}
+
+/// Render `photo_id` under `ops` into a base64-encoded JPEG data URL.
+///
+/// Uses the `DevelopDecodeCache` so slider drags don't re-decode the
+/// source on every tick — the cache holds the current photo's RGB pixels
+/// at PREVIEW_LONG_EDGE plus the previous photo's, so flipping back and
+/// forth in the filmstrip is instant.
 async fn render_preview(
     pool: &sqlx::SqlitePool,
     cache: &std::sync::Arc<crate::develop::DevelopDecodeCache>,
     photo_id: i64,
     ops: &Operations,
 ) -> AppResult<String> {
-    // Cache hit: skip thumbnail decode entirely. Big win on slider drags
-    // (~30 ms saved at 2048 px JPEG decode vs zero-copy Arc clone).
     let rgb = match cache.get(photo_id) {
         Some(arc) => arc,
         None => {
-            // Pull the on-disk thumbnail at the develop preview resolution
-            // (2048 px long-edge — see DevelopDecodeCache::PREVIEW_LONG_EDGE).
-            // The previous 1280 px was the source of the "hazy" preview; at
-            // 2048 px the browser downsamples into the canvas instead of
-            // upsampling, which preserves edge detail.
-            let thumb_bytes =
-                generate_thumbnail_bytes(photo_id, Some(crate::develop::PREVIEW_LONG_EDGE), pool)
-                    .await?;
-            let decoded = image::load_from_memory(&thumb_bytes).map_err(|e| {
-                AppError::Internal(format!("decode thumb for photo {photo_id}: {e}"))
-            })?;
-            let arc = std::sync::Arc::new(decoded.to_rgb8());
+            let decoded = load_develop_source(pool, photo_id).await?;
+            let arc = std::sync::Arc::new(decoded);
             cache.insert(photo_id, std::sync::Arc::clone(&arc));
             arc
         }
@@ -5666,16 +5723,18 @@ async fn render_preview(
     let masks = crate::develop::masks::list_visible(pool, photo_id).await?;
     let processed = if ops.is_identity() && masks.is_empty() {
         // Identity ops + no masks: skip the whole pipeline. Re-encode the
-        // cached RGB directly so we still get a Q92 preview URL out.
+        // cached RGB directly so we still get a fresh preview URL out.
         (*rgb).clone()
     } else {
         crate::develop::masks::apply_mask_layers(&rgb, ops, &masks)?
     };
-    let mut out: Vec<u8> = Vec::with_capacity(600 * 1024);
+    // JPEG quality 95 — visually indistinguishable from Q100 at this size
+    // on natural images, ~30 % smaller payload than Q100. The previous
+    // Q92 was leaving visible blockiness in smooth gradients (sky, skin)
+    // when compared side-by-side with Lightroom.
+    let mut out: Vec<u8> = Vec::with_capacity(900 * 1024);
     let (w, h) = processed.dimensions();
-    // Quality 92 (vs the old 85) trades ~25% payload size for a visible
-    // sharpness gain — smooth gradients no longer get blocky at this size.
-    let encoder = JpegEncoder::new_with_quality(&mut out, 92);
+    let encoder = JpegEncoder::new_with_quality(&mut out, 95);
     encoder
         .write_image(processed.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|e| AppError::Internal(format!("encode preview: {e}")))?;

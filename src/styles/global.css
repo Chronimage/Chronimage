@@ -2585,11 +2585,14 @@ select {
   max-height: 240px;
   margin: 0 auto;
 }
-.curves-box svg {
+/* The curves grid SVG fills its container; the histogram SVG layered
+   behind it (.curves-histogram) keeps its own absolute positioning. */
+.curves-box > svg:not(.curves-histogram) {
   width: 100%;
   height: 100%;
   display: block;
   position: relative;
+  z-index: 1;
 }
 
 /* Develop side panel — preset library */

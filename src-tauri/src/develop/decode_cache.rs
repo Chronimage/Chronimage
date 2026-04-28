@@ -14,12 +14,13 @@
 use image::RgbImage;
 use std::sync::{Arc, Mutex};
 
-/// Max long-edge resolution we decode for the develop preview path. Big
-/// enough that a ~1100 px viewport sees a downsample (sharpening), not an
-/// upsample (the source of the "hazy preview" complaint at the previous
-/// 1280 px). At 2048 px Q92 the IPC payload stays under ~800 KB after
-/// base64 — comfortably inside Tauri's default IPC budget.
-pub const PREVIEW_LONG_EDGE: u32 = 2048;
+/// Max long-edge resolution we decode for the develop preview path.
+/// At 3072 px the canvas always sees a downsample (the editor canvas
+/// is at most ~2200 px on common HiDPI setups), which is the only way
+/// to get edge detail comparable to Lightroom. 3072 × 2048 × 3 ≈ 19 MB
+/// of resident RGB per cached photo (× 2 slots = ~38 MB), and JPEG
+/// Q95 at this size encodes to ~1–1.5 MB → ~1.4–2 MB after base64.
+pub const PREVIEW_LONG_EDGE: u32 = 3072;
 
 const SLOTS: usize = 2;
 
