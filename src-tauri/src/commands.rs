@@ -5201,7 +5201,11 @@ pub async fn develop_open(
     photo_id: i64,
 ) -> AppResult<DevelopOpenResponse> {
     let ops = crate::develop::history::load_current(&state.pool, photo_id).await?;
-    let preview = render_preview(&state.pool, photo_id, &ops).await?;
+    // Drop any stale decode for this photo so the open path always re-decodes
+    // from disk — protects us from edits made via XMP outside the running
+    // session, and keeps the cache honest if the source file was overwritten.
+    state.develop_decode_cache.evict(photo_id);
+    let preview = render_preview(&state.pool, &state.develop_decode_cache, photo_id, &ops).await?;
     Ok(DevelopOpenResponse {
         photo_id,
         operations: ops,
@@ -5225,7 +5229,13 @@ pub async fn develop_apply(
     operations: Operations,
 ) -> AppResult<RenderReceipt> {
     let start = std::time::Instant::now();
-    let preview_data_url = render_preview(&state.pool, photo_id, &operations).await?;
+    let preview_data_url = render_preview(
+        &state.pool,
+        &state.develop_decode_cache,
+        photo_id,
+        &operations,
+    )
+    .await?;
     Ok(RenderReceipt {
         photo_id,
         preview_data_url,
@@ -5299,7 +5309,8 @@ pub async fn develop_preset_apply(
     let base = crate::develop::history::load_current(&state.pool, photo_id).await?;
     let blended = base.blend(preset_ops, strength);
     let start = std::time::Instant::now();
-    let preview_data_url = render_preview(&state.pool, photo_id, &blended).await?;
+    let preview_data_url =
+        render_preview(&state.pool, &state.develop_decode_cache, photo_id, &blended).await?;
     Ok(RenderReceipt {
         photo_id,
         preview_data_url,
@@ -5384,7 +5395,13 @@ pub async fn develop_adaptive_preset_apply(
 
     let start = std::time::Instant::now();
     let current_ops = crate::develop::history::load_current(&state.pool, photo_id).await?;
-    let preview_data_url = render_preview(&state.pool, photo_id, &current_ops).await?;
+    let preview_data_url = render_preview(
+        &state.pool,
+        &state.develop_decode_cache,
+        photo_id,
+        &current_ops,
+    )
+    .await?;
     Ok(RenderReceipt {
         photo_id,
         preview_data_url,
@@ -5499,7 +5516,13 @@ pub async fn develop_mask_generate(
     .await?;
     let mask = crate::develop::masks::get(&state.pool, id).await?;
     let current_ops = crate::develop::history::load_current(&state.pool, req.photo_id).await?;
-    let preview_data_url = render_preview(&state.pool, req.photo_id, &current_ops).await?;
+    let preview_data_url = render_preview(
+        &state.pool,
+        &state.develop_decode_cache,
+        req.photo_id,
+        &current_ops,
+    )
+    .await?;
     Ok(DevelopMaskGenerateReceipt {
         mask,
         preview_data_url,
@@ -5614,24 +5637,45 @@ pub async fn tether_sources_list(
 /// slider drags at > 10 fps on CPU.
 async fn render_preview(
     pool: &sqlx::SqlitePool,
+    cache: &std::sync::Arc<crate::develop::DevelopDecodeCache>,
     photo_id: i64,
     ops: &Operations,
 ) -> AppResult<String> {
-    // Reuse the generate_thumbnail_bytes path for the baseline JPEG.
-    let thumb_bytes = generate_thumbnail_bytes(photo_id, Some(1280), pool).await?;
-    // Decode → apply ops → re-encode.
-    let decoded = image::load_from_memory(&thumb_bytes)
-        .map_err(|e| AppError::Internal(format!("decode thumb for photo {photo_id}: {e}")))?;
-    let rgb = decoded.to_rgb8();
+    // Cache hit: skip thumbnail decode entirely. Big win on slider drags
+    // (~30 ms saved at 2048 px JPEG decode vs zero-copy Arc clone).
+    let rgb = match cache.get(photo_id) {
+        Some(arc) => arc,
+        None => {
+            // Pull the on-disk thumbnail at the develop preview resolution
+            // (2048 px long-edge — see DevelopDecodeCache::PREVIEW_LONG_EDGE).
+            // The previous 1280 px was the source of the "hazy" preview; at
+            // 2048 px the browser downsamples into the canvas instead of
+            // upsampling, which preserves edge detail.
+            let thumb_bytes =
+                generate_thumbnail_bytes(photo_id, Some(crate::develop::PREVIEW_LONG_EDGE), pool)
+                    .await?;
+            let decoded = image::load_from_memory(&thumb_bytes).map_err(|e| {
+                AppError::Internal(format!("decode thumb for photo {photo_id}: {e}"))
+            })?;
+            let arc = std::sync::Arc::new(decoded.to_rgb8());
+            cache.insert(photo_id, std::sync::Arc::clone(&arc));
+            arc
+        }
+    };
+
     let masks = crate::develop::masks::list_visible(pool, photo_id).await?;
     let processed = if ops.is_identity() && masks.is_empty() {
-        rgb
+        // Identity ops + no masks: skip the whole pipeline. Re-encode the
+        // cached RGB directly so we still get a Q92 preview URL out.
+        (*rgb).clone()
     } else {
         crate::develop::masks::apply_mask_layers(&rgb, ops, &masks)?
     };
-    let mut out: Vec<u8> = Vec::with_capacity(200 * 1024);
+    let mut out: Vec<u8> = Vec::with_capacity(600 * 1024);
     let (w, h) = processed.dimensions();
-    let encoder = JpegEncoder::new_with_quality(&mut out, 85);
+    // Quality 92 (vs the old 85) trades ~25% payload size for a visible
+    // sharpness gain — smooth gradients no longer get blocky at this size.
+    let encoder = JpegEncoder::new_with_quality(&mut out, 92);
     encoder
         .write_image(processed.as_raw(), w, h, image::ExtendedColorType::Rgb8)
         .map_err(|e| AppError::Internal(format!("encode preview: {e}")))?;

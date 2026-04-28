@@ -755,7 +755,13 @@ function DevelopStageSplit({
   onClearMaskSelection,
 }: DevelopStageSplitProps) {
   const [zoom, setZoom] = useState(100);
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const frameRef = useRef<HTMLDivElement | null>(null);
+  const panDragRef = useRef<{ startX: number; startY: number; basePanX: number; basePanY: number } | null>(
+    null,
+  );
   const cropDragRef = useRef<{
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se';
     startX: number;
@@ -763,8 +769,38 @@ function DevelopStageSplit({
     start: Pick<DevelopValues, 'cropX' | 'cropY' | 'cropW' | 'cropH'>;
   } | null>(null);
 
-  const zoomIn = () => setZoom((z) => clampNumber(z + 25, 25, 300));
-  const zoomOut = () => setZoom((z) => clampNumber(z - 25, 25, 300));
+  // Multiplicative zoom step matches Lightroom's "wheel notch" feel — at
+  // 1.15 each notch zooms in by ~15%, four notches roughly doubles.
+  const ZOOM_STEP = 1.15;
+  const ZOOM_MIN = 8;
+  const ZOOM_MAX = 800;
+  const zoomIn = () => setZoom((z) => clampNumber(z * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX));
+  const zoomOut = () => setZoom((z) => clampNumber(z / ZOOM_STEP, ZOOM_MIN, ZOOM_MAX));
+  const resetView = () => {
+    setZoom(100);
+    setPanX(0);
+    setPanY(0);
+  };
+  // 1:1 means one preview-source pixel per screen pixel. The preview is
+  // delivered at 2048 px long-edge (DevelopDecodeCache::PREVIEW_LONG_EDGE),
+  // and at zoom=100 the image is displayed at the frame's long edge.
+  const goOneToOne = () => {
+    const frame = frameRef.current;
+    if (!frame) {
+      setZoom(200);
+      return;
+    }
+    const rect = frame.getBoundingClientRect();
+    const longEdge = Math.max(rect.width, rect.height);
+    if (longEdge <= 0) {
+      setZoom(200);
+      return;
+    }
+    const next = clampNumber((2048 / longEdge) * 100, ZOOM_MIN, ZOOM_MAX);
+    setZoom(next);
+    setPanX(0);
+    setPanY(0);
+  };
   const resetCrop = () =>
     onGlobalValuesChange({ cropX: 0, cropY: 0, cropW: 100, cropH: 100 }, { render: !cropMode });
   const applyAspect = (patch: Partial<DevelopValues>) => onGlobalValuesChange(patch, { render: !cropMode });
@@ -845,6 +881,75 @@ function DevelopStageSplit({
     cropDragRef.current = null;
   };
 
+  // Reset pan + zoom when switching photos so the user always starts at
+  // Fit. Without this you can land on a new photo mid-pan and see only a
+  // corner of it.
+  useEffect(() => {
+    setZoom(100);
+    setPanX(0);
+    setPanY(0);
+  }, [photo.id]);
+
+  // Mouse-wheel cursor-anchored zoom. React 19's onWheel is a passive
+  // listener and can't preventDefault, which means the page would scroll
+  // every time you spin the wheel over the canvas. Attach imperatively
+  // with passive:false so wheel events stay on the canvas.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const handler = (event: WheelEvent) => {
+      if (cropMode) return;
+      event.preventDefault();
+      const rect = frame.getBoundingClientRect();
+      const cx = event.clientX - rect.left - rect.width / 2;
+      const cy = event.clientY - rect.top - rect.height / 2;
+      const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      setZoom((current) => {
+        const next = clampNumber(current * factor, ZOOM_MIN, ZOOM_MAX);
+        const ratio = next / current;
+        // Cursor-anchored math: keep the image-space coord under the
+        // pointer fixed across the zoom step.
+        setPanX((px) => cx - (cx - px) * ratio);
+        setPanY((py) => cy - (cy - py) * ratio);
+        return next;
+      });
+    };
+    frame.addEventListener('wheel', handler, { passive: false });
+    return () => {
+      frame.removeEventListener('wheel', handler);
+    };
+  }, [cropMode]);
+
+  const startPanDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (cropMode) return;
+    if (zoom <= 100) return;
+    const target = event.target as HTMLElement;
+    // Don't hijack drags that started on a crop handle — those are
+    // captured separately and need their own pointer-capture path.
+    if (target.closest('.crop-handle, .crop-box')) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    panDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      basePanX: panX,
+      basePanY: panY,
+    };
+  };
+
+  const movePanDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = panDragRef.current;
+    if (!drag) return;
+    setPanX(drag.basePanX + (event.clientX - drag.startX));
+    setPanY(drag.basePanY + (event.clientY - drag.startY));
+  };
+
+  const stopPanDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (!panDragRef.current) return;
+    panDragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+  };
+
   return (
     <div className="editor-stage">
       <div className="editor-main">
@@ -853,114 +958,167 @@ function DevelopStageSplit({
             <button type="button" className="btn" onClick={zoomOut} aria-label="Zoom out">
               -
             </button>
-            <button type="button" className="btn" onClick={() => setZoom(100)}>
-              {zoom}%
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setZoomMenuOpen((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={zoomMenuOpen}
+            >
+              {Math.round(zoom)}%
             </button>
             <button type="button" className="btn" onClick={zoomIn} aria-label="Zoom in">
               +
             </button>
-            <button type="button" className="btn" onClick={() => setZoom(100)}>
+            <button type="button" className="btn" onClick={resetView}>
               Fit
             </button>
+            <button type="button" className="btn" onClick={goOneToOne} title="Native preview pixels">
+              1:1
+            </button>
+            {zoomMenuOpen ? (
+              <div className="develop-zoom-menu" role="menu">
+                {[25, 50, 100, 200, 400].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    role="menuitem"
+                    className="develop-zoom-menu-item"
+                    onClick={() => {
+                      setZoom(preset);
+                      setPanX(0);
+                      setPanY(0);
+                      setZoomMenuOpen(false);
+                    }}
+                  >
+                    {preset}%
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
           <div
             ref={frameRef}
             data-testid="develop-canvas-frame"
             className="develop-canvas-frame"
-            onPointerMove={updateCropDrag}
-            onPointerUp={stopCropDrag}
-            onPointerCancel={stopCropDrag}
+            onPointerDown={startPanDrag}
+            onPointerMove={(event) => {
+              movePanDrag(event);
+              updateCropDrag(event);
+            }}
+            onPointerUp={(event) => {
+              stopPanDrag(event);
+              stopCropDrag();
+            }}
+            onPointerCancel={(event) => {
+              stopPanDrag(event);
+              stopCropDrag();
+            }}
             style={{
               width: 'min(100%, 1100px)',
               aspectRatio: stageAspect,
               maxHeight: '100%',
               position: 'relative',
-              transform: `scale(${zoom / 100})`,
+              overflow: 'hidden',
+              cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'default',
             }}
           >
-            {preview ? (
-              <img
-                src={preview}
-                alt={photo.filename}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  borderRadius: 4,
-                  background: 'var(--bg-chrome)',
-                }}
-              />
-            ) : (
-              <div
-                className="mono"
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--fg-mute)',
-                  fontSize: 12,
-                }}
-              >
-                Rendering…
-              </div>
-            )}
-            {selectedMaskPreview && (
-              <div
-                className={`local-mask-preview ${selectedMaskPreview.className}`}
-                style={selectedMaskPreview.style}
-                aria-hidden="true"
-                data-testid="selected-mask-overlay"
-              />
-            )}
-            {showCropOverlay && (
-              <>
-                <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
-                <div
-                  className="crop-dim crop-dim-left"
-                  style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
-                />
-                <div
-                  className="crop-dim crop-dim-right"
+            <div
+              className="develop-canvas-zoom"
+              style={{
+                position: 'absolute',
+                inset: 0,
+                transformOrigin: 'center center',
+                transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})`,
+                willChange: 'transform',
+              }}
+            >
+              {preview ? (
+                <img
+                  src={preview}
+                  alt={photo.filename}
+                  draggable={false}
                   style={{
-                    top: `${cropTop}%`,
-                    left: `${cropLeft + cropWidth}%`,
-                    right: 0,
-                    height: `${cropHeight}%`,
+                    position: 'absolute',
+                    inset: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'contain',
+                    borderRadius: 4,
+                    background: 'var(--bg-chrome)',
+                    userSelect: 'none',
                   }}
                 />
-                <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
+              ) : (
                 <div
-                  className={cropMode ? 'crop-box active' : 'crop-box passive'}
+                  className="mono"
                   style={{
-                    left: `${cropLeft}%`,
-                    top: `${cropTop}%`,
-                    width: `${cropWidth}%`,
-                    height: `${cropHeight}%`,
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--fg-mute)',
+                    fontSize: 12,
                   }}
-                  onPointerDown={(event) => startCropDrag('move', event)}
-                  role="presentation"
                 >
-                  <div className="crop-grid" />
-                  {cropMode &&
-                    (['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
-                      <button
-                        key={handle}
-                        type="button"
-                        className={`crop-handle ${handle}`}
-                        aria-label={`Resize crop ${handle}`}
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          startCropDrag(handle, event);
-                        }}
-                      />
-                    ))}
+                  Rendering…
                 </div>
-              </>
-            )}
+              )}
+              {selectedMaskPreview && (
+                <div
+                  className={`local-mask-preview ${selectedMaskPreview.className}`}
+                  style={selectedMaskPreview.style}
+                  aria-hidden="true"
+                  data-testid="selected-mask-overlay"
+                />
+              )}
+              {showCropOverlay && (
+                <>
+                  <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
+                  <div
+                    className="crop-dim crop-dim-left"
+                    style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
+                  />
+                  <div
+                    className="crop-dim crop-dim-right"
+                    style={{
+                      top: `${cropTop}%`,
+                      left: `${cropLeft + cropWidth}%`,
+                      right: 0,
+                      height: `${cropHeight}%`,
+                    }}
+                  />
+                  <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
+                  <div
+                    className={cropMode ? 'crop-box active' : 'crop-box passive'}
+                    style={{
+                      left: `${cropLeft}%`,
+                      top: `${cropTop}%`,
+                      width: `${cropWidth}%`,
+                      height: `${cropHeight}%`,
+                    }}
+                    onPointerDown={(event) => startCropDrag('move', event)}
+                    role="presentation"
+                  >
+                    <div className="crop-grid" />
+                    {cropMode &&
+                      (['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+                        <button
+                          key={handle}
+                          type="button"
+                          className={`crop-handle ${handle}`}
+                          aria-label={`Resize crop ${handle}`}
+                          onPointerDown={(event) => {
+                            event.stopPropagation();
+                            startCropDrag(handle, event);
+                          }}
+                        />
+                      ))}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
           {cropMode && (
             <div className="develop-crop-toolbar">

@@ -13,6 +13,7 @@
 //!   Portrait relight · B&W film) + user-preset CRUD.
 
 pub mod ai_edits;
+pub mod decode_cache;
 pub mod history;
 pub mod masks;
 pub mod ops;
@@ -21,6 +22,7 @@ pub mod presets;
 pub mod sam;
 pub mod segmentation;
 
+pub use decode_cache::{DevelopDecodeCache, PREVIEW_LONG_EDGE};
 pub use masks::{DevelopMask, DevelopMaskCreateRequest, DevelopMaskUpdateRequest};
 pub use ops::{Operations, PastedReceipt, RenderReceipt};
 pub use presets::Preset;

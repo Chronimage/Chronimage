@@ -235,6 +235,14 @@ pub fn apply_dynamic(img: &DynamicImage, ops: &Operations) -> DynamicImage {
 }
 
 pub(crate) fn apply_spatial(mut img: RgbImage, ops: &Operations) -> RgbImage {
+    // Geometry first: rotate cardinal multiples + auto-crop to inscribed
+    // rectangle for the residual continuous angle. This matches Lightroom's
+    // "Straighten" auto-crop behavior (no black corners). Rotation and
+    // straighten are summed so a 90° + 2° fine adjustment composes cleanly.
+    let total_deg = ops.rotation + ops.straighten;
+    if total_deg.abs() > 0.01 {
+        img = apply_rotation(&img, total_deg);
+    }
     if ops.lens_blur_amount > 0.0 {
         img = apply_lens_blur(&img, ops);
     }
@@ -280,6 +288,135 @@ fn apply_crop(img: &RgbImage, ops: &Operations) -> RgbImage {
     let cw = ((crop_w * w as f32).round() as u32).clamp(1, w.saturating_sub(x));
     let ch = ((crop_h * h as f32).round() as u32).clamp(1, h.saturating_sub(y));
     imageops::crop_imm(img, x, y, cw, ch).to_image()
+}
+
+/// Rotate by `degrees` and crop to the largest axis-aligned rectangle
+/// inscribed in the rotated image. Snaps to cardinal multiples of 90°
+/// when within 0.01° tolerance (cheap pixel-perfect rotate); otherwise
+/// applies a parallel bilinear-sampled rotation followed by an inscribed
+/// crop using Sneddon's formula. No black corners — matches Lightroom's
+/// straighten behavior.
+fn apply_rotation(img: &RgbImage, degrees: f32) -> RgbImage {
+    // Normalise to (-180, 180].
+    let mut deg = ((degrees % 360.0) + 360.0) % 360.0;
+    if deg > 180.0 {
+        deg -= 360.0;
+    }
+    if deg.abs() < 0.01 {
+        return img.clone();
+    }
+
+    // Cardinal rotates first — exact, fast, no resampling.
+    let mut working = img.clone();
+    let mut residual = deg;
+    if (residual - 90.0).abs() < 0.01 {
+        working = imageops::rotate90(&working);
+        residual = 0.0;
+    } else if (residual - 180.0).abs() < 0.01 || (residual + 180.0).abs() < 0.01 {
+        working = imageops::rotate180(&working);
+        residual = 0.0;
+    } else if (residual + 90.0).abs() < 0.01 {
+        working = imageops::rotate270(&working);
+        residual = 0.0;
+    } else if residual > 45.0 {
+        working = imageops::rotate90(&working);
+        residual -= 90.0;
+    } else if residual < -45.0 {
+        working = imageops::rotate270(&working);
+        residual += 90.0;
+    }
+
+    if residual.abs() < 0.01 {
+        return working;
+    }
+
+    rotate_inscribed(&working, residual)
+}
+
+/// Continuous rotation in [-45°, 45°] with bilinear sampling, output
+/// auto-cropped to the inscribed axis-aligned rectangle (no black wedges).
+/// Use `apply_rotation` for the cardinal-snap wrapper.
+fn rotate_inscribed(img: &RgbImage, degrees: f32) -> RgbImage {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img.clone();
+    }
+    // Negate so positive degrees rotate the image clockwise (Lightroom's
+    // convention). The rotation matrix below applies an inverse map from
+    // output pixels back into the input.
+    let theta = -degrees.to_radians();
+    let cos = theta.cos();
+    let sin = theta.sin();
+    let abs_cos = cos.abs();
+    let abs_sin = sin.abs();
+    let w_f = w as f32;
+    let h_f = h as f32;
+    // Sneddon's inscribed-rectangle formula. For |θ| ≤ 45° the simpler
+    // branch always applies; the larger-angle branch never triggers in
+    // our pipeline (cardinal-snap above peels off the 90° components).
+    let cos_2a = (abs_cos * abs_cos - abs_sin * abs_sin).max(1e-6);
+    let inner_w = ((w_f * abs_cos - h_f * abs_sin) / cos_2a).max(1.0);
+    let inner_h = ((h_f * abs_cos - w_f * abs_sin) / cos_2a).max(1.0);
+    let out_w = inner_w.floor().min(w_f) as u32;
+    let out_h = inner_h.floor().min(h_f) as u32;
+    if out_w == 0 || out_h == 0 {
+        return img.clone();
+    }
+
+    let cx_in = w_f * 0.5;
+    let cy_in = h_f * 0.5;
+    let cx_out = out_w as f32 * 0.5;
+    let cy_out = out_h as f32 * 0.5;
+
+    let mut out_bytes = vec![0u8; (out_w * out_h * 3) as usize];
+    let row_stride = (out_w * 3) as usize;
+    out_bytes
+        .par_chunks_exact_mut(row_stride)
+        .enumerate()
+        .for_each(|(yo, row)| {
+            let dy = yo as f32 - cy_out;
+            for xo in 0..out_w as usize {
+                let dx = xo as f32 - cx_out;
+                let xi = cx_in + dx * cos - dy * sin;
+                let yi = cy_in + dx * sin + dy * cos;
+                let pixel = sample_bilinear(img, xi, yi);
+                let off = xo * 3;
+                row[off] = pixel[0];
+                row[off + 1] = pixel[1];
+                row[off + 2] = pixel[2];
+            }
+        });
+    RgbImage::from_raw(out_w, out_h, out_bytes).unwrap_or_else(|| img.clone())
+}
+
+/// Bilinear RGB sample with edge clamping. Returns black when the query
+/// is fully outside the image (shouldn't happen given the inscribed
+/// crop, but the defensive branch keeps the rotated edge clean).
+fn sample_bilinear(img: &RgbImage, x: f32, y: f32) -> [u8; 3] {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return [0, 0, 0];
+    }
+    let xc = x.clamp(0.0, w as f32 - 1.0);
+    let yc = y.clamp(0.0, h as f32 - 1.0);
+    let x0 = xc.floor() as u32;
+    let y0 = yc.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let dx = xc - x0 as f32;
+    let dy = yc - y0 as f32;
+    let p00 = img.get_pixel(x0, y0).0;
+    let p10 = img.get_pixel(x1, y0).0;
+    let p01 = img.get_pixel(x0, y1).0;
+    let p11 = img.get_pixel(x1, y1).0;
+    let mut out = [0u8; 3];
+    for c in 0..3 {
+        let top = p00[c] as f32 * (1.0 - dx) + p10[c] as f32 * dx;
+        let bot = p01[c] as f32 * (1.0 - dx) + p11[c] as f32 * dx;
+        let v = top * (1.0 - dy) + bot * dy;
+        out[c] = v.round().clamp(0.0, 255.0) as u8;
+    }
+    out
 }
 
 fn apply_vignette(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
@@ -690,5 +827,52 @@ mod tests {
             (v - 128.5 / 255.0).abs() < 1e-3,
             "expected linear interp, got {v}"
         );
+    }
+
+    #[test]
+    fn cardinal_rotation_swaps_dimensions() {
+        let img = RgbImage::from_pixel(20, 12, image::Rgb([100, 100, 100]));
+        let mut ops = Operations::identity();
+        ops.rotation = 90.0;
+        let out = apply(&img, &ops);
+        assert_eq!(out.dimensions(), (12, 20));
+    }
+
+    #[test]
+    fn straighten_inscribed_crop_shrinks_dimensions() {
+        let img = RgbImage::from_pixel(120, 80, image::Rgb([200, 200, 200]));
+        let mut ops = Operations::identity();
+        ops.straighten = 5.0;
+        let out = apply(&img, &ops);
+        let (w, h) = out.dimensions();
+        // Inscribed crop must be strictly inside the original — no
+        // black corners, but smaller than the source.
+        assert!(w < 120 && h < 80, "got {}x{}", w, h);
+        assert!(
+            w > 100 && h > 60,
+            "expected near-full coverage, got {}x{}",
+            w,
+            h
+        );
+        // The cropped region is solid grey: every output pixel should
+        // sample only the constant source colour.
+        for px in out.pixels().take(64) {
+            assert_eq!(px.0, [200, 200, 200]);
+        }
+    }
+
+    #[test]
+    fn rotation_plus_straighten_compose() {
+        let img = RgbImage::from_pixel(40, 30, image::Rgb([180, 90, 30]));
+        let mut ops = Operations::identity();
+        ops.rotation = 90.0;
+        ops.straighten = 2.0;
+        let out = apply(&img, &ops);
+        let (w, h) = out.dimensions();
+        // Cardinal swap + small inscribed-crop residual.
+        assert!(w <= 30 && h <= 40, "got {}x{}", w, h);
+        for px in out.pixels().take(32) {
+            assert_eq!(px.0, [180, 90, 30]);
+        }
     }
 }
