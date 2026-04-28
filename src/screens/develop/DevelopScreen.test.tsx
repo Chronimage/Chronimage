@@ -382,7 +382,9 @@ describe('DevelopScreen', () => {
       { wrapper },
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: /subject/i }));
+    const subject = await screen.findByRole('button', { name: /subject/i });
+    await waitFor(() => expect(subject).not.toBeDisabled());
+    fireEvent.click(subject);
     await waitFor(() => {
       expect(lastCallArg(invoke, 'develop_mask_generate').req).toMatchObject({ photo_id: 1 });
     });
