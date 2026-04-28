@@ -506,14 +506,23 @@ async fn execute_pipeline(
             .map(|(_, _, id)| *id);
 
         if let (Some(raw_id), Some(jpg_id)) = (raw_id_opt, jpg_id_opt) {
-            // Point the JPG's paired_photo_id → RAW (RAW is master).
-            if let Err(e) = sqlx::query("UPDATE photos SET paired_photo_id = ?1 WHERE id = ?2")
-                .bind(raw_id)
-                .bind(jpg_id)
-                .execute(&pool)
-                .await
-            {
-                tracing::warn!(error = %e, "pipeline: pair link update failed");
+            // Pairing is bidirectional. The catalog grid uses the RAW as
+            // the displayed master, but every preview / thumbnail /
+            // develop path reads the *RAW row's* `paired_photo_id` to
+            // decide "open the paired JPG instead of demosaicing the
+            // RAW". Without the reverse link rawler tries to extract a
+            // preview from the ARW directly — which the rawler 0.7 Sony
+            // decoder can't always do (returns Ok(None) on A7 IV files
+            // and falls back to a low-res embedded-JPEG byte scan).
+            for (target, source) in [(raw_id, jpg_id), (jpg_id, raw_id)] {
+                if let Err(e) = sqlx::query("UPDATE photos SET paired_photo_id = ?1 WHERE id = ?2")
+                    .bind(target)
+                    .bind(source)
+                    .execute(&pool)
+                    .await
+                {
+                    tracing::warn!(error = %e, "pipeline: pair link update failed");
+                }
             }
         }
     }
@@ -1092,20 +1101,33 @@ mod tests {
             .await
             .expect("pipeline");
 
-        let paired: Option<i64> =
-            sqlx::query_scalar("SELECT paired_photo_id FROM photos WHERE is_raw = 0")
-                .fetch_optional(&pool)
-                .await
-                .expect("query");
-
-        assert!(paired.is_some(), "JPG should have a paired_photo_id");
-
         let raw_id: i64 = sqlx::query_scalar("SELECT id FROM photos WHERE is_raw = 1")
             .fetch_one(&pool)
             .await
             .expect("raw row");
+        let jpg_id: i64 = sqlx::query_scalar("SELECT id FROM photos WHERE is_raw = 0")
+            .fetch_one(&pool)
+            .await
+            .expect("jpg row");
 
-        assert_eq!(paired.unwrap(), raw_id);
+        let jpg_paired: Option<i64> =
+            sqlx::query_scalar("SELECT paired_photo_id FROM photos WHERE id = ?1")
+                .bind(jpg_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("query jpg paired");
+        let raw_paired: Option<i64> =
+            sqlx::query_scalar("SELECT paired_photo_id FROM photos WHERE id = ?1")
+                .bind(raw_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("query raw paired");
+
+        // Pairing must be bidirectional — every consumer (thumbnail
+        // generator, develop preview, AI stages) reads the *RAW row's*
+        // paired_photo_id to decide whether to fall through to rawler.
+        assert_eq!(jpg_paired, Some(raw_id), "JPG should point at the RAW");
+        assert_eq!(raw_paired, Some(jpg_id), "RAW should point back at the JPG");
     }
 
     // ── Empty directory ───────────────────────────────────────────────────────
