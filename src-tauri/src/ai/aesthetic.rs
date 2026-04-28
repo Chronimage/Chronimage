@@ -74,14 +74,40 @@ impl NimaSession {
             .run(ort::inputs!["input" => input_tensor])
             .map_err(|e| AppError::Internal(format!("ort run: {e}")))?;
 
-        let tensor = outputs
-            .get("output")
-            .ok_or_else(|| AppError::Internal("output 'output' not found in nima model".into()))?;
-        // try_extract_tensor returns (&Shape, &[T]) in ort rc.12.
-        let (_shape, data) = tensor
-            .try_extract_tensor::<f32>()
-            .map_err(|e| AppError::Internal(format!("extract tensor: {e}")))?;
-        let probs: Vec<f32> = data.to_vec();
+        // NIMA exports vary by exporter — TF2 calls the head `dense_1` /
+        // `Identity`, the Keras→ONNX converter often uses `output` /
+        // `output_0`, and some bundles use `score`. Try the well-known
+        // names first; if none match, fall back to whichever single
+        // output the model actually exposes (NIMA only has one head).
+        // `outputs.get(name)` returns `Option<&DynValue>` while
+        // `outputs.values().next()` returns `Option<ValueRef>` — the
+        // wrapper types differ, so we inline `try_extract_tensor` in
+        // each branch instead of binding to one variable.
+        const KNOWN_NAMES: &[&str] = &[
+            "output", "output_0", "dense_1", "dense", "Identity", "score",
+        ];
+        let probs: Vec<f32> = if let Some(named) =
+            KNOWN_NAMES.iter().find_map(|name| outputs.get(name))
+        {
+            let (_shape, data) = named
+                .try_extract_tensor::<f32>()
+                .map_err(|e| AppError::Internal(format!("extract tensor: {e}")))?;
+            data.to_vec()
+        } else if outputs.len() == 1 {
+            // Single-output model with an unrecognised name — take it.
+            let value_ref = outputs.values().next().ok_or_else(|| {
+                AppError::Internal("nima outputs.len() == 1 but values().next() was None".into())
+            })?;
+            let (_shape, data) = value_ref
+                .try_extract_tensor::<f32>()
+                .map_err(|e| AppError::Internal(format!("extract tensor: {e}")))?;
+            data.to_vec()
+        } else {
+            let names: Vec<String> = outputs.keys().map(|k| k.to_string()).collect();
+            return Err(AppError::Internal(format!(
+                "no recognised nima output (tried {KNOWN_NAMES:?}); model exports {names:?}"
+            )));
+        };
 
         if probs.len() != NUM_CLASSES {
             return Err(AppError::Internal(format!(
