@@ -1,14 +1,26 @@
-export type DevelopTab = 'develop' | 'mask' | 'prompt';
+export type DevelopTab = 'develop' | 'prompt';
 
 export type PresetCategory = 'face' | 'scene' | 'quality' | 'style' | 'custom';
 
 import {
+  type ColorGrading,
+  type ColorMixer,
+  type Defringe,
   type DevelopCurve,
   type DevelopCurves,
   type DevelopOperations,
+  type Grain,
+  type HslAdjust,
+  type HslWheel,
+  identityColorGrading,
+  identityColorMixer,
   identityCurve,
   identityCurves,
+  identityDefringe,
+  identityGrain,
   identityOperations,
+  identitySharpening,
+  type Sharpening,
 } from '../../tauri/invoke';
 
 export interface DevelopValues {
@@ -41,6 +53,12 @@ export interface DevelopValues {
   lensBlurFocusFar: number;
   lensBlurBokehBoost: number;
   lensBlurCatEye: number;
+  texture: number;
+  sharpening: Sharpening;
+  grain: Grain;
+  colorMixer: ColorMixer;
+  colorGrading: ColorGrading;
+  defringe: Defringe;
   curves: DevelopCurves;
 }
 
@@ -74,6 +92,12 @@ export const DEFAULT_DEVELOP_VALUES: DevelopValues = {
   lensBlurFocusFar: 100,
   lensBlurBokehBoost: 0,
   lensBlurCatEye: 0,
+  texture: 0,
+  sharpening: identitySharpening(),
+  grain: identityGrain(),
+  colorMixer: identityColorMixer(),
+  colorGrading: identityColorGrading(),
+  defringe: identityDefringe(),
   curves: identityCurves(),
 };
 
@@ -123,6 +147,12 @@ export function valuesToOperations(v: DevelopValues): DevelopOperations {
     lens_blur_focus_far: Math.max(focusNear, focusFar),
     lens_blur_bokeh_boost: clamp(v.lensBlurBokehBoost, 0, 100),
     lens_blur_cat_eye: clamp(v.lensBlurCatEye, 0, 100),
+    texture: v.texture,
+    sharpening: v.sharpening,
+    grain: v.grain,
+    color_mixer: v.colorMixer,
+    color_grading: v.colorGrading,
+    defringe: v.defringe,
     curves: v.curves,
   };
 }
@@ -158,6 +188,12 @@ export function operationsToValues(ops: DevelopOperations): DevelopValues {
     lensBlurFocusFar: (ops.lens_blur_focus_far ?? 1) * 100,
     lensBlurBokehBoost: ops.lens_blur_bokeh_boost ?? 0,
     lensBlurCatEye: ops.lens_blur_cat_eye ?? 0,
+    texture: ops.texture ?? 0,
+    sharpening: ops.sharpening ?? identitySharpening(),
+    grain: ops.grain ?? identityGrain(),
+    colorMixer: ops.color_mixer ?? identityColorMixer(),
+    colorGrading: ops.color_grading ?? identityColorGrading(),
+    defringe: ops.defringe ?? identityDefringe(),
     curves: ops.curves ?? identityCurves(),
   };
 }
@@ -219,7 +255,97 @@ export function blendOperations(
     lens_blur_focus_far: lerp(base.lens_blur_focus_far ?? 1, target.lens_blur_focus_far ?? 1),
     lens_blur_bokeh_boost: lerp(base.lens_blur_bokeh_boost ?? 0, target.lens_blur_bokeh_boost ?? 0),
     lens_blur_cat_eye: lerp(base.lens_blur_cat_eye ?? 0, target.lens_blur_cat_eye ?? 0),
+    texture: lerp(base.texture ?? 0, target.texture ?? 0),
+    sharpening: blendSharpening(base.sharpening, target.sharpening, t),
+    grain: blendGrain(base.grain, target.grain, t),
+    color_mixer: blendColorMixer(base.color_mixer, target.color_mixer, t),
+    color_grading: blendColorGrading(base.color_grading, target.color_grading, t),
+    defringe: blendDefringe(base.defringe, target.defringe, t),
     curves: blendCurves(base.curves, target.curves, t),
+  };
+}
+
+function lerp01(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function blendSharpening(a: Sharpening | undefined, b: Sharpening | undefined, t: number): Sharpening {
+  const aa = a ?? identitySharpening();
+  const bb = b ?? identitySharpening();
+  return {
+    amount: lerp01(aa.amount, bb.amount, t),
+    radius: lerp01(aa.radius, bb.radius, t),
+    detail: lerp01(aa.detail, bb.detail, t),
+    masking: lerp01(aa.masking, bb.masking, t),
+  };
+}
+
+function blendGrain(a: Grain | undefined, b: Grain | undefined, t: number): Grain {
+  const aa = a ?? identityGrain();
+  const bb = b ?? identityGrain();
+  return {
+    amount: lerp01(aa.amount, bb.amount, t),
+    size: lerp01(aa.size, bb.size, t),
+    roughness: lerp01(aa.roughness, bb.roughness, t),
+  };
+}
+
+function blendHsl(a: HslAdjust, b: HslAdjust, t: number): HslAdjust {
+  return {
+    hue: lerp01(a.hue, b.hue, t),
+    saturation: lerp01(a.saturation, b.saturation, t),
+    luminance: lerp01(a.luminance, b.luminance, t),
+  };
+}
+
+function blendColorMixer(a: ColorMixer | undefined, b: ColorMixer | undefined, t: number): ColorMixer {
+  const aa = a ?? identityColorMixer();
+  const bb = b ?? identityColorMixer();
+  return {
+    red: blendHsl(aa.red, bb.red, t),
+    orange: blendHsl(aa.orange, bb.orange, t),
+    yellow: blendHsl(aa.yellow, bb.yellow, t),
+    green: blendHsl(aa.green, bb.green, t),
+    aqua: blendHsl(aa.aqua, bb.aqua, t),
+    blue: blendHsl(aa.blue, bb.blue, t),
+    purple: blendHsl(aa.purple, bb.purple, t),
+    magenta: blendHsl(aa.magenta, bb.magenta, t),
+  };
+}
+
+function blendWheel(a: HslWheel, b: HslWheel, t: number): HslWheel {
+  return {
+    hue: lerp01(a.hue, b.hue, t),
+    saturation: lerp01(a.saturation, b.saturation, t),
+    luminance: lerp01(a.luminance, b.luminance, t),
+  };
+}
+
+function blendColorGrading(
+  a: ColorGrading | undefined,
+  b: ColorGrading | undefined,
+  t: number,
+): ColorGrading {
+  const aa = a ?? identityColorGrading();
+  const bb = b ?? identityColorGrading();
+  return {
+    shadows: blendWheel(aa.shadows, bb.shadows, t),
+    midtones: blendWheel(aa.midtones, bb.midtones, t),
+    highlights: blendWheel(aa.highlights, bb.highlights, t),
+    global: blendWheel(aa.global, bb.global, t),
+    blending: lerp01(aa.blending, bb.blending, t),
+    balance: lerp01(aa.balance, bb.balance, t),
+  };
+}
+
+function blendDefringe(a: Defringe | undefined, b: Defringe | undefined, t: number): Defringe {
+  const aa = a ?? identityDefringe();
+  const bb = b ?? identityDefringe();
+  return {
+    purple_amount: lerp01(aa.purple_amount, bb.purple_amount, t),
+    purple_hue_range: lerp01(aa.purple_hue_range, bb.purple_hue_range, t),
+    green_amount: lerp01(aa.green_amount, bb.green_amount, t),
+    green_hue_range: lerp01(aa.green_hue_range, bb.green_hue_range, t),
   };
 }
 

@@ -58,6 +58,8 @@ async function mockDevelopInvoke(
   }> = [],
 ) {
   const { invoke } = await import('@tauri-apps/api/core');
+  const maskRows: Array<Record<string, unknown>> = [];
+  let nextMaskId = 44;
   vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
     const callArgs = (args ?? {}) as Record<string, unknown>;
     if (cmd === 'list_photos') return photos;
@@ -74,38 +76,87 @@ async function mockDevelopInvoke(
     if (cmd === 'develop_reset') return 1;
     if (cmd === 'develop_paste_edits') return { pasted_photo_count: 1, skipped: [] };
     if (cmd === 'presets_list') return presets;
-    if (cmd === 'develop_masks_list') return [];
-    if (cmd === 'develop_mask_create') return 44;
+    if (cmd === 'develop_masks_list') {
+      const photoId = Number(callArgs.photoId ?? 1);
+      return maskRows.filter((mask) => mask.photo_id === photoId);
+    }
+    if (cmd === 'develop_mask_create') {
+      const req = callArgs.req as Record<string, unknown>;
+      const mask = {
+        id: nextMaskId++,
+        photo_id: Number(req.photo_id ?? 1),
+        edit_id: null,
+        name: req.name ?? 'Mask',
+        source: req.source ?? 'brush',
+        mode: req.mode ?? 'normal',
+        visible: true,
+        order_index: maskRows.length,
+        payload_storage: req.payload_storage ?? 'inline',
+        mask_payload: JSON.stringify(req.mask_payload ?? { kind: req.source ?? 'brush' }),
+        operations_json: JSON.stringify(req.operations ?? identityOperations()),
+        confidence: null,
+        created_at: '2026-04-01T00:00:00Z',
+        updated_at: '2026-04-01T00:00:00Z',
+      };
+      maskRows.push(mask);
+      return mask.id;
+    }
     if (cmd === 'develop_mask_generate') {
       const req = callArgs.req as Record<string, unknown>;
-      return {
-        mask: {
-          id: 44,
-          photo_id: Number(req.photo_id ?? 1),
-          edit_id: null,
-          name: req.name ?? 'Subject mask',
+      const mask = {
+        id: nextMaskId++,
+        photo_id: Number(req.photo_id ?? 1),
+        edit_id: null,
+        name: req.name ?? 'Subject mask',
+        source: req.source ?? 'subject',
+        mode: req.mode ?? 'normal',
+        visible: true,
+        order_index: maskRows.length,
+        payload_storage: 'inline',
+        mask_payload: JSON.stringify({
+          kind: 'bitmap',
           source: req.source ?? 'subject',
-          mode: req.mode ?? 'normal',
-          visible: true,
-          order_index: 0,
-          payload_storage: 'inline',
-          mask_payload: JSON.stringify({
-            kind: 'bitmap',
-            source: req.source ?? 'subject',
-            model: 'local-segmentation-v1',
-            format: 'png-luma8',
-            width: 2,
-            height: 2,
-            data_b64: 'mask-png',
-          }),
-          operations_json: JSON.stringify(req.operations ?? identityOperations()),
-          confidence: 0.72,
-          created_at: '2026-04-01T00:00:00Z',
-          updated_at: '2026-04-01T00:00:00Z',
-        },
+          model: 'local-segmentation-v1',
+          format: 'png-luma8',
+          width: 2,
+          height: 2,
+          data_b64: 'mask-png',
+        }),
+        operations_json: JSON.stringify(req.operations ?? identityOperations()),
+        confidence: 0.72,
+        created_at: '2026-04-01T00:00:00Z',
+        updated_at: '2026-04-01T00:00:00Z',
+      };
+      maskRows.push(mask);
+      return {
+        mask,
         preview_data_url: 'data:image/jpeg;base64,masked',
         elapsed_ms: 3,
       };
+    }
+    if (cmd === 'develop_mask_update') {
+      const req = callArgs.req as Record<string, unknown>;
+      const maskId = Number(req.mask_id);
+      const index = maskRows.findIndex((mask) => mask.id === maskId);
+      const current = index >= 0 ? maskRows[index] : maskRows[0];
+      const updated = {
+        ...current,
+        ...(typeof req.name === 'string' ? { name: req.name } : {}),
+        ...(typeof req.source === 'string' ? { source: req.source } : {}),
+        ...(typeof req.mode === 'string' ? { mode: req.mode } : {}),
+        ...(typeof req.visible === 'boolean' ? { visible: req.visible } : {}),
+        ...(req.mask_payload ? { mask_payload: JSON.stringify(req.mask_payload) } : {}),
+        ...(req.operations ? { operations_json: JSON.stringify(req.operations) } : {}),
+        updated_at: '2026-04-01T00:00:01Z',
+      };
+      if (index >= 0) maskRows[index] = updated;
+      return updated;
+    }
+    if (cmd === 'develop_mask_delete') {
+      const maskId = Number(callArgs.maskId);
+      const index = maskRows.findIndex((mask) => mask.id === maskId);
+      if (index >= 0) maskRows.splice(index, 1);
+      return 1;
     }
     if (cmd === 'develop_mask_apply_preview') return previewReceipt(Number(callArgs.photoId ?? 1));
     if (cmd === 'prompt_sidecar_ping') {
@@ -156,6 +207,9 @@ beforeEach(() => {
     operations: null,
     operationSource: null,
     activeMask: null,
+    selectedMaskId: null,
+    maskOverlayVisible: true,
+    maskOverlayOpacity: 62,
   });
 });
 
@@ -291,9 +345,14 @@ describe('DevelopScreen', () => {
 
   it('generates a bitmap quick mask without the prompt sidecar', async () => {
     const invoke = await mockDevelopInvoke([photoFixture(1)]);
-    render(<DevelopScreen />, { wrapper });
+    render(
+      <>
+        <DevelopSidePanel />
+        <DevelopScreen />
+      </>,
+      { wrapper },
+    );
 
-    fireEvent.click(await screen.findByRole('tab', { name: 'Mask' }));
     const subject = await screen.findByRole('button', { name: /subject/i });
     await waitFor(() => expect(subject).not.toBeDisabled());
     fireEvent.click(subject);
@@ -307,8 +366,87 @@ describe('DevelopScreen', () => {
         mode: 'normal',
       });
     });
+    expect(await screen.findByTestId('selected-mask-overlay')).toBeInTheDocument();
+    expect(screen.getAllByText(/subject mask/i).length).toBeGreaterThan(0);
     expect(invoke.mock.calls.some(([cmd]) => cmd === 'develop_mask_create')).toBe(false);
     expect(invoke.mock.calls.some(([cmd]) => cmd === 'mask_from_prompt')).toBe(false);
+  });
+
+  it('updates selected mask adjustments and refreshes the preview', async () => {
+    const invoke = await mockDevelopInvoke([photoFixture(1)]);
+    render(
+      <>
+        <DevelopSidePanel />
+        <DevelopScreen />
+      </>,
+      { wrapper },
+    );
+
+    const subject = await screen.findByRole('button', { name: /subject/i });
+    await waitFor(() => expect(subject).not.toBeDisabled());
+    fireEvent.click(subject);
+    await waitFor(() => {
+      expect(lastCallArg(invoke, 'develop_mask_generate').req).toMatchObject({ photo_id: 1 });
+    });
+    await screen.findByTestId('selected-mask-overlay');
+    invoke.mockClear();
+
+    fireEvent.change(screen.getByLabelText('Exposure'), { target: { value: '25' } });
+
+    await waitFor(() => {
+      const updateArgs = lastCallArg(invoke, 'develop_mask_update');
+      const req = updateArgs.req as { mask_id: number; operations: DevelopOperations };
+      expect(req.mask_id).toBe(44);
+      expect(req.operations.exposure).toBe(1);
+      expect(req.operations.crop_w).toBe(1);
+    });
+
+    await waitFor(() => {
+      expect(invoke.mock.calls.some(([cmd]) => cmd === 'develop_mask_apply_preview')).toBe(true);
+    });
+  });
+
+  it('uses explicit crop mode for direct canvas crop dragging', async () => {
+    const invoke = await mockDevelopInvoke([photoFixture(1)]);
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 700,
+      height: 467,
+      top: 0,
+      left: 0,
+      right: 700,
+      bottom: 467,
+      toJSON: () => ({}),
+    });
+
+    try {
+      render(<DevelopScreen />, { wrapper });
+
+      fireEvent.click(await screen.findByTitle('Crop directly on the canvas'));
+      await waitFor(() => expect(invoke.mock.calls.some(([cmd]) => cmd === 'develop_apply')).toBe(true));
+      invoke.mockClear();
+
+      const frame = screen.getByTestId('develop-canvas-frame');
+      fireEvent.pointerDown(screen.getByLabelText(/resize crop nw/i), {
+        pointerId: 1,
+        clientX: 0,
+        clientY: 0,
+      });
+      fireEvent.pointerMove(frame, { pointerId: 1, clientX: 70, clientY: 47 });
+      fireEvent.pointerUp(frame, { pointerId: 1 });
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+
+      await waitFor(() => {
+        const applyArgs = lastCallArg(invoke, 'develop_apply');
+        const ops = applyArgs.operations as DevelopOperations;
+        expect(ops.crop_x ?? 0).toBeGreaterThan(0.09);
+        expect(ops.crop_y ?? 0).toBeGreaterThan(0.09);
+        expect(ops.crop_w ?? 1).toBeLessThan(0.92);
+      });
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 });
 

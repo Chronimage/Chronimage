@@ -256,6 +256,12 @@ pub fn apply_mask_layers(
         }
         let mut adjusted = base.clone();
         crate::develop::pipeline::apply_to_unit_buf(&mut adjusted, w as usize, h as usize, &ops);
+        if ops.lens_blur_amount > 0.0 {
+            let adjusted_rgb = crate::develop::pipeline::unit_buf_to_rgb(w, h, &adjusted, img);
+            let adjusted_spatial =
+                crate::develop::pipeline::apply_local_spatial(adjusted_rgb, &ops);
+            adjusted = crate::develop::pipeline::rgb_to_unit_buf(&adjusted_spatial);
+        }
         blend_masked(&mut base, &adjusted, &alpha);
     }
 

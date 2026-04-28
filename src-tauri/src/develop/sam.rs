@@ -273,12 +273,42 @@ fn build_prompts(
             labels.push(0.0);
         }
         "subject" | "object" => {
-            coords.push(to_px(0.5, 0.5));
-            labels.push(1.0);
-            coords.push(to_px(0.02, 0.02));
-            labels.push(0.0);
-            coords.push(to_px(0.98, 0.98));
-            labels.push(0.0);
+            // If the import pipeline detected a face, treat "subject"
+            // like "person" — the face + torso region is almost always
+            // what the photographer means. Without this, a single
+            // center-point positive lands on whatever sits at (0.5, 0.5),
+            // which for off-center compositions is rarely the subject.
+            if !face_hints.is_empty() {
+                for face in face_hints {
+                    let cx = face.x + face.w * 0.5;
+                    let cy = face.y + face.h * 0.5;
+                    coords.push(to_px(cx, cy));
+                    labels.push(1.0);
+                    let torso_y = (face.y + face.h * 3.5).clamp(0.0, 1.0);
+                    coords.push(to_px(cx, torso_y));
+                    labels.push(1.0);
+                }
+            } else {
+                coords.push(to_px(0.5, 0.5));
+                labels.push(1.0);
+            }
+            // Dense border negatives — corners + edge midpoints. Two
+            // corner points wasn't enough to stop SAM2 from expanding
+            // the mask to fill busy backgrounds (e.g. a rangoli or
+            // patterned wall surrounding the subject).
+            for &(nx, ny) in &[
+                (0.02, 0.02),
+                (0.98, 0.02),
+                (0.02, 0.98),
+                (0.98, 0.98),
+                (0.5, 0.02),
+                (0.5, 0.98),
+                (0.02, 0.5),
+                (0.98, 0.5),
+            ] {
+                coords.push(to_px(nx, ny));
+                labels.push(0.0);
+            }
         }
         "sky" => {
             coords.push(to_px(0.5, 0.05));
@@ -484,6 +514,53 @@ mod tests {
         assert_eq!(coords.len(), labels.len());
         assert!(labels.contains(&1.0));
         assert!(labels.contains(&0.0));
+    }
+
+    #[test]
+    fn build_prompts_subject_with_face_anchors_on_face() {
+        // Face in the right half — geometric center (0.5, 0.5) is *not*
+        // on the subject. Without face-hint anchoring, SAM lands on
+        // whatever's at center (rangoli, patterned wall, etc.). With
+        // hints the positive prompts move onto the face + torso.
+        let hints = [FaceHint {
+            x: 0.7,
+            y: 0.3,
+            w: 0.1,
+            h: 0.12,
+        }];
+        let (coords, labels) = build_prompts("subject", &hints, 1000, 1000);
+        let positives: Vec<[f32; 2]> = coords
+            .iter()
+            .zip(labels.iter())
+            .filter(|(_, &l)| l > 0.5)
+            .map(|(c, _)| *c)
+            .collect();
+        assert!(
+            !positives.is_empty(),
+            "expected at least one positive prompt"
+        );
+        for p in &positives {
+            // Encoder size = 1024; the face is in the right half, so
+            // every positive prompt should land in the right half (>512).
+            assert!(
+                p[0] > 512.0,
+                "positive prompt at x={} not in face region",
+                p[0]
+            );
+        }
+        // Eight border negatives.
+        let neg_count = labels.iter().filter(|&&l| l < 0.5).count();
+        assert_eq!(neg_count, 8, "expected 8 border negatives, got {neg_count}");
+    }
+
+    #[test]
+    fn build_prompts_subject_no_face_uses_center_with_dense_negatives() {
+        let (coords, labels) = build_prompts("subject", &[], 1000, 1000);
+        let positives = labels.iter().filter(|&&l| l > 0.5).count();
+        let negatives = labels.iter().filter(|&&l| l < 0.5).count();
+        assert_eq!(positives, 1, "expected single center positive");
+        assert_eq!(negatives, 8, "expected 8 border negatives");
+        assert_eq!(coords.len(), labels.len());
     }
 
     #[test]

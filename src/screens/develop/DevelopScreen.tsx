@@ -18,9 +18,6 @@ import {
   useAiEditStatus,
   useDevelopApply,
   useDevelopMaskApplyPreview,
-  useDevelopMaskCreate,
-  useDevelopMaskDelete,
-  useDevelopMaskGenerate,
   useDevelopMasks,
   useDevelopMaskUpdate,
   useDevelopOpen,
@@ -48,13 +45,43 @@ import {
   type DevelopValues,
   defaultDevelopValues,
   operationsToValues,
+  parseOperationsJson,
   valuesToOperations,
 } from './types';
+
+interface UpdateValuesOptions {
+  render?: boolean;
+}
+
+function uncroppedPreviewOperations(ops: DevelopOperations): DevelopOperations {
+  return {
+    ...ops,
+    crop_x: 0,
+    crop_y: 0,
+    crop_w: 1,
+    crop_h: 1,
+  };
+}
+
+function sanitizeMaskOperations(ops: DevelopOperations): DevelopOperations {
+  return {
+    ...ops,
+    crop_x: 0,
+    crop_y: 0,
+    crop_w: 1,
+    crop_h: 1,
+    rotation: 0,
+    straighten: 0,
+    transform_h: 0,
+    transform_v: 0,
+  };
+}
 
 export function DevelopScreen() {
   const { data: photos = [], isLoading } = usePhotos();
   const [focusedIdx, setFocusedIdx] = useState(0);
   const [tab, setTab] = useState<DevelopTab>('develop');
+  const [cropMode, setCropModeState] = useState(false);
   const [values, setValues] = useState<DevelopValues>(() => defaultDevelopValues());
   const [preview, setPreview] = useState<string | null>(null);
   const [copiedOps, setCopiedOps] = useState<DevelopOperations | null>(null);
@@ -64,10 +91,13 @@ export function DevelopScreen() {
   const [promptStrength, setPromptStrength] = useState(65);
   const [promptConstraints, setPromptConstraints] = useState<string[]>(['keep faces sharp', 'natural tones']);
   const valuesRef = useRef(values);
+  const cropModeRef = useRef(false);
   const focusedPhotoIdRef = useRef<number | null>(null);
   const applySeqRef = useRef(0);
   const userEditedRef = useRef(false);
   const debounceTimer = useRef<number | null>(null);
+  const maskUpdateTimer = useRef<number | null>(null);
+  const [localMaskOperations, setLocalMaskOperations] = useState<Record<number, DevelopOperations>>({});
 
   const photo = photos[focusedIdx] ?? null;
   const focusedPhotoId = photo?.id ?? null;
@@ -80,11 +110,17 @@ export function DevelopScreen() {
   const setSharedPreview = useDevelopUi((s) => s.setPreview);
   const setSharedOperations = useDevelopUi((s) => s.setOperations);
   const setSharedMask = useDevelopUi((s) => s.setActiveMask);
+  const selectedMaskId = useDevelopUi((s) => s.selectedMaskId);
+  const setSelectedMaskId = useDevelopUi((s) => s.setSelectedMaskId);
+  const maskOverlayVisible = useDevelopUi((s) => s.maskOverlayVisible);
+  const maskOverlayOpacity = useDevelopUi((s) => s.maskOverlayOpacity);
   const sharedPreview = useDevelopUi((s) => s.preview);
   const sharedOperations = useDevelopUi((s) => s.operations);
   const operationSource = useDevelopUi((s) => s.operationSource);
   useEffect(() => {
     focusedPhotoIdRef.current = focusedPhotoId;
+    cropModeRef.current = false;
+    setCropModeState(false);
     applySeqRef.current += 1;
     userEditedRef.current = false;
     if (debounceTimer.current !== null) {
@@ -95,8 +131,17 @@ export function DevelopScreen() {
     setSharedPreview(null);
     setSharedOperations(null, 'screen');
     setSharedMask(null);
+    setSelectedMaskId(null);
     setPreview(null);
-  }, [focusedPhotoId, setSharedFocus, setSharedMask, setSharedOperations, setSharedPreview]);
+    setLocalMaskOperations({});
+  }, [
+    focusedPhotoId,
+    setSelectedMaskId,
+    setSharedFocus,
+    setSharedMask,
+    setSharedOperations,
+    setSharedPreview,
+  ]);
 
   // Load the photo's current edit state + baseline preview ONCE per photo.
   // Re-fetching `opened` on every render would wipe unsaved slider
@@ -104,6 +149,9 @@ export function DevelopScreen() {
   // explicit Save. Keying off `focusedPhotoId` ensures we only seed
   // slider state when the user opens a different photo.
   const { data: opened } = useDevelopOpen(focusedPhotoId);
+  const { data: masks = [] } = useDevelopMasks(focusedPhotoId);
+  const updateMask = useDevelopMaskUpdate();
+  const applyMaskPreview = useDevelopMaskApplyPreview();
   const seededForPhotoRef = useRef<number | null>(null);
   useEffect(() => {
     if (!opened) return;
@@ -137,6 +185,12 @@ export function DevelopScreen() {
     setValues(nextValues);
   }, [operationSource, sharedOperations]);
 
+  useEffect(() => {
+    if (selectedMaskId != null && masks.length > 0 && !masks.some((mask) => mask.id === selectedMaskId)) {
+      setSelectedMaskId(null);
+    }
+  }, [masks, selectedMaskId, setSelectedMaskId]);
+
   const applyMut = useDevelopApply();
   const saveMut = useDevelopSave();
   const snapshotMut = useDevelopSnapshotSave();
@@ -148,6 +202,7 @@ export function DevelopScreen() {
   useEffect(() => {
     return () => {
       if (debounceTimer.current !== null) window.clearTimeout(debounceTimer.current);
+      if (maskUpdateTimer.current !== null) window.clearTimeout(maskUpdateTimer.current);
     };
   }, []);
 
@@ -177,6 +232,33 @@ export function DevelopScreen() {
     [applyMut, focusedPhotoId, setSharedPreview],
   );
 
+  const scheduleEditorPreview = useCallback(
+    (ops: DevelopOperations) => {
+      scheduleApply(cropModeRef.current ? uncroppedPreviewOperations(ops) : ops);
+    },
+    [scheduleApply],
+  );
+
+  const setCropMode = useCallback(
+    (next: boolean) => {
+      cropModeRef.current = next;
+      setCropModeState(next);
+      const ops = valuesToOperations(valuesRef.current);
+      scheduleApply(next ? uncroppedPreviewOperations(ops) : ops);
+    },
+    [scheduleApply],
+  );
+
+  const setDevelopTab = useCallback(
+    (next: DevelopTab) => {
+      setTab(next);
+      if (next !== 'develop' && cropModeRef.current) {
+        setCropMode(false);
+      }
+    },
+    [setCropMode],
+  );
+
   // Keep a ref on the latest values so `updateValue` can compute the
   // next state without closing over a stale `values` snapshot — and so
   // the side-effect (scheduleApply) happens outside `setValues`'s
@@ -200,22 +282,24 @@ export function DevelopScreen() {
       setValues(next);
       const ops = valuesToOperations(next);
       setSharedOperations(ops, 'screen');
-      scheduleApply(ops);
+      scheduleEditorPreview(ops);
     },
-    [scheduleApply, setSharedOperations],
+    [scheduleEditorPreview, setSharedOperations],
   );
 
   const updateValues = useCallback(
-    (patch: Partial<DevelopValues>) => {
+    (patch: Partial<DevelopValues>, options: UpdateValuesOptions = {}) => {
       userEditedRef.current = true;
       const next = { ...valuesRef.current, ...patch };
       valuesRef.current = next;
       setValues(next);
       const ops = valuesToOperations(next);
       setSharedOperations(ops, 'screen');
-      scheduleApply(ops);
+      if (options.render !== false) {
+        scheduleEditorPreview(ops);
+      }
     },
-    [scheduleApply, setSharedOperations],
+    [scheduleEditorPreview, setSharedOperations],
   );
 
   const updateCurves = useCallback(
@@ -226,9 +310,9 @@ export function DevelopScreen() {
       setValues(next);
       const ops = valuesToOperations(next);
       setSharedOperations(ops, 'screen');
-      scheduleApply(ops);
+      scheduleEditorPreview(ops);
     },
-    [scheduleApply, setSharedOperations],
+    [scheduleEditorPreview, setSharedOperations],
   );
 
   const autoLight = useCallback(() => {
@@ -252,8 +336,8 @@ export function DevelopScreen() {
     setValues(next);
     const ops = valuesToOperations(next);
     setSharedOperations(ops, 'screen');
-    scheduleApply(ops);
-  }, [scheduleApply, setSharedOperations]);
+    scheduleEditorPreview(ops);
+  }, [scheduleEditorPreview, setSharedOperations]);
 
   const resetEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
@@ -265,14 +349,95 @@ export function DevelopScreen() {
         valuesRef.current = next;
         setValues(next);
         setSharedOperations(ops, 'screen');
-        scheduleApply(ops);
+        scheduleEditorPreview(ops);
       },
     });
-  }, [focusedPhotoId, resetMut, scheduleApply, setSharedOperations]);
+  }, [focusedPhotoId, resetMut, scheduleEditorPreview, setSharedOperations]);
 
   const currentOperations = useCallback(() => {
     return useDevelopUi.getState().operations ?? valuesToOperations(valuesRef.current);
   }, []);
+
+  const refreshMaskPreview = useCallback(() => {
+    if (focusedPhotoId == null) return;
+    applyMaskPreview.mutate(
+      { photoId: focusedPhotoId, operations: currentOperations() },
+      {
+        onSuccess: (receipt) => {
+          setPreview(receipt.preview_data_url);
+          setSharedPreview(receipt.preview_data_url);
+        },
+        onError: (e) => warn('develop_mask_apply_preview failed', e),
+      },
+    );
+  }, [applyMaskPreview, currentOperations, focusedPhotoId, setSharedPreview]);
+
+  const maskOperations = useCallback(
+    (mask: DevelopMask) =>
+      sanitizeMaskOperations(
+        localMaskOperations[mask.id] ?? parseOperationsJson(mask.operations_json) ?? identityOperations(),
+      ),
+    [localMaskOperations],
+  );
+
+  const selectedMask =
+    selectedMaskId == null ? null : (masks.find((mask) => mask.id === selectedMaskId) ?? null);
+  const selectedMaskOps = selectedMask ? maskOperations(selectedMask) : null;
+  const selectedMaskValues = selectedMaskOps ? operationsToValues(selectedMaskOps) : null;
+
+  const queueMaskOperationUpdate = useCallback(
+    (maskId: number, nextOps: DevelopOperations) => {
+      if (maskUpdateTimer.current !== null) window.clearTimeout(maskUpdateTimer.current);
+      maskUpdateTimer.current = window.setTimeout(() => {
+        updateMask.mutate(
+          { mask_id: maskId, operations: nextOps },
+          {
+            onSuccess: (mask) => {
+              setLocalMaskOperations((current) => ({
+                ...current,
+                [mask.id]: parseOperationsJson(mask.operations_json) ?? nextOps,
+              }));
+              refreshMaskPreview();
+            },
+            onError: (e) => warn('develop_mask_update failed', e),
+          },
+        );
+      }, 120);
+    },
+    [refreshMaskPreview, updateMask],
+  );
+
+  const updateSelectedMaskValues = useCallback(
+    (patch: Partial<DevelopValues>) => {
+      if (!selectedMask || !selectedMaskValues) return;
+      const nextValues = { ...selectedMaskValues, ...patch };
+      const nextOps = sanitizeMaskOperations(valuesToOperations(nextValues));
+      setLocalMaskOperations((local) => ({ ...local, [selectedMask.id]: nextOps }));
+      queueMaskOperationUpdate(selectedMask.id, nextOps);
+    },
+    [queueMaskOperationUpdate, selectedMask, selectedMaskValues],
+  );
+
+  const updateSelectedMaskValue = useCallback(
+    (key: keyof DevelopValues, value: number) => {
+      updateSelectedMaskValues({ [key]: value } as Partial<DevelopValues>);
+    },
+    [updateSelectedMaskValues],
+  );
+
+  const updateSelectedMaskCurves = useCallback(
+    (curves: DevelopValues['curves']) => {
+      updateSelectedMaskValues({ curves });
+    },
+    [updateSelectedMaskValues],
+  );
+
+  const resetSelectedMaskOperations = useCallback(() => {
+    if (!selectedMask) return;
+    const nextOps = sanitizeMaskOperations(identityOperations());
+    setLocalMaskOperations((local) => ({ ...local, [selectedMask.id]: nextOps }));
+    queueMaskOperationUpdate(selectedMask.id, nextOps);
+  }, [queueMaskOperationUpdate, selectedMask]);
 
   const saveEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
@@ -304,12 +469,12 @@ export function DevelopScreen() {
           valuesRef.current = next;
           setValues(next);
           setSharedOperations(copiedOps, 'screen');
-          scheduleApply(copiedOps);
+          scheduleEditorPreview(copiedOps);
         },
         onError: (e) => warn('develop_paste_edits failed', e),
       },
     );
-  }, [copiedOps, focusedPhotoId, pasteMut, scheduleApply, setSharedOperations]);
+  }, [copiedOps, focusedPhotoId, pasteMut, scheduleEditorPreview, setSharedOperations]);
 
   if (isLoading) {
     return (
@@ -356,6 +521,13 @@ export function DevelopScreen() {
   const w = swap ? photo.height : photo.width;
   const h = swap ? photo.width : photo.height;
   const stageAspect = w > 0 && h > 0 ? `${w} / ${h}` : '3 / 2';
+  const cropW = clampNumber(values.cropW / 100, 0.05, 1);
+  const cropH = clampNumber(values.cropH / 100, 0.05, 1);
+  const displayStageAspect = !cropMode && w > 0 && h > 0 ? `${w * cropW} / ${h * cropH}` : stageAspect;
+  const selectedMaskPreview =
+    selectedMask && maskOverlayVisible
+      ? localMaskPreview(selectedMask, maskOverlayOpacity / 100, cropMode ? null : values)
+      : null;
 
   return (
     <div className="canvas">
@@ -363,7 +535,16 @@ export function DevelopScreen() {
         photo={photo}
         megapixels={megapixels}
         tab={tab}
-        setTab={setTab}
+        setTab={setDevelopTab}
+        cropMode={cropMode}
+        onToggleCrop={() => {
+          if (tab !== 'develop') {
+            setTab('develop');
+            setCropMode(true);
+            return;
+          }
+          setCropMode(!cropModeRef.current);
+        }}
         canPrev={focusedIdx > 0}
         canNext={focusedIdx < photos.length - 1}
         onPrev={() => setFocusedIdx((i) => Math.max(0, i - 1))}
@@ -374,36 +555,7 @@ export function DevelopScreen() {
         saving={saveMut.isPending || snapshotMut.isPending}
       />
 
-      {tab === 'develop' ? (
-        <DevelopStageSplit
-          photo={photo}
-          photos={photos}
-          focusedIdx={focusedIdx}
-          setFocusedIdx={setFocusedIdx}
-          stageAspect={stageAspect}
-          values={values}
-          onValueChange={updateValue}
-          onValuesChange={updateValues}
-          onCurvesChange={updateCurves}
-          onAutoLight={autoLight}
-          onReset={resetEdits}
-          onCopy={copyEdits}
-          onPaste={pasteEdits}
-          canPaste={!!copiedOps && !pasteMut.isPending}
-          preview={preview}
-        />
-      ) : tab === 'mask' ? (
-        <MaskStage
-          photo={photo}
-          stageAspect={stageAspect}
-          preview={preview}
-          operations={valuesToOperations(values)}
-          onPreview={(next) => {
-            setPreview(next);
-            setSharedPreview(next);
-          }}
-        />
-      ) : (
+      {tab === 'prompt' ? (
         <PromptStage
           photo={photo}
           promptText={promptText}
@@ -412,6 +564,32 @@ export function DevelopScreen() {
           setPromptStrength={setPromptStrength}
           constraints={promptConstraints}
           setConstraints={setPromptConstraints}
+        />
+      ) : (
+        <DevelopStageSplit
+          photo={photo}
+          photos={photos}
+          focusedIdx={focusedIdx}
+          setFocusedIdx={setFocusedIdx}
+          stageAspect={displayStageAspect}
+          values={selectedMaskValues ?? values}
+          inspectorMode={selectedMask && selectedMaskValues ? 'mask' : 'global'}
+          selectedMask={selectedMask}
+          selectedMaskPreview={selectedMaskPreview}
+          onValueChange={selectedMask && selectedMaskValues ? updateSelectedMaskValue : updateValue}
+          onValuesChange={selectedMask && selectedMaskValues ? updateSelectedMaskValues : updateValues}
+          onCurvesChange={selectedMask && selectedMaskValues ? updateSelectedMaskCurves : updateCurves}
+          onAutoLight={autoLight}
+          onReset={selectedMask && selectedMaskValues ? resetSelectedMaskOperations : resetEdits}
+          onCopy={copyEdits}
+          onPaste={pasteEdits}
+          canPaste={!!copiedOps && !pasteMut.isPending}
+          preview={preview}
+          cropMode={cropMode}
+          globalValues={values}
+          onGlobalValuesChange={updateValues}
+          setCropMode={setCropMode}
+          onClearMaskSelection={() => setSelectedMaskId(null)}
         />
       )}
     </div>
@@ -423,6 +601,8 @@ interface DevelopToolbarProps {
   megapixels: string;
   tab: DevelopTab;
   setTab: (tab: DevelopTab) => void;
+  cropMode: boolean;
+  onToggleCrop: () => void;
   canPrev: boolean;
   canNext: boolean;
   onPrev: () => void;
@@ -438,6 +618,8 @@ function DevelopToolbar({
   megapixels,
   tab,
   setTab,
+  cropMode,
+  onToggleCrop,
   canPrev,
   canNext,
   onPrev,
@@ -482,12 +664,17 @@ function DevelopToolbar({
         onChange={setTab}
         options={[
           { value: 'develop', label: 'Develop' },
-          { value: 'mask', label: 'Mask' },
           { value: 'prompt', label: 'Prompt' },
         ]}
       />
       <div className="divider" />
-      <button type="button" className="btn" title="Crop + transform controls are in the inspector">
+      <button
+        type="button"
+        className={cropMode ? 'btn on' : 'btn'}
+        title={cropMode ? 'Finish crop' : 'Crop directly on the canvas'}
+        aria-pressed={cropMode}
+        onClick={onToggleCrop}
+      >
         <Icon name="crop" size={13} />
       </button>
       <button type="button" className="btn" title="Save a named before/after snapshot" onClick={onSnapshot}>
@@ -517,8 +704,13 @@ interface DevelopStageSplitProps {
   setFocusedIdx: (n: number) => void;
   stageAspect: string;
   values: DevelopValues;
+  globalValues: DevelopValues;
+  inspectorMode: 'global' | 'mask';
+  selectedMask: DevelopMask | null;
+  selectedMaskPreview: { className: string; style: CSSProperties } | null;
   onValueChange: (key: keyof DevelopValues, value: number) => void;
-  onValuesChange: (patch: Partial<DevelopValues>) => void;
+  onValuesChange: (patch: Partial<DevelopValues>, options?: UpdateValuesOptions) => void;
+  onGlobalValuesChange: (patch: Partial<DevelopValues>, options?: UpdateValuesOptions) => void;
   onCurvesChange: (curves: DevelopValues['curves']) => void;
   onAutoLight: () => void;
   onReset: () => void;
@@ -526,6 +718,9 @@ interface DevelopStageSplitProps {
   onPaste: () => void;
   canPaste: boolean;
   preview: string | null;
+  cropMode: boolean;
+  setCropMode: (active: boolean) => void;
+  onClearMaskSelection: () => void;
 }
 
 function DevelopStageSplit({
@@ -535,8 +730,13 @@ function DevelopStageSplit({
   setFocusedIdx,
   stageAspect,
   values,
+  globalValues,
+  inspectorMode,
+  selectedMask,
+  selectedMaskPreview,
   onValueChange,
   onValuesChange,
+  onGlobalValuesChange,
   onCurvesChange,
   onAutoLight,
   onReset,
@@ -544,33 +744,90 @@ function DevelopStageSplit({
   onPaste,
   canPaste,
   preview,
+  cropMode,
+  setCropMode,
+  onClearMaskSelection,
 }: DevelopStageSplitProps) {
   const [zoom, setZoom] = useState(100);
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const [cropDrag, setCropDrag] = useState<{
+  // The inner photo-aspect wrapper. Frame is full-bleed (fills the
+  // editor canvas, light-dark background); the wrapper inside it sizes
+  // to the photo's aspect ratio so the crop overlay's percentage coords
+  // stay aligned to the actual image bounds.
+  const zoomWrapperRef = useRef<HTMLDivElement | null>(null);
+  const panDragRef = useRef<{
+    startX: number;
+    startY: number;
+    basePanX: number;
+    basePanY: number;
+    moved: boolean;
+  } | null>(null);
+  // A pointerup that comes within this many pixels of the pointerdown is
+  // treated as a click (toggle zoom anchored at the click) rather than a
+  // pan-drag. Matches the threshold most desktop UIs use for click-vs-drag.
+  const CLICK_THRESHOLD_PX = 4;
+  const cropDragRef = useRef<{
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se';
     startX: number;
     startY: number;
     start: Pick<DevelopValues, 'cropX' | 'cropY' | 'cropW' | 'cropH'>;
   } | null>(null);
 
-  const zoomIn = () => setZoom((z) => clampNumber(z + 25, 25, 300));
-  const zoomOut = () => setZoom((z) => clampNumber(z - 25, 25, 300));
-  const resetCrop = () => onValuesChange({ cropX: 0, cropY: 0, cropW: 100, cropH: 100 });
-  const applyAspect = (patch: Partial<DevelopValues>) => onValuesChange(patch);
-  const cropLeft = clampNumber(values.cropX, 0, 95);
-  const cropTop = clampNumber(values.cropY, 0, 95);
-  const cropWidth = clampNumber(values.cropW, 5, 100 - cropLeft);
-  const cropHeight = clampNumber(values.cropH, 5, 100 - cropTop);
+  // Multiplicative zoom step matches Lightroom's "wheel notch" feel — at
+  // 1.15 each notch zooms in by ~15%, four notches roughly doubles.
+  const ZOOM_STEP = 1.15;
+  const ZOOM_MIN = 8;
+  const ZOOM_MAX = 800;
+  const zoomIn = () => setZoom((z) => clampNumber(z * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX));
+  const zoomOut = () => setZoom((z) => clampNumber(z / ZOOM_STEP, ZOOM_MIN, ZOOM_MAX));
+  const resetView = () => {
+    setZoom(100);
+    setPanX(0);
+    setPanY(0);
+  };
+  // 1:1 means one preview-source pixel per screen pixel. The preview is
+  // delivered at 2048 px long-edge (DevelopDecodeCache::PREVIEW_LONG_EDGE).
+  // At zoom=100 the wrapper renders at its photo-aspect-fit size inside
+  // the frame, so we measure the wrapper's long edge — not the frame's —
+  // to compute the zoom factor that maps preview pixels 1:1 to screen px.
+  const goOneToOne = () => {
+    const wrapper = zoomWrapperRef.current;
+    if (!wrapper) {
+      setZoom(200);
+      return;
+    }
+    const rect = wrapper.getBoundingClientRect();
+    const longEdge = Math.max(rect.width, rect.height);
+    if (longEdge <= 0) {
+      setZoom(200);
+      return;
+    }
+    const next = clampNumber((2048 / longEdge) * 100, ZOOM_MIN, ZOOM_MAX);
+    setZoom(next);
+    setPanX(0);
+    setPanY(0);
+  };
+  const resetCrop = () =>
+    onGlobalValuesChange({ cropX: 0, cropY: 0, cropW: 100, cropH: 100 }, { render: !cropMode });
+  const applyAspect = (patch: Partial<DevelopValues>) => onGlobalValuesChange(patch, { render: !cropMode });
+  const cropLeft = clampNumber(globalValues.cropX, 0, 95);
+  const cropTop = clampNumber(globalValues.cropY, 0, 95);
+  const cropWidth = clampNumber(globalValues.cropW, 5, 100 - cropLeft);
+  const cropHeight = clampNumber(globalValues.cropH, 5, 100 - cropTop);
   const isCropping = cropLeft > 0 || cropTop > 0 || cropWidth < 100 || cropHeight < 100;
+  const showCropOverlay = cropMode;
 
   const startCropDrag = (
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se',
     event: PointerEvent<HTMLButtonElement | HTMLDivElement>,
   ) => {
+    if (!cropMode) return;
     event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    setCropDrag({
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const nextDrag = {
       kind,
       startX: event.clientX,
       startY: event.clientY,
@@ -580,26 +837,33 @@ function DevelopStageSplit({
         cropW: cropWidth,
         cropH: cropHeight,
       },
-    });
+    };
+    cropDragRef.current = nextDrag;
   };
 
   const updateCropDrag = (event: PointerEvent<HTMLDivElement>) => {
-    if (!cropDrag || !frameRef.current) return;
-    const rect = frameRef.current.getBoundingClientRect();
-    const dx = ((event.clientX - cropDrag.startX) / rect.width) * 100;
-    const dy = ((event.clientY - cropDrag.startY) / rect.height) * 100;
-    const start = cropDrag.start;
+    const activeDrag = cropDragRef.current;
+    // Crop coords are % of the image. The wrapper has the photo aspect
+    // and is centered inside the (now full-bleed) frame, so divide by
+    // its rect — not the frame's — to get the right percentages.
+    const wrapper = zoomWrapperRef.current ?? frameRef.current;
+    if (!activeDrag || !wrapper) return;
+    const rect = wrapper.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const dx = ((event.clientX - activeDrag.startX) / rect.width) * 100;
+    const dy = ((event.clientY - activeDrag.startY) / rect.height) * 100;
+    const start = activeDrag.start;
     let nextX = start.cropX;
     let nextY = start.cropY;
     let nextW = start.cropW;
     let nextH = start.cropH;
 
-    if (cropDrag.kind === 'move') {
+    if (activeDrag.kind === 'move') {
       nextX = clampNumber(start.cropX + dx, 0, 100 - start.cropW);
       nextY = clampNumber(start.cropY + dy, 0, 100 - start.cropH);
     } else {
-      const east = cropDrag.kind === 'ne' || cropDrag.kind === 'se';
-      const south = cropDrag.kind === 'sw' || cropDrag.kind === 'se';
+      const east = activeDrag.kind === 'ne' || activeDrag.kind === 'se';
+      const south = activeDrag.kind === 'sw' || activeDrag.kind === 'se';
       if (east) {
         nextW = clampNumber(start.cropW + dx, 5, 100 - start.cropX);
       } else {
@@ -616,12 +880,123 @@ function DevelopStageSplit({
       }
     }
 
-    onValuesChange({
-      cropX: Math.round(nextX * 10) / 10,
-      cropY: Math.round(nextY * 10) / 10,
-      cropW: Math.round(nextW * 10) / 10,
-      cropH: Math.round(nextH * 10) / 10,
-    });
+    onGlobalValuesChange(
+      {
+        cropX: Math.round(nextX * 10) / 10,
+        cropY: Math.round(nextY * 10) / 10,
+        cropW: Math.round(nextW * 10) / 10,
+        cropH: Math.round(nextH * 10) / 10,
+      },
+      { render: false },
+    );
+  };
+
+  const stopCropDrag = () => {
+    cropDragRef.current = null;
+  };
+
+  // Reset pan + zoom when switching photos so the user always starts at
+  // Fit. Without this you can land on a new photo mid-pan and see only a
+  // corner of it.
+  useEffect(() => {
+    setZoom(100);
+    setPanX(0);
+    setPanY(0);
+  }, [photo.id]);
+
+  // Mouse-wheel cursor-anchored zoom. React 19's onWheel is a passive
+  // listener and can't preventDefault, which means the page would scroll
+  // every time you spin the wheel over the canvas. Attach imperatively
+  // with passive:false so wheel events stay on the canvas.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const handler = (event: WheelEvent) => {
+      if (cropMode) return;
+      event.preventDefault();
+      const rect = frame.getBoundingClientRect();
+      const cx = event.clientX - rect.left - rect.width / 2;
+      const cy = event.clientY - rect.top - rect.height / 2;
+      const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      setZoom((current) => {
+        const next = clampNumber(current * factor, ZOOM_MIN, ZOOM_MAX);
+        const ratio = next / current;
+        // Cursor-anchored math: keep the image-space coord under the
+        // pointer fixed across the zoom step.
+        setPanX((px) => cx - (cx - px) * ratio);
+        setPanY((py) => cy - (cy - py) * ratio);
+        return next;
+      });
+    };
+    frame.addEventListener('wheel', handler, { passive: false });
+    return () => {
+      frame.removeEventListener('wheel', handler);
+    };
+  }, [cropMode]);
+
+  const startPanDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (cropMode) return;
+    const target = event.target as HTMLElement;
+    // Don't hijack drags that started on a crop handle — those are
+    // captured separately and need their own pointer-capture path.
+    if (target.closest('.crop-handle, .crop-box')) return;
+    // Capture even when zoom is at fit so we can detect a click (no
+    // movement on pointer-up) and toggle zoom-to-1:1 anchored there.
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    panDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      basePanX: panX,
+      basePanY: panY,
+      moved: false,
+    };
+  };
+
+  const movePanDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = panDragRef.current;
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) > CLICK_THRESHOLD_PX) {
+      drag.moved = true;
+    }
+    // Pan only kicks in when the image is actually larger than the
+    // viewport — at fit-zoom there's nothing to pan to, but we still
+    // want to capture the pointer so we can detect a click on release.
+    if (zoom <= 100) return;
+    setPanX(drag.basePanX + dx);
+    setPanY(drag.basePanY + dy);
+  };
+
+  const stopPanDrag = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = panDragRef.current;
+    if (!drag) return;
+    panDragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (drag.moved) return;
+    // No drag → click. Toggle between fit-zoom and 1:1, anchored at the
+    // click position so the pixel under the cursor stays put. Matches
+    // Lightroom's space-bar / click-to-zoom behavior.
+    const frame = frameRef.current;
+    const wrapper = zoomWrapperRef.current;
+    if (!frame || !wrapper) return;
+    const frameRect = frame.getBoundingClientRect();
+    const cx = event.clientX - frameRect.left - frameRect.width / 2;
+    const cy = event.clientY - frameRect.top - frameRect.height / 2;
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const longEdge = Math.max(wrapperRect.width, wrapperRect.height);
+    const oneToOneZoom = longEdge > 0 ? clampNumber((2048 / longEdge) * 100, ZOOM_MIN, ZOOM_MAX) : 200;
+    const isAtFit = Math.abs(zoom - 100) < 3;
+    if (isAtFit) {
+      const ratio = oneToOneZoom / zoom;
+      setZoom(oneToOneZoom);
+      setPanX(cx - (cx - panX) * ratio);
+      setPanY(cy - (cy - panY) * ratio);
+    } else {
+      setZoom(100);
+      setPanX(0);
+      setPanY(0);
+    }
   };
 
   return (
@@ -632,131 +1007,206 @@ function DevelopStageSplit({
             <button type="button" className="btn" onClick={zoomOut} aria-label="Zoom out">
               -
             </button>
-            <button type="button" className="btn" onClick={() => setZoom(100)}>
-              {zoom}%
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setZoomMenuOpen((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={zoomMenuOpen}
+            >
+              {Math.round(zoom)}%
             </button>
             <button type="button" className="btn" onClick={zoomIn} aria-label="Zoom in">
               +
             </button>
-            <button type="button" className="btn" onClick={() => setZoom(100)}>
+            <button type="button" className="btn" onClick={resetView}>
               Fit
             </button>
+            <button type="button" className="btn" onClick={goOneToOne} title="Native preview pixels">
+              1:1
+            </button>
+            {zoomMenuOpen ? (
+              <div className="develop-zoom-menu" role="menu">
+                {[25, 50, 100, 200, 400].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    role="menuitem"
+                    className="develop-zoom-menu-item"
+                    onClick={() => {
+                      setZoom(preset);
+                      setPanX(0);
+                      setPanY(0);
+                      setZoomMenuOpen(false);
+                    }}
+                  >
+                    {preset}%
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
           <div
             ref={frameRef}
+            data-testid="develop-canvas-frame"
             className="develop-canvas-frame"
-            onPointerMove={updateCropDrag}
-            onPointerUp={() => setCropDrag(null)}
-            onPointerCancel={() => setCropDrag(null)}
+            onPointerDown={startPanDrag}
+            onPointerMove={(event) => {
+              movePanDrag(event);
+              updateCropDrag(event);
+            }}
+            onPointerUp={(event) => {
+              stopPanDrag(event);
+              stopCropDrag();
+            }}
+            onPointerCancel={(event) => {
+              stopPanDrag(event);
+              stopCropDrag();
+            }}
             style={{
-              width: 'min(100%, 1100px)',
-              aspectRatio: stageAspect,
-              maxHeight: '100%',
+              width: '100%',
+              height: '100%',
               position: 'relative',
-              transform: `scale(${zoom / 100})`,
+              overflow: 'hidden',
+              cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'zoom-in',
             }}
           >
-            {preview ? (
-              <img
-                src={preview}
-                alt={photo.filename}
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  borderRadius: 4,
-                  background: 'var(--bg-chrome)',
-                }}
-              />
-            ) : (
-              <div
-                className="mono"
-                style={{
-                  position: 'absolute',
-                  inset: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: 'var(--fg-mute)',
-                  fontSize: 12,
-                }}
-              >
-                Rendering…
-              </div>
-            )}
-            <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
+            {/* The zoom wrapper sizes to the photo's aspect inside the
+                full-bleed frame so the crop overlay's percentage coords
+                stay aligned with the actual image. `width/height: auto`
+                + `max-width/height: 100%` resolves to the largest
+                photo-aspect rectangle that fits, centered via auto
+                margins (Lightroom's Fit semantics). */}
             <div
-              className="crop-dim crop-dim-left"
-              style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
-            />
-            <div
-              className="crop-dim crop-dim-right"
+              ref={zoomWrapperRef}
+              className="develop-canvas-zoom"
               style={{
-                top: `${cropTop}%`,
-                left: `${cropLeft + cropWidth}%`,
-                right: 0,
-                height: `${cropHeight}%`,
+                position: 'absolute',
+                inset: 0,
+                margin: 'auto',
+                aspectRatio: stageAspect,
+                width: 'auto',
+                height: 'auto',
+                maxWidth: '100%',
+                maxHeight: '100%',
+                transformOrigin: 'center center',
+                transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})`,
+                willChange: 'transform',
               }}
-            />
-            <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
-            <div
-              className="crop-box"
-              style={{
-                left: `${cropLeft}%`,
-                top: `${cropTop}%`,
-                width: `${cropWidth}%`,
-                height: `${cropHeight}%`,
-              }}
-              onPointerDown={(event) => startCropDrag('move', event)}
-              role="presentation"
             >
-              <div className="crop-grid" />
-              {(['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+              {preview ? (
+                <img
+                  src={preview}
+                  alt={photo.filename}
+                  draggable={false}
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'contain',
+                    borderRadius: 4,
+                    background: 'var(--bg-chrome)',
+                    userSelect: 'none',
+                  }}
+                />
+              ) : (
+                <div
+                  className="mono"
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--fg-mute)',
+                    fontSize: 12,
+                  }}
+                >
+                  Rendering…
+                </div>
+              )}
+              {selectedMaskPreview && (
+                <div
+                  className={`local-mask-preview ${selectedMaskPreview.className}`}
+                  style={selectedMaskPreview.style}
+                  aria-hidden="true"
+                  data-testid="selected-mask-overlay"
+                />
+              )}
+              {showCropOverlay && (
+                <>
+                  <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
+                  <div
+                    className="crop-dim crop-dim-left"
+                    style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
+                  />
+                  <div
+                    className="crop-dim crop-dim-right"
+                    style={{
+                      top: `${cropTop}%`,
+                      left: `${cropLeft + cropWidth}%`,
+                      right: 0,
+                      height: `${cropHeight}%`,
+                    }}
+                  />
+                  <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
+                  <div
+                    className={cropMode ? 'crop-box active' : 'crop-box passive'}
+                    style={{
+                      left: `${cropLeft}%`,
+                      top: `${cropTop}%`,
+                      width: `${cropWidth}%`,
+                      height: `${cropHeight}%`,
+                    }}
+                    onPointerDown={(event) => startCropDrag('move', event)}
+                    role="presentation"
+                  >
+                    <div className="crop-grid" />
+                    {cropMode &&
+                      (['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+                        <button
+                          key={handle}
+                          type="button"
+                          className={`crop-handle ${handle}`}
+                          aria-label={`Resize crop ${handle}`}
+                          onPointerDown={(event) => {
+                            event.stopPropagation();
+                            startCropDrag(handle, event);
+                          }}
+                        />
+                      ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+          {cropMode && (
+            <div className="develop-crop-toolbar">
+              <span className="mono">Crop</span>
+              {[
+                ['Original', { cropX: 0, cropY: 0, cropW: 100, cropH: 100 }],
+                ['1:1', { cropX: 12.5, cropY: 0, cropW: 75, cropH: 100 }],
+                ['4:5', { cropX: 10, cropY: 0, cropW: 80, cropH: 100 }],
+                ['16:9', { cropX: 0, cropY: 21.9, cropW: 100, cropH: 56.2 }],
+              ].map(([label, patch]) => (
                 <button
-                  key={handle}
+                  key={label as string}
                   type="button"
-                  className={`crop-handle ${handle}`}
-                  aria-label={`Resize crop ${handle}`}
-                  onPointerDown={(event) => startCropDrag(handle, event)}
-                />
+                  className="btn"
+                  onClick={() => applyAspect(patch as Partial<DevelopValues>)}
+                >
+                  {label as string}
+                </button>
               ))}
-            </div>
-            <div className="editor-histogram" aria-hidden="true">
-              <svg viewBox="0 0 100 40" preserveAspectRatio="none">
-                <path
-                  d="M0,40 L5,30 L12,20 L20,14 L30,8 L42,12 L55,18 L65,22 L72,16 L80,24 L88,30 L95,36 L100,40 Z"
-                  fill="rgba(255,255,255,0.25)"
-                />
-                <path
-                  d="M0,40 L6,34 L14,26 L22,22 L33,14 L45,10 L58,14 L68,18 L78,22 L86,28 L94,34 L100,40 Z"
-                  fill="color-mix(in oklch, var(--accent) 40%, transparent)"
-                />
-              </svg>
-            </div>
-          </div>
-          <div className="develop-crop-toolbar">
-            <span className="mono">Crop</span>
-            {[
-              ['Original', { cropX: 0, cropY: 0, cropW: 100, cropH: 100 }],
-              ['1:1', { cropX: 12.5, cropY: 0, cropW: 75, cropH: 100 }],
-              ['4:5', { cropX: 10, cropY: 0, cropW: 80, cropH: 100 }],
-              ['16:9', { cropX: 0, cropY: 21.9, cropW: 100, cropH: 56.2 }],
-            ].map(([label, patch]) => (
-              <button
-                key={label as string}
-                type="button"
-                className="btn"
-                onClick={() => applyAspect(patch as Partial<DevelopValues>)}
-              >
-                {label as string}
+              <button type="button" className="btn" onClick={resetCrop} disabled={!isCropping}>
+                Reset
               </button>
-            ))}
-            <button type="button" className="btn" onClick={resetCrop} disabled={!isCropping}>
-              Reset
-            </button>
-          </div>
+              <button type="button" className="btn primary" onClick={() => setCropMode(false)}>
+                Done
+              </button>
+            </div>
+          )}
         </div>
         <div className="editor-strip">
           {photos.slice(0, 14).map((p, i) => (
@@ -779,6 +1229,16 @@ function DevelopStageSplit({
       <EditorInspector
         photo={photo}
         values={values}
+        mode={inspectorMode}
+        targetName={selectedMask?.name}
+        targetMeta={
+          selectedMask
+            ? `${selectedMask.source.replaceAll('_', ' ')} / ${selectedMask.mode}${selectedMask.visible ? '' : ' / hidden'}`
+            : undefined
+        }
+        cropMode={cropMode}
+        onToggleCropMode={() => setCropMode(!cropMode)}
+        onClearMaskSelection={onClearMaskSelection}
         onChange={onValueChange}
         onChangeMany={onValuesChange}
         onCurvesChange={onCurvesChange}
@@ -792,394 +1252,15 @@ function DevelopStageSplit({
   );
 }
 
-const MASK_PRESETS = [
-  { id: 'subject', label: 'Subject', icon: 'faces' as const },
-  { id: 'sky', label: 'Sky', icon: 'cloud' as const },
-  { id: 'person', label: 'Person', icon: 'faces' as const },
-  { id: 'object', label: 'Objects', icon: 'wand' as const },
-  { id: 'foreground', label: 'Foreground', icon: 'layers' as const },
-  { id: 'background', label: 'Background', icon: 'grid' as const },
-];
-
-type MaskPreset = (typeof MASK_PRESETS)[number];
-type MaskMode = 'normal' | 'add' | 'subtract' | 'intersect';
-const MASK_MODES: { id: MaskMode; label: string }[] = [
-  { id: 'normal', label: 'New' },
-  { id: 'add', label: 'Add' },
-  { id: 'subtract', label: 'Subtract' },
-  { id: 'intersect', label: 'Intersect' },
-];
-
 const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-interface MaskStageProps {
-  photo: PhotoRow;
-  stageAspect: string;
-  preview: string | null;
-  operations: DevelopOperations;
-  onPreview: (previewDataUrl: string) => void;
-}
-
-function MaskStage({ photo, stageAspect, preview, operations, onPreview }: MaskStageProps) {
-  const [masking, setMasking] = useState(false);
-  const [maskError, setMaskError] = useState<string | null>(null);
-  const [activePresetId, setActivePresetId] = useState<string | null>(null);
-  const [maskMode, setMaskMode] = useState<MaskMode>('normal');
-  const [selectedMaskId, setSelectedMaskId] = useState<number | null>(null);
-  const activeMask = useDevelopUi((s) => s.activeMask);
-  const setActiveMask = useDevelopUi((s) => s.setActiveMask);
-  const { data: masks = [] } = useDevelopMasks(photo.id);
-  const createMask = useDevelopMaskCreate();
-  const generateMask = useDevelopMaskGenerate();
-  const updateMask = useDevelopMaskUpdate();
-  const deleteMask = useDevelopMaskDelete();
-  const applyMaskPreview = useDevelopMaskApplyPreview();
-
-  const canMask = !masking && !generateMask.isPending;
-  const canCreateManualMask = !createMask.isPending;
-  const statusLabel = masking ? 'Generating' : 'Local bitmap masks';
-
-  const runMask = (preset: MaskPreset) => {
-    if (!canMask) return;
-    const photoId = photo.id;
-    setActivePresetId(preset.id);
-    setMasking(true);
-    setMaskError(null);
-    setActiveMask(null);
-    generateMask.mutate(
-      {
-        photo_id: photoId,
-        name: `${preset.label} mask`,
-        source: preset.id,
-        mode: maskMode,
-        operations: { ...identityOperations(), exposure: preset.id === 'sky' ? 0.35 : 0.2 },
-      },
-      {
-        onSuccess: (receipt) => {
-          setSelectedMaskId(receipt.mask.id);
-          if (useDevelopUi.getState().focusedPhotoId === photoId) onPreview(receipt.preview_data_url);
-        },
-        onError: (e) => setMaskError(String(e)),
-        onSettled: () => setMasking(false),
-      },
-    );
-  };
-
-  const maskSrc = activeMask ? `data:image/png;base64,${activeMask.maskB64}` : null;
-
-  function refreshPreview() {
-    applyMaskPreview.mutate(
-      { photoId: photo.id, operations },
-      {
-        onSuccess: (receipt) => onPreview(receipt.preview_data_url),
-      },
-    );
-  }
-
-  function createManualMask(kind: 'brush' | 'linear_gradient' | 'radial_gradient') {
-    const label =
-      kind === 'brush' ? 'Brush mask' : kind === 'linear_gradient' ? 'Linear gradient' : 'Radial gradient';
-    createMask.mutate(
-      {
-        photo_id: photo.id,
-        name: label,
-        source: kind,
-        mode: maskMode,
-        payload_storage: 'inline',
-        mask_payload:
-          kind === 'linear_gradient'
-            ? { kind, top: 0.0, bottom: 0.55 }
-            : kind === 'radial_gradient'
-              ? { kind, cx: 0.5, cy: 0.5, radius: 0.35, feather: 0.35 }
-              : { kind, cx: 0.5, cy: 0.5, radius: 0.18, feather: 0.45, flow: 1.0, density: 1.0 },
-        operations: { ...identityOperations(), exposure: kind === 'brush' ? 0.2 : 0.35 },
-      },
-      {
-        onSuccess: (maskId) => {
-          setSelectedMaskId(maskId);
-          refreshPreview();
-        },
-      },
-    );
-  }
-
-  function setMaskExposure(maskId: number, exposure: number) {
-    updateMask.mutate(
-      {
-        mask_id: maskId,
-        operations: { ...identityOperations(), exposure },
-      },
-      {
-        onSuccess: () => refreshPreview(),
-      },
-    );
-  }
-
-  function setMaskModeForLayer(maskId: number, mode: MaskMode) {
-    updateMask.mutate(
-      {
-        mask_id: maskId,
-        mode,
-      },
-      {
-        onSuccess: () => refreshPreview(),
-      },
-    );
-  }
-
-  function maskExposure(mask: (typeof masks)[number]) {
-    try {
-      const parsed: unknown = JSON.parse(mask.operations_json);
-      if (parsed && typeof parsed === 'object' && 'exposure' in parsed) {
-        const exposure = (parsed as { exposure?: unknown }).exposure;
-        return typeof exposure === 'number' ? exposure : 0;
-      }
-    } catch {
-      return 0;
-    }
-    return 0;
-  }
-
-  const selectedMask =
-    (selectedMaskId ? masks.find((mask) => mask.id === selectedMaskId) : null) ?? masks[0] ?? null;
-  const selectedMaskPreview = selectedMask ? localMaskPreview(selectedMask) : null;
-
-  return (
-    <div className="mask-stage">
-      <div className="mask-main">
-        <div className="mask-canvas-wrap">
-          <div className="mask-canvas" style={{ aspectRatio: stageAspect }}>
-            {preview ? (
-              <img src={preview} alt={photo.filename} className="mask-base" />
-            ) : (
-              <Thumbnail
-                photoId={photo.id}
-                sizePx={thumbnailSizeForCssBox(1100, 800, { maxPx: 1280 })}
-                photo={{ hue: (photo.id * 31) % 360, filename: photo.filename, id: String(photo.id) }}
-                fit="contain"
-              />
-            )}
-            {selectedMaskPreview &&
-              (selectedMaskPreview.src ? (
-                <img
-                  src={selectedMaskPreview.src}
-                  alt=""
-                  className="local-mask-bitmap mask-overlay"
-                  aria-hidden="true"
-                />
-              ) : (
-                <div
-                  className={`local-mask-preview ${selectedMaskPreview.className}`}
-                  style={selectedMaskPreview.style}
-                  aria-hidden="true"
-                />
-              ))}
-            {maskSrc && <img src={maskSrc} alt="" aria-hidden="true" className="mask-overlay" />}
-            <div className="mask-status">
-              <Chip variant="solid">Mask · {statusLabel}</Chip>
-              {selectedMask && <Chip>{selectedMask.name}</Chip>}
-              {activeMask && (
-                <Chip onClose={() => setActiveMask(null)}>
-                  {activeMask.prompt} · {Math.round(activeMask.confidence * 100)}%
-                </Chip>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="mask-panel editor-inspector">
-        <div className="editor-ihead">
-          <div>
-            <div className="mono" style={{ fontSize: 11.5, color: 'var(--fg-dim)' }}>
-              Masking
-            </div>
-            <div className="mask-subtitle">Create local adjustment masks, then refine each layer.</div>
-          </div>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setActiveMask(null)}
-            disabled={!activeMask}
-            aria-disabled={!activeMask}
-            style={{ padding: '5px 9px', fontSize: 11.5 }}
-          >
-            Clear
-          </button>
-        </div>
-        <div className="editor-ibody">
-          <div className="editor-group">
-            <div className="mask-create-head">
-              <h4>Create New Mask</h4>
-              <fieldset className="mask-mode-seg">
-                <legend className="mask-mode-legend">Mask combine mode</legend>
-                {MASK_MODES.map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    className={maskMode === mode.id ? 'on' : ''}
-                    onClick={() => setMaskMode(mode.id)}
-                    aria-pressed={maskMode === mode.id}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </fieldset>
-            </div>
-            <h4>AI masks</h4>
-            <div className="mask-preset-grid">
-              {MASK_PRESETS.map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  className={activePresetId === preset.id ? 'btn primary' : 'btn'}
-                  disabled={!canMask}
-                  aria-disabled={!canMask}
-                  onClick={() => runMask(preset)}
-                  title={canMask ? `Create a local ${preset.label.toLowerCase()} mask` : 'Creating mask'}
-                >
-                  <Icon name={preset.icon} size={12} /> {preset.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="editor-group">
-            <h4>Brush & Gradients</h4>
-            <div className="mask-preset-grid">
-              <button
-                type="button"
-                className="btn"
-                onClick={() => createManualMask('brush')}
-                disabled={!canCreateManualMask}
-              >
-                <Icon name="brush" size={12} /> Brush
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => createManualMask('linear_gradient')}
-                disabled={!canCreateManualMask}
-              >
-                Linear gradient
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => createManualMask('radial_gradient')}
-                disabled={!canCreateManualMask}
-              >
-                Radial gradient
-              </button>
-              <button
-                type="button"
-                className="btn"
-                onClick={refreshPreview}
-                disabled={applyMaskPreview.isPending}
-              >
-                {applyMaskPreview.isPending ? 'Rendering...' : 'Refresh'}
-              </button>
-            </div>
-          </div>
-
-          <div className="editor-group">
-            <h4>Mask layers</h4>
-            {masks.length === 0 ? (
-              <div className="mask-empty-state">No persistent masks yet</div>
-            ) : (
-              <div className="mask-layer-list">
-                {masks.map((mask) => {
-                  const exposure = maskExposure(mask);
-                  return (
-                    <div
-                      key={mask.id}
-                      className={`mask-layer-row ${selectedMask?.id === mask.id ? 'active' : ''}`}
-                      data-hidden={!mask.visible}
-                    >
-                      <div>
-                        <strong>{mask.name}</strong>
-                        <span className="mono">
-                          {mask.source.replaceAll('_', ' ')} · {mask.mode} · {exposure > 0 ? '+' : ''}
-                          {exposure.toFixed(2)} EV
-                        </span>
-                      </div>
-                      <fieldset className="mask-layer-mode">
-                        <legend className="mask-mode-legend">Combine mode for {mask.name}</legend>
-                        {MASK_MODES.map((mode) => (
-                          <button
-                            key={mode.id}
-                            type="button"
-                            className={mask.mode === mode.id ? 'on' : ''}
-                            onClick={() => setMaskModeForLayer(mask.id, mode.id)}
-                          >
-                            {mode.label}
-                          </button>
-                        ))}
-                      </fieldset>
-                      <div className="mask-layer-actions">
-                        <button type="button" className="btn" onClick={() => setSelectedMaskId(mask.id)}>
-                          Select
-                        </button>
-                        <button
-                          type="button"
-                          className="btn"
-                          onClick={() =>
-                            updateMask.mutate(
-                              { mask_id: mask.id, visible: !mask.visible },
-                              { onSuccess: () => refreshPreview() },
-                            )
-                          }
-                        >
-                          {mask.visible ? 'Hide' : 'Show'}
-                        </button>
-                        <button type="button" className="btn" onClick={() => setMaskExposure(mask.id, 0.35)}>
-                          +Light
-                        </button>
-                        <button type="button" className="btn" onClick={() => setMaskExposure(mask.id, -0.35)}>
-                          -Dark
-                        </button>
-                        <button
-                          type="button"
-                          className="btn danger"
-                          onClick={() =>
-                            deleteMask.mutate(
-                              { maskId: mask.id, photoId: photo.id },
-                              { onSuccess: () => refreshPreview() },
-                            )
-                          }
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {activeMask && (
-              <div className="mask-readout">
-                <div>
-                  <span className="mono">Latest AI mask</span>
-                  <strong>{activeMask.prompt}</strong>
-                </div>
-                <div>
-                  <span className="mono">Confidence</span>
-                  <strong>{Math.round(activeMask.confidence * 100)}%</strong>
-                </div>
-              </div>
-            )}
-            {maskError && <div className="mask-error mono">{maskError}</div>}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function localMaskPreview(mask: DevelopMask): {
+function localMaskPreview(
+  mask: DevelopMask,
+  opacity: number,
+  cropValues: DevelopValues | null = null,
+): {
   className: string;
   style: CSSProperties;
-  src: string | null;
 } {
   let payload: Record<string, unknown> = {};
   try {
@@ -1189,18 +1270,32 @@ function localMaskPreview(mask: DevelopMask): {
     payload = {};
   }
   const kind = typeof payload.kind === 'string' ? payload.kind : mask.source;
+  const cropLeft = cropValues ? clampNumber(cropValues.cropX, 0, 95) : 0;
+  const cropTop = cropValues ? clampNumber(cropValues.cropY, 0, 95) : 0;
+  const cropWidth = cropValues ? clampNumber(cropValues.cropW, 5, 100 - cropLeft) : 100;
+  const cropHeight = cropValues ? clampNumber(cropValues.cropH, 5, 100 - cropTop) : 100;
+  const cropStyle: CSSProperties =
+    cropValues == null
+      ? {}
+      : {
+          left: `${-(cropLeft / cropWidth) * 100}%`,
+          top: `${-(cropTop / cropHeight) * 100}%`,
+          right: 'auto',
+          bottom: 'auto',
+          width: `${10000 / cropWidth}%`,
+          height: `${10000 / cropHeight}%`,
+        };
+  const baseStyle = {
+    ...cropStyle,
+    '--mask-opacity': String(clampNumber(opacity, 0.1, 1)),
+  } as CSSProperties & Record<'--mask-opacity', string>;
   if (kind === 'bitmap' && typeof payload.data_b64 === 'string') {
     return {
       className: 'kind-bitmap',
-      style: {},
-      src: `data:image/png;base64,${payload.data_b64}`,
-    };
-  }
-  if (['subject', 'person', 'object', 'sky', 'background', 'foreground', 'landscape'].includes(kind)) {
-    return {
-      className: 'kind-unavailable',
-      style: {},
-      src: null,
+      style: {
+        ...baseStyle,
+        '--mask-image': `url("data:image/png;base64,${payload.data_b64}")`,
+      } as CSSProperties,
     };
   }
   const cx = typeof payload.cx === 'number' ? payload.cx : 0.5;
@@ -1209,6 +1304,7 @@ function localMaskPreview(mask: DevelopMask): {
   const top = typeof payload.top === 'number' ? payload.top : 0;
   const bottom = typeof payload.bottom === 'number' ? payload.bottom : 0.55;
   const style = {
+    ...baseStyle,
     '--mask-cx': `${clampNumber(cx, 0, 1) * 100}%`,
     '--mask-cy': `${clampNumber(cy, 0, 1) * 100}%`,
     '--mask-radius': `${clampNumber(radius, 0.02, 1) * 100}%`,
@@ -1216,7 +1312,7 @@ function localMaskPreview(mask: DevelopMask): {
     '--mask-bottom': `${clampNumber(bottom, 0, 1) * 100}%`,
   } as CSSProperties;
 
-  return { className: `kind-${kind.replaceAll('_', '-')}`, style, src: null };
+  return { className: `kind-${kind.replaceAll('_', '-')}`, style };
 }
 
 interface PromptStageProps {

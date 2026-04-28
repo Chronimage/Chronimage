@@ -35,11 +35,41 @@ interface DevelopUiState {
   operations: DevelopOperations | null;
   operationSource: OperationSource | null;
   activeMask: ActiveDevelopMask | null;
+  selectedMaskId: number | null;
+  maskOverlayVisible: boolean;
+  maskOverlayOpacity: number;
+  /**
+   * Open/closed state for each `<CollapsibleSection>` in the editor inspector,
+   * keyed by section id (e.g. `'light'`, `'curves'`). Survives photo
+   * switches inside one session so the user's panel layout sticks.
+   */
+  panelOpen: Record<string, boolean>;
   setFocusedPhotoId: (id: number | null) => void;
   setPreview: (url: string | null) => void;
   setOperations: (operations: DevelopOperations | null, source: OperationSource) => void;
   setActiveMask: (mask: ActiveDevelopMask | null) => void;
+  setSelectedMaskId: (id: number | null) => void;
+  setMaskOverlayVisible: (visible: boolean) => void;
+  setMaskOverlayOpacity: (opacity: number) => void;
+  setPanelOpen: (id: string, open: boolean) => void;
 }
+
+const DEFAULT_PANEL_OPEN: Record<string, boolean> = {
+  // Right inspector
+  light: true,
+  curves: true,
+  color: true,
+  'color-mixer': false,
+  'color-grading': false,
+  effects: false,
+  detail: false,
+  optics: false,
+  geometry: false,
+  'lens-blur': false,
+  // Left rail (DevelopSidePanel)
+  presets: true,
+  masks: true,
+};
 
 export const useDevelopUi = create<DevelopUiState>((set) => ({
   focusedPhotoId: null,
@@ -47,8 +77,16 @@ export const useDevelopUi = create<DevelopUiState>((set) => ({
   operations: null,
   operationSource: null,
   activeMask: null,
+  selectedMaskId: null,
+  maskOverlayVisible: true,
+  maskOverlayOpacity: 62,
+  panelOpen: DEFAULT_PANEL_OPEN,
   setFocusedPhotoId: (id) => set({ focusedPhotoId: id }),
   setPreview: (url) => set({ preview: url }),
   setOperations: (operations, operationSource) => set({ operations, operationSource }),
   setActiveMask: (activeMask) => set({ activeMask }),
+  setSelectedMaskId: (selectedMaskId) => set({ selectedMaskId }),
+  setMaskOverlayVisible: (maskOverlayVisible) => set({ maskOverlayVisible }),
+  setMaskOverlayOpacity: (maskOverlayOpacity) => set({ maskOverlayOpacity }),
+  setPanelOpen: (id, open) => set((state) => ({ panelOpen: { ...state.panelOpen, [id]: open } })),
 }));

@@ -155,12 +155,31 @@ pub(crate) fn apply_to_unit_buf(buf: &mut [[f32; 3]], w: usize, h: usize, ops: &
         });
     }
 
+    // Stage 6b: Color Mixer — 8-band HSL offsets. Identity check skips
+    // the per-pixel HSL round-trip when every band is neutral.
+    if !color_mixer_is_identity(&ops.color_mixer) {
+        apply_color_mixer(buf, &ops.color_mixer);
+    }
+
+    // Stage 6c: Color Grading — 3-zone hue/sat/luminance wheels plus a
+    // global wheel applied across the full luminance range.
+    if !color_grading_is_identity(&ops.color_grading) {
+        apply_color_grading(buf, &ops.color_grading);
+    }
+
     // Stage 7: Clarity — unsharp-mask on luma with a 3× box blur as
     // cheap approximation. Preview-quality only; GPU path will use a
     // proper Gaussian.
     if ops.clarity != 0.0 {
         let amount = ops.clarity / 100.0;
         apply_clarity(buf, w, h, amount);
+    }
+
+    // Stage 7b: Texture — same shape as clarity but with a wider blur
+    // so it operates on mid-frequency detail (skin texture, foliage,
+    // fabric weave) rather than fine edges.
+    if ops.texture != 0.0 {
+        apply_texture(buf, w, h, ops.texture / 100.0);
     }
 
     // Stage 8: Dehaze — lift blacks + boost saturation proportional to
@@ -220,6 +239,12 @@ pub(crate) fn apply_to_unit_buf(buf: &mut [[f32; 3]], w: usize, h: usize, ops: &
         });
     }
 
+    // Stage 9b: Defringe — desaturate purple/green pixels inside their
+    // configurable hue bands. Standard chromatic-aberration cleanup.
+    if ops.defringe.purple_amount > 0.0 || ops.defringe.green_amount > 0.0 {
+        apply_defringe(buf, &ops.defringe);
+    }
+
     // Stage 10: Vignette. Negative values darken edges; positive values lift
     // them. This is preview-grade but gives the visible control a real result.
     if ops.lens_vignette != 0.0 {
@@ -235,11 +260,32 @@ pub fn apply_dynamic(img: &DynamicImage, ops: &Operations) -> DynamicImage {
 }
 
 pub(crate) fn apply_spatial(mut img: RgbImage, ops: &Operations) -> RgbImage {
+    // Geometry first: rotate cardinal multiples + auto-crop to inscribed
+    // rectangle for the residual continuous angle. This matches Lightroom's
+    // "Straighten" auto-crop behavior (no black corners). Rotation and
+    // straighten are summed so a 90° + 2° fine adjustment composes cleanly.
+    let total_deg = ops.rotation + ops.straighten;
+    if total_deg.abs() > 0.01 {
+        img = apply_rotation(&img, total_deg);
+    }
     if ops.lens_blur_amount > 0.0 {
         img = apply_lens_blur(&img, ops);
     }
     if has_crop(ops) {
         img = apply_crop(&img, ops);
+    }
+    if ops.sharpening.amount > 0.0 {
+        img = apply_sharpening(&img, &ops.sharpening);
+    }
+    if ops.grain.amount > 0.0 {
+        img = apply_grain(&img, &ops.grain);
+    }
+    img
+}
+
+pub(crate) fn apply_local_spatial(mut img: RgbImage, ops: &Operations) -> RgbImage {
+    if ops.lens_blur_amount > 0.0 {
+        img = apply_lens_blur(&img, ops);
     }
     img
 }
@@ -273,6 +319,135 @@ fn apply_crop(img: &RgbImage, ops: &Operations) -> RgbImage {
     let cw = ((crop_w * w as f32).round() as u32).clamp(1, w.saturating_sub(x));
     let ch = ((crop_h * h as f32).round() as u32).clamp(1, h.saturating_sub(y));
     imageops::crop_imm(img, x, y, cw, ch).to_image()
+}
+
+/// Rotate by `degrees` and crop to the largest axis-aligned rectangle
+/// inscribed in the rotated image. Snaps to cardinal multiples of 90°
+/// when within 0.01° tolerance (cheap pixel-perfect rotate); otherwise
+/// applies a parallel bilinear-sampled rotation followed by an inscribed
+/// crop using Sneddon's formula. No black corners — matches Lightroom's
+/// straighten behavior.
+fn apply_rotation(img: &RgbImage, degrees: f32) -> RgbImage {
+    // Normalise to (-180, 180].
+    let mut deg = ((degrees % 360.0) + 360.0) % 360.0;
+    if deg > 180.0 {
+        deg -= 360.0;
+    }
+    if deg.abs() < 0.01 {
+        return img.clone();
+    }
+
+    // Cardinal rotates first — exact, fast, no resampling.
+    let mut working = img.clone();
+    let mut residual = deg;
+    if (residual - 90.0).abs() < 0.01 {
+        working = imageops::rotate90(&working);
+        residual = 0.0;
+    } else if (residual - 180.0).abs() < 0.01 || (residual + 180.0).abs() < 0.01 {
+        working = imageops::rotate180(&working);
+        residual = 0.0;
+    } else if (residual + 90.0).abs() < 0.01 {
+        working = imageops::rotate270(&working);
+        residual = 0.0;
+    } else if residual > 45.0 {
+        working = imageops::rotate90(&working);
+        residual -= 90.0;
+    } else if residual < -45.0 {
+        working = imageops::rotate270(&working);
+        residual += 90.0;
+    }
+
+    if residual.abs() < 0.01 {
+        return working;
+    }
+
+    rotate_inscribed(&working, residual)
+}
+
+/// Continuous rotation in [-45°, 45°] with bilinear sampling, output
+/// auto-cropped to the inscribed axis-aligned rectangle (no black wedges).
+/// Use `apply_rotation` for the cardinal-snap wrapper.
+fn rotate_inscribed(img: &RgbImage, degrees: f32) -> RgbImage {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return img.clone();
+    }
+    // Negate so positive degrees rotate the image clockwise (Lightroom's
+    // convention). The rotation matrix below applies an inverse map from
+    // output pixels back into the input.
+    let theta = -degrees.to_radians();
+    let cos = theta.cos();
+    let sin = theta.sin();
+    let abs_cos = cos.abs();
+    let abs_sin = sin.abs();
+    let w_f = w as f32;
+    let h_f = h as f32;
+    // Sneddon's inscribed-rectangle formula. For |θ| ≤ 45° the simpler
+    // branch always applies; the larger-angle branch never triggers in
+    // our pipeline (cardinal-snap above peels off the 90° components).
+    let cos_2a = (abs_cos * abs_cos - abs_sin * abs_sin).max(1e-6);
+    let inner_w = ((w_f * abs_cos - h_f * abs_sin) / cos_2a).max(1.0);
+    let inner_h = ((h_f * abs_cos - w_f * abs_sin) / cos_2a).max(1.0);
+    let out_w = inner_w.floor().min(w_f) as u32;
+    let out_h = inner_h.floor().min(h_f) as u32;
+    if out_w == 0 || out_h == 0 {
+        return img.clone();
+    }
+
+    let cx_in = w_f * 0.5;
+    let cy_in = h_f * 0.5;
+    let cx_out = out_w as f32 * 0.5;
+    let cy_out = out_h as f32 * 0.5;
+
+    let mut out_bytes = vec![0u8; (out_w * out_h * 3) as usize];
+    let row_stride = (out_w * 3) as usize;
+    out_bytes
+        .par_chunks_exact_mut(row_stride)
+        .enumerate()
+        .for_each(|(yo, row)| {
+            let dy = yo as f32 - cy_out;
+            for xo in 0..out_w as usize {
+                let dx = xo as f32 - cx_out;
+                let xi = cx_in + dx * cos - dy * sin;
+                let yi = cy_in + dx * sin + dy * cos;
+                let pixel = sample_bilinear(img, xi, yi);
+                let off = xo * 3;
+                row[off] = pixel[0];
+                row[off + 1] = pixel[1];
+                row[off + 2] = pixel[2];
+            }
+        });
+    RgbImage::from_raw(out_w, out_h, out_bytes).unwrap_or_else(|| img.clone())
+}
+
+/// Bilinear RGB sample with edge clamping. Returns black when the query
+/// is fully outside the image (shouldn't happen given the inscribed
+/// crop, but the defensive branch keeps the rotated edge clean).
+fn sample_bilinear(img: &RgbImage, x: f32, y: f32) -> [u8; 3] {
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return [0, 0, 0];
+    }
+    let xc = x.clamp(0.0, w as f32 - 1.0);
+    let yc = y.clamp(0.0, h as f32 - 1.0);
+    let x0 = xc.floor() as u32;
+    let y0 = yc.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let dx = xc - x0 as f32;
+    let dy = yc - y0 as f32;
+    let p00 = img.get_pixel(x0, y0).0;
+    let p10 = img.get_pixel(x1, y0).0;
+    let p01 = img.get_pixel(x0, y1).0;
+    let p11 = img.get_pixel(x1, y1).0;
+    let mut out = [0u8; 3];
+    for c in 0..3 {
+        let top = p00[c] as f32 * (1.0 - dx) + p10[c] as f32 * dx;
+        let bot = p01[c] as f32 * (1.0 - dx) + p11[c] as f32 * dx;
+        let v = top * (1.0 - dy) + bot * dy;
+        out[c] = v.round().clamp(0.0, 255.0) as u8;
+    }
+    out
 }
 
 fn apply_vignette(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
@@ -516,6 +691,349 @@ fn apply_clarity(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
         });
 }
 
+/// Texture stage. Same shape as clarity, but the blur kernel is wider
+/// so it operates on mid-frequency detail (~5–10 px) rather than the
+/// fine 3×3 edges clarity targets.
+fn apply_texture(buf: &mut [[f32; 3]], w: usize, h: usize, amount: f32) {
+    let radius: i32 = 3;
+    let mut blur_l: Vec<f32> = Vec::with_capacity(buf.len());
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0.0;
+            let mut cnt = 0.0;
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let xx = x as i32 + dx;
+                    let yy = y as i32 + dy;
+                    if xx < 0 || yy < 0 || xx >= w as i32 || yy >= h as i32 {
+                        continue;
+                    }
+                    sum += luminance(&buf[(yy as usize) * w + xx as usize]);
+                    cnt += 1.0;
+                }
+            }
+            blur_l.push(if cnt > 0.0 { sum / cnt } else { 0.0 });
+        }
+    }
+    buf.par_iter_mut()
+        .zip(blur_l.par_iter())
+        .for_each(|(p, bl)| {
+            let l = luminance(p);
+            let delta = amount * (l - bl) * 0.4;
+            for c in p.iter_mut() {
+                *c = (*c + delta).clamp(0.0, 1.5);
+            }
+        });
+}
+
+// ── HSL helpers ───────────────────────────────────────────────────────────────
+
+fn rgb_to_hsl(rgb: &[f32; 3]) -> [f32; 3] {
+    let r = rgb[0].clamp(0.0, 1.0);
+    let g = rgb[1].clamp(0.0, 1.0);
+    let b = rgb[2].clamp(0.0, 1.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    let d = max - min;
+    if d.abs() < 1e-6 {
+        return [0.0, 0.0, l];
+    }
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = if max == r {
+        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
+    } else if max == g {
+        ((b - r) / d + 2.0) / 6.0
+    } else {
+        ((r - g) / d + 4.0) / 6.0
+    };
+    [h * 360.0, s, l]
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
+    if s.abs() < 1e-6 {
+        return [l, l, l];
+    }
+    let h_norm = ((h % 360.0 + 360.0) % 360.0) / 360.0;
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    [
+        hue_to_rgb_component(p, q, h_norm + 1.0 / 3.0),
+        hue_to_rgb_component(p, q, h_norm),
+        hue_to_rgb_component(p, q, h_norm - 1.0 / 3.0),
+    ]
+}
+
+fn hue_to_rgb_component(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 {
+        t += 1.0;
+    } else if t > 1.0 {
+        t -= 1.0;
+    }
+    if t < 1.0 / 6.0 {
+        return p + (q - p) * 6.0 * t;
+    }
+    if t < 0.5 {
+        return q;
+    }
+    if t < 2.0 / 3.0 {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    p
+}
+
+// ── Color Mixer (8-band HSL) ──────────────────────────────────────────────────
+
+fn color_mixer_is_identity(mixer: &super::ops::ColorMixer) -> bool {
+    let bands = [
+        &mixer.red,
+        &mixer.orange,
+        &mixer.yellow,
+        &mixer.green,
+        &mixer.aqua,
+        &mixer.blue,
+        &mixer.purple,
+        &mixer.magenta,
+    ];
+    bands
+        .iter()
+        .all(|b| b.hue.abs() < 1e-3 && b.saturation.abs() < 1e-3 && b.luminance.abs() < 1e-3)
+}
+
+const MIXER_CENTERS: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0];
+
+fn apply_color_mixer(buf: &mut [[f32; 3]], mixer: &super::ops::ColorMixer) {
+    let bands = [
+        mixer.red,
+        mixer.orange,
+        mixer.yellow,
+        mixer.green,
+        mixer.aqua,
+        mixer.blue,
+        mixer.purple,
+        mixer.magenta,
+    ];
+    buf.par_iter_mut().for_each(|p| {
+        let [h, s, l] = rgb_to_hsl(p);
+        if s < 0.02 {
+            // Near-grey: hue is unstable, skip.
+            return;
+        }
+        let mut h_shift = 0.0;
+        let mut s_shift = 0.0;
+        let mut l_shift = 0.0;
+        for (i, band) in bands.iter().enumerate() {
+            let center = MIXER_CENTERS[i];
+            // Cosine-shaped weight over a ±30° band; falls to zero at
+            // ±45°. Sum of all 8 weights stays within [0, 1] because
+            // band centers are at least 30° apart.
+            let dist = hue_distance(h, center);
+            if dist > 45.0 {
+                continue;
+            }
+            let weight = ((dist / 45.0) * std::f32::consts::PI * 0.5).cos().max(0.0);
+            h_shift += band.hue * 0.3 * weight;
+            s_shift += band.saturation * 0.01 * weight;
+            l_shift += band.luminance * 0.01 * weight;
+        }
+        let new_h = h + h_shift;
+        let new_s = (s + s_shift).clamp(0.0, 1.0);
+        let new_l = (l + l_shift).clamp(0.0, 1.0);
+        *p = hsl_to_rgb(new_h, new_s, new_l);
+    });
+}
+
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let d = (a - b).abs() % 360.0;
+    if d > 180.0 {
+        360.0 - d
+    } else {
+        d
+    }
+}
+
+// ── Color Grading (3-zone wheels + global) ────────────────────────────────────
+
+fn color_grading_is_identity(cg: &super::ops::ColorGrading) -> bool {
+    let wheel_neutral =
+        |w: &super::ops::HslWheel| w.saturation.abs() < 1e-3 && w.luminance.abs() < 1e-3;
+    wheel_neutral(&cg.shadows)
+        && wheel_neutral(&cg.midtones)
+        && wheel_neutral(&cg.highlights)
+        && wheel_neutral(&cg.global)
+}
+
+fn apply_color_grading(buf: &mut [[f32; 3]], cg: &super::ops::ColorGrading) {
+    // `balance` shifts the luminance threshold between shadow and
+    // highlight zones; `blending` widens the overlap. Defaults
+    // (balance=0, blending=50) reproduce Lightroom's default split.
+    let balance = (cg.balance / 100.0).clamp(-1.0, 1.0);
+    let overlap = (cg.blending / 100.0).clamp(0.0, 1.0);
+    let mid_lo = (0.25 - 0.15 * balance - 0.15 * overlap).max(0.0);
+    let mid_hi = (0.75 - 0.15 * balance + 0.15 * overlap).min(1.0);
+    let sh_hi = (0.5 - 0.2 * balance + 0.1 * overlap).clamp(0.05, 0.95);
+    let hi_lo = (0.5 - 0.2 * balance - 0.1 * overlap).clamp(0.05, 0.95);
+
+    buf.par_iter_mut().for_each(|p| {
+        let l = luminance(p);
+        // Triangular weights for each zone, capped to [0, 1].
+        let w_sh = (1.0 - smoothstep(0.0, sh_hi, l)).clamp(0.0, 1.0);
+        let w_hi = smoothstep(hi_lo, 1.0, l).clamp(0.0, 1.0);
+        let w_mid = (smoothstep(0.0, mid_lo.max(1e-3), l) - smoothstep(mid_hi.max(1e-3), 1.0, l))
+            .clamp(0.0, 1.0);
+
+        let mut total = [0.0f32; 3];
+        let mut total_weight = 0.0;
+        let zones = [
+            (&cg.shadows, w_sh),
+            (&cg.midtones, w_mid),
+            (&cg.highlights, w_hi),
+            (&cg.global, 1.0),
+        ];
+        for (wheel, w) in zones.iter() {
+            if w.abs() < 1e-3 {
+                continue;
+            }
+            if wheel.saturation.abs() < 1e-3 && wheel.luminance.abs() < 1e-3 {
+                continue;
+            }
+            let tint = hsl_to_rgb(wheel.hue, (wheel.saturation / 100.0).clamp(0.0, 1.0), 0.5);
+            let lum_shift = wheel.luminance / 100.0 * 0.3;
+            for c in 0..3 {
+                // Move toward (tint - 0.5 + l) by saturation, plus the
+                // luminance shift. This mimics Lightroom's wheel feel:
+                // pure hue/sat tints the zone without darkening it,
+                // luminance pushes the zone up or down.
+                total[c] += (tint[c] - 0.5 + p[c] + lum_shift) * w;
+            }
+            total_weight += w;
+        }
+        if total_weight > 0.0 {
+            let inv = 1.0 / total_weight;
+            for c in 0..3 {
+                p[c] = ((total[c] * inv) * 0.6 + p[c] * 0.4).clamp(0.0, 1.5);
+            }
+        }
+    });
+}
+
+// ── Defringe ─────────────────────────────────────────────────────────────────
+
+fn apply_defringe(buf: &mut [[f32; 3]], defr: &super::ops::Defringe) {
+    let purple_amount = (defr.purple_amount / 20.0).clamp(0.0, 1.0);
+    let green_amount = (defr.green_amount / 20.0).clamp(0.0, 1.0);
+    let purple_range = 30.0 + (defr.purple_hue_range / 100.0).clamp(0.0, 1.0) * 30.0;
+    let green_range = 30.0 + (defr.green_hue_range / 100.0).clamp(0.0, 1.0) * 30.0;
+    buf.par_iter_mut().for_each(|p| {
+        let [h, s, l] = rgb_to_hsl(p);
+        if s < 0.15 {
+            return;
+        }
+        let purple_dist = hue_distance(h, 280.0);
+        if purple_amount > 0.0 && purple_dist < purple_range {
+            let weight = (1.0 - purple_dist / purple_range).max(0.0);
+            let factor = purple_amount * weight;
+            let new_s = (s * (1.0 - factor)).clamp(0.0, 1.0);
+            *p = hsl_to_rgb(h, new_s, l);
+            return;
+        }
+        let green_dist = hue_distance(h, 130.0);
+        if green_amount > 0.0 && green_dist < green_range {
+            let weight = (1.0 - green_dist / green_range).max(0.0);
+            let factor = green_amount * weight;
+            let new_s = (s * (1.0 - factor)).clamp(0.0, 1.0);
+            *p = hsl_to_rgb(h, new_s, l);
+        }
+    });
+}
+
+// ── Sharpening ────────────────────────────────────────────────────────────────
+
+fn apply_sharpening(img: &RgbImage, sh: &super::ops::Sharpening) -> RgbImage {
+    let amount = (sh.amount / 100.0).max(0.0);
+    if amount <= 0.0 {
+        return img.clone();
+    }
+    let radius = sh.radius.clamp(0.5, 3.0);
+    let masking = (sh.masking / 100.0).clamp(0.0, 1.0);
+    let blurred = imageops::blur(img, radius);
+    let (w, h) = img.dimensions();
+    let mut out = img.clone();
+    let detail_scale = 0.5 + (sh.detail / 100.0).clamp(0.0, 1.0) * 1.0;
+    for y in 0..h {
+        for x in 0..w {
+            let orig = img.get_pixel(x, y).0;
+            let blur = blurred.get_pixel(x, y).0;
+            // Edge mask: high gradient = strong mask; low = weak.
+            // `masking` raises the threshold so smooth regions don't
+            // get sharpened.
+            let edge_strength = ((orig[0] as i32 - blur[0] as i32).abs()
+                + (orig[1] as i32 - blur[1] as i32).abs()
+                + (orig[2] as i32 - blur[2] as i32).abs()) as f32
+                / 765.0;
+            let mask_factor = if masking < 1e-3 {
+                1.0
+            } else {
+                ((edge_strength - masking) / (1.0 - masking).max(1e-3)).clamp(0.0, 1.0)
+            };
+            let factor = amount * detail_scale * mask_factor;
+            let mut sharp = [0u8; 3];
+            for c in 0..3 {
+                let v = orig[c] as f32 + factor * (orig[c] as f32 - blur[c] as f32);
+                sharp[c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+            out.put_pixel(x, y, image::Rgb(sharp));
+        }
+    }
+    out
+}
+
+// ── Grain ─────────────────────────────────────────────────────────────────────
+
+fn apply_grain(img: &RgbImage, grain: &super::ops::Grain) -> RgbImage {
+    let amount = (grain.amount / 100.0).clamp(0.0, 1.0);
+    if amount <= 0.0 {
+        return img.clone();
+    }
+    // Deterministic noise so re-renders during slider drags don't show
+    // a different noise pattern each frame.
+    let size = (grain.size / 100.0).clamp(0.0, 1.0);
+    let roughness = 0.3 + (grain.roughness / 100.0).clamp(0.0, 1.0) * 0.7;
+    let stride = (1.0 + size * 3.0) as u32;
+    let (w, h) = img.dimensions();
+    let mut out = img.clone();
+    let strength = amount * 36.0 * roughness;
+    for y in 0..h {
+        for x in 0..w {
+            let cx = x / stride;
+            let cy = y / stride;
+            // Fast hash → centered noise in [-0.5, 0.5]
+            let mut n = cx
+                .wrapping_mul(0x9E3779B1)
+                .wrapping_add(cy.wrapping_mul(0x85EBCA6B));
+            n ^= n >> 13;
+            n = n.wrapping_mul(0xC2B2AE35);
+            n ^= n >> 16;
+            let noise = ((n & 0xFFFF) as f32 / 65535.0) - 0.5;
+            let delta = noise * strength;
+            let p = img.get_pixel(x, y).0;
+            let r = (p[0] as f32 + delta).round().clamp(0.0, 255.0) as u8;
+            let g = (p[1] as f32 + delta).round().clamp(0.0, 255.0) as u8;
+            let b = (p[2] as f32 + delta).round().clamp(0.0, 255.0) as u8;
+            out.put_pixel(x, y, image::Rgb([r, g, b]));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +1201,158 @@ mod tests {
             (v - 128.5 / 255.0).abs() < 1e-3,
             "expected linear interp, got {v}"
         );
+    }
+
+    #[test]
+    fn cardinal_rotation_swaps_dimensions() {
+        let img = RgbImage::from_pixel(20, 12, image::Rgb([100, 100, 100]));
+        let mut ops = Operations::identity();
+        ops.rotation = 90.0;
+        let out = apply(&img, &ops);
+        assert_eq!(out.dimensions(), (12, 20));
+    }
+
+    #[test]
+    fn straighten_inscribed_crop_shrinks_dimensions() {
+        let img = RgbImage::from_pixel(120, 80, image::Rgb([200, 200, 200]));
+        let mut ops = Operations::identity();
+        ops.straighten = 5.0;
+        let out = apply(&img, &ops);
+        let (w, h) = out.dimensions();
+        // Inscribed crop must be strictly inside the original — no
+        // black corners, but smaller than the source.
+        assert!(w < 120 && h < 80, "got {}x{}", w, h);
+        assert!(
+            w > 100 && h > 60,
+            "expected near-full coverage, got {}x{}",
+            w,
+            h
+        );
+        // The cropped region is solid grey: every output pixel should
+        // sample only the constant source colour.
+        for px in out.pixels().take(64) {
+            assert_eq!(px.0, [200, 200, 200]);
+        }
+    }
+
+    #[test]
+    fn rotation_plus_straighten_compose() {
+        let img = RgbImage::from_pixel(40, 30, image::Rgb([180, 90, 30]));
+        let mut ops = Operations::identity();
+        ops.rotation = 90.0;
+        ops.straighten = 2.0;
+        let out = apply(&img, &ops);
+        let (w, h) = out.dimensions();
+        // Cardinal swap + small inscribed-crop residual.
+        assert!(w <= 30 && h <= 40, "got {}x{}", w, h);
+        for px in out.pixels().take(32) {
+            assert_eq!(px.0, [180, 90, 30]);
+        }
+    }
+
+    #[test]
+    fn neutral_color_mixer_is_no_op() {
+        let img = solid(150);
+        let ops = Operations {
+            color_mixer: super::super::ops::ColorMixer::default(),
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        assert_eq!(img.as_raw(), out.as_raw());
+    }
+
+    #[test]
+    fn color_mixer_red_band_shifts_red_pixels() {
+        // Pure red pixel; bumping the red band's saturation downward
+        // must reduce its saturation toward grey.
+        let img = RgbImage::from_pixel(4, 4, image::Rgb([240, 30, 30]));
+        let mixer = super::super::ops::ColorMixer {
+            red: super::super::ops::HslAdjust {
+                hue: 0.0,
+                saturation: -100.0,
+                luminance: 0.0,
+            },
+            ..super::super::ops::ColorMixer::default()
+        };
+        let ops = Operations {
+            color_mixer: mixer,
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        let p = out.get_pixel(0, 0).0;
+        let max = p[0].max(p[1]).max(p[2]) as i32;
+        let min = p[0].min(p[1]).min(p[2]) as i32;
+        assert!(
+            max - min < 50,
+            "expected near-grey after red desaturation, got {p:?}"
+        );
+    }
+
+    #[test]
+    fn color_grading_default_blending_is_no_op() {
+        let img = solid(150);
+        let ops = Operations::identity();
+        let out = apply(&img, &ops);
+        assert_eq!(img.as_raw(), out.as_raw());
+    }
+
+    #[test]
+    fn defringe_purple_desaturates_purple_pixels() {
+        // Purple pixel (~280° hue, high saturation).
+        let img = RgbImage::from_pixel(4, 4, image::Rgb([180, 60, 230]));
+        let defr = super::super::ops::Defringe {
+            purple_amount: 20.0,
+            purple_hue_range: 100.0,
+            green_amount: 0.0,
+            green_hue_range: 0.0,
+        };
+        let ops = Operations {
+            defringe: defr,
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        let p = out.get_pixel(0, 0).0;
+        let max = p[0].max(p[1]).max(p[2]) as i32;
+        let min = p[0].min(p[1]).min(p[2]) as i32;
+        let orig_max = 230i32;
+        let orig_min = 60i32;
+        assert!(
+            (max - min) < (orig_max - orig_min),
+            "expected purple desaturation, got {p:?}"
+        );
+    }
+
+    #[test]
+    fn sharpening_zero_amount_is_no_op() {
+        let img = solid(150);
+        let ops = Operations::identity();
+        let out = apply(&img, &ops);
+        assert_eq!(img.as_raw(), out.as_raw());
+    }
+
+    #[test]
+    fn grain_zero_amount_is_no_op() {
+        let img = solid(150);
+        let ops = Operations::identity();
+        let out = apply(&img, &ops);
+        assert_eq!(img.as_raw(), out.as_raw());
+    }
+
+    #[test]
+    fn grain_with_amount_perturbs_pixels() {
+        let img = solid(150);
+        let grain = super::super::ops::Grain {
+            amount: 100.0,
+            size: 0.0,
+            roughness: 100.0,
+        };
+        let ops = Operations {
+            grain,
+            ..Operations::identity()
+        };
+        let out = apply(&img, &ops);
+        // At least one pixel should differ from the constant input.
+        let any_diff = out.pixels().zip(img.pixels()).any(|(a, b)| a.0 != b.0);
+        assert!(any_diff, "grain should perturb constant input");
     }
 }

@@ -309,6 +309,9 @@ fn main() {
             app.manage(AppState {
                 pool,
                 sidecar_proc: chronimage::prompt::supervisor::Supervisor::new(),
+                develop_decode_cache: std::sync::Arc::new(
+                    chronimage::develop::DevelopDecodeCache::new(),
+                ),
             });
 
             // Memoise the SCRFD + ArcFace `FacesSession` for pipeline stage-5

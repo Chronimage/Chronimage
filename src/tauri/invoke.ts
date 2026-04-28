@@ -1111,6 +1111,115 @@ export function identityCurves(): DevelopCurves {
   };
 }
 
+export interface HslAdjust {
+  hue: number;
+  saturation: number;
+  luminance: number;
+}
+
+export interface ColorMixer {
+  red: HslAdjust;
+  orange: HslAdjust;
+  yellow: HslAdjust;
+  green: HslAdjust;
+  aqua: HslAdjust;
+  blue: HslAdjust;
+  purple: HslAdjust;
+  magenta: HslAdjust;
+}
+
+export interface HslWheel {
+  hue: number;
+  saturation: number;
+  luminance: number;
+}
+
+export interface ColorGrading {
+  shadows: HslWheel;
+  midtones: HslWheel;
+  highlights: HslWheel;
+  global: HslWheel;
+  blending: number;
+  balance: number;
+}
+
+export interface Sharpening {
+  amount: number;
+  radius: number;
+  detail: number;
+  masking: number;
+}
+
+export interface Grain {
+  amount: number;
+  size: number;
+  roughness: number;
+}
+
+export interface Defringe {
+  purple_amount: number;
+  purple_hue_range: number;
+  green_amount: number;
+  green_hue_range: number;
+}
+
+export const COLOR_MIXER_BANDS = [
+  'red',
+  'orange',
+  'yellow',
+  'green',
+  'aqua',
+  'blue',
+  'purple',
+  'magenta',
+] as const;
+
+export type ColorMixerBand = (typeof COLOR_MIXER_BANDS)[number];
+
+export function identityHslAdjust(): HslAdjust {
+  return { hue: 0, saturation: 0, luminance: 0 };
+}
+
+export function identityHslWheel(): HslWheel {
+  return { hue: 0, saturation: 0, luminance: 0 };
+}
+
+export function identityColorMixer(): ColorMixer {
+  return {
+    red: identityHslAdjust(),
+    orange: identityHslAdjust(),
+    yellow: identityHslAdjust(),
+    green: identityHslAdjust(),
+    aqua: identityHslAdjust(),
+    blue: identityHslAdjust(),
+    purple: identityHslAdjust(),
+    magenta: identityHslAdjust(),
+  };
+}
+
+export function identityColorGrading(): ColorGrading {
+  return {
+    shadows: identityHslWheel(),
+    midtones: identityHslWheel(),
+    highlights: identityHslWheel(),
+    global: identityHslWheel(),
+    blending: 50,
+    balance: 0,
+  };
+}
+
+export function identitySharpening(): Sharpening {
+  return { amount: 0, radius: 1, detail: 25, masking: 0 };
+}
+
+export function identityGrain(): Grain {
+  return { amount: 0, size: 25, roughness: 50 };
+}
+
+export function identityDefringe(): Defringe {
+  return { purple_amount: 0, purple_hue_range: 0, green_amount: 0, green_hue_range: 0 };
+}
+
 export interface DevelopOperations {
   exposure: number;
   contrast: number;
@@ -1141,6 +1250,12 @@ export interface DevelopOperations {
   lens_blur_focus_far?: number;
   lens_blur_bokeh_boost?: number;
   lens_blur_cat_eye?: number;
+  texture?: number;
+  sharpening?: Sharpening;
+  grain?: Grain;
+  color_mixer?: ColorMixer;
+  color_grading?: ColorGrading;
+  defringe?: Defringe;
   curves: DevelopCurves;
 }
 
@@ -1175,6 +1290,12 @@ export function identityOperations(): DevelopOperations {
     lens_blur_focus_far: 1,
     lens_blur_bokeh_boost: 0,
     lens_blur_cat_eye: 0,
+    texture: 0,
+    sharpening: identitySharpening(),
+    grain: identityGrain(),
+    color_mixer: identityColorMixer(),
+    color_grading: identityColorGrading(),
+    defringe: identityDefringe(),
     curves: identityCurves(),
   };
 }
