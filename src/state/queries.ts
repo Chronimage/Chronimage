@@ -16,8 +16,6 @@ import {
   detectIcloudPath,
   downloadModels,
   faceAssignCluster,
-  faceClusterMerge,
-  faceClusterName,
   faceClustersList,
   faceCreatePersonFromFace,
   faceUnassign,
@@ -40,7 +38,6 @@ import {
   listImports,
   listIphoneDevices,
   listPhotos,
-  listPhotosForCluster,
   listSources,
   listTags,
   type ModelStatus,
@@ -50,14 +47,11 @@ import {
   photoLocation,
   photoQuality,
   REBUILD_PROGRESS_EVENT,
-  RECLUSTER_PROGRESS_EVENT,
   type RebuildReceipt,
-  type ReclusterReceipt,
   type RecycleReceipt,
   type RemovePreview,
   type RemoveReceipt,
   rebuildThumbnails,
-  reclusterFaces,
   recordPhotoView,
   recycleSourceCopies,
   refreshSmartAlbums,
@@ -93,7 +87,6 @@ export type {
   PhotoQuality,
   PhotoRow,
   RebuildReceipt,
-  ReclusterReceipt,
   RecycleReceipt,
   RemovePreview,
   RemoveReceipt,
@@ -104,7 +97,7 @@ export type {
   TagRow,
   UsbDevice,
 } from '../tauri/invoke';
-export { IMPORT_PROGRESS_EVENT, REBUILD_PROGRESS_EVENT, RECLUSTER_PROGRESS_EVENT };
+export { IMPORT_PROGRESS_EVENT, REBUILD_PROGRESS_EVENT };
 
 const PHOTOS_PAGE_SIZE = 100;
 const PHOTOS_MAX_PAGES = 20;
@@ -494,17 +487,6 @@ export function useLiftShiftExecute() {
 
 // ── Face clusters ─────────────────────────────────────────────────────────────
 
-/** Photos in which at least one face belongs to the given cluster. */
-export function usePhotosForCluster(clusterId: number | null, limit = 200) {
-  return useQuery<PhotoRow[], Error>({
-    queryKey: ['photos_for_cluster', clusterId, limit],
-    enabled: typeof clusterId === 'number',
-    queryFn: () =>
-      typeof clusterId === 'number' ? listPhotosForCluster(clusterId, limit) : Promise.resolve([]),
-    staleTime: 60_000,
-  });
-}
-
 export function useFaceClusters(limit = 60) {
   return useQuery<ClusterRow[], Error>({
     queryKey: ['face-clusters', limit],
@@ -521,33 +503,12 @@ export function useFacesForPhoto(photoId: number | null | undefined) {
   });
 }
 
-export function useFaceClusterName() {
-  const qc = useQueryClient();
-  return useMutation<void, Error, { clusterId: number; name: string }>({
-    mutationFn: ({ clusterId, name }) => faceClusterName(clusterId, name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['face-clusters'] });
-    },
-  });
-}
-
-export function useFaceClusterMerge() {
-  const qc = useQueryClient();
-  return useMutation<number, Error, { a: number; b: number }>({
-    mutationFn: ({ a, b }) => faceClusterMerge(a, b),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['face-clusters'] });
-    },
-  });
-}
-
 export function useFaceAssignCluster() {
   const qc = useQueryClient();
   return useMutation<void, Error, { faceId: number; clusterId: number; photoId?: number }>({
     mutationFn: ({ faceId, clusterId }) => faceAssignCluster(faceId, clusterId),
     onSuccess: (_result, { photoId }) => {
       qc.invalidateQueries({ queryKey: ['face-clusters'] });
-      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
       if (typeof photoId === 'number') qc.invalidateQueries({ queryKey: ['photo_faces', photoId] });
     },
   });
@@ -559,7 +520,6 @@ export function useFaceCreatePersonFromFace() {
     mutationFn: ({ faceId, name }) => faceCreatePersonFromFace(faceId, name),
     onSuccess: (_clusterId, { photoId }) => {
       qc.invalidateQueries({ queryKey: ['face-clusters'] });
-      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
       if (typeof photoId === 'number') qc.invalidateQueries({ queryKey: ['photo_faces', photoId] });
     },
   });
@@ -571,7 +531,6 @@ export function useFaceUnassign() {
     mutationFn: ({ faceId }) => faceUnassign(faceId),
     onSuccess: (_result, { photoId }) => {
       qc.invalidateQueries({ queryKey: ['face-clusters'] });
-      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
       if (typeof photoId === 'number') qc.invalidateQueries({ queryKey: ['photo_faces', photoId] });
     },
   });
@@ -619,24 +578,7 @@ export function useDiskInfo(path: string | undefined) {
   });
 }
 
-// ── Face clustering + thumbnail rebuild ─────────────────────────────────────
-
-/**
- * Fire the backend HDBSCAN pass over every face embedding + rewrite
- * `faces.cluster_id`. Invalidates `['face-clusters']` on success so the
- * People screen re-fetches.
- */
-export function useReclusterFaces() {
-  const qc = useQueryClient();
-  return useMutation<ReclusterReceipt, Error, void>({
-    mutationFn: () => reclusterFaces(),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['face-clusters'] });
-      qc.invalidateQueries({ queryKey: ['photos_for_cluster'] });
-      qc.invalidateQueries({ queryKey: ['search_suggestions'] });
-    },
-  });
-}
+// ── Thumbnail rebuild ───────────────────────────────────────────────────────
 
 /**
  * Trigger a full rebuild of the 320 px thumbnail cache — used to repair
@@ -912,8 +854,13 @@ export function useDevelopOpen(photoId: number | null) {
 }
 
 export function useDevelopApply() {
-  return useMutation<RenderReceipt, Error, { photoId: number; operations: DevelopOperations }>({
-    mutationFn: ({ photoId, operations }) => developApply(photoId, operations),
+  return useMutation<
+    RenderReceipt,
+    Error,
+    { photoId: number; operations: DevelopOperations; previewLongEdge?: number }
+  >({
+    mutationFn: ({ photoId, operations, previewLongEdge }) =>
+      developApply(photoId, operations, previewLongEdge),
   });
 }
 

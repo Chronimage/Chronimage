@@ -14,7 +14,6 @@ interface RailItem {
 
 const ITEMS: RailItem[] = [
   { id: 'catalog', icon: 'grid', label: 'Catalog' },
-  { id: 'people', icon: 'faces', label: 'People' },
   { id: 'cull', icon: 'cull', label: 'Cull' },
   { id: 'develop', icon: 'brush', label: 'Develop' },
 ];

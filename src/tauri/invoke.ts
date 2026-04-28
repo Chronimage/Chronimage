@@ -461,14 +461,6 @@ export async function photoLocation(photoId: number): Promise<PhotoLocation> {
   return tauriInvoke<PhotoLocation>('photo_location', { photoId });
 }
 
-/** Photos in which at least one face belongs to the given cluster — ordered by face quality. */
-export async function listPhotosForCluster(clusterId: number, limit?: number): Promise<PhotoRow[]> {
-  return tauriInvoke<PhotoRow[]>('list_photos_for_cluster', {
-    clusterId,
-    limit: limit ?? null,
-  });
-}
-
 /**
  * JPEG-encoded thumbnail bytes for a photo, resized to `sizePx` longest edge.
  *
@@ -557,14 +549,6 @@ export interface PhotoFaceRow {
 
 export async function faceClustersList(limit = 60): Promise<ClusterRow[]> {
   return tauriInvoke<ClusterRow[]>('face_clusters_list', { limit });
-}
-
-export async function faceClusterName(clusterId: number, name: string): Promise<void> {
-  return tauriInvoke<void>('face_cluster_name', { clusterId, name });
-}
-
-export async function faceClusterMerge(a: number, b: number): Promise<number> {
-  return tauriInvoke<number>('face_cluster_merge', { a, b });
 }
 
 export async function listFacesForPhoto(photoId: number): Promise<PhotoFaceRow[]> {
@@ -793,31 +777,6 @@ export async function getDefaultCatalogPath(): Promise<string> {
 
 export async function getDiskInfo(path: string): Promise<DiskInfo> {
   return tauriInvoke<DiskInfo>('get_disk_info', { path });
-}
-
-// ── Face-cluster rebuild ────────────────────────────────────────────────────
-
-export const RECLUSTER_PROGRESS_EVENT = 'chronimage://recluster-progress';
-
-export interface ReclusterProgress {
-  phase: 'start' | 'done';
-  total_faces: number;
-  clustered_faces: number;
-  cluster_count: number;
-}
-
-export interface ReclusterReceipt {
-  total_faces: number;
-  clustered_faces: number;
-  cluster_count: number;
-  named_preserved: number;
-  new_clusters: number;
-  pruned_empty: number;
-  elapsed_ms: number;
-}
-
-export async function reclusterFaces(): Promise<ReclusterReceipt> {
-  return tauriInvoke<ReclusterReceipt>('recluster_faces');
 }
 
 // ── Thumbnail cache rebuild ─────────────────────────────────────────────────
@@ -1303,6 +1262,8 @@ export function identityOperations(): DevelopOperations {
 export interface RenderReceipt {
   photo_id: number;
   preview_data_url: string;
+  preview_width?: number;
+  preview_height?: number;
   elapsed_ms: number;
 }
 
@@ -1310,6 +1271,8 @@ export interface DevelopOpenResponse {
   photo_id: number;
   operations: DevelopOperations;
   preview_data_url: string;
+  preview_width?: number;
+  preview_height?: number;
 }
 
 export interface PastedReceipt {
@@ -1386,6 +1349,8 @@ export interface DevelopMaskGenerateRequest {
 export interface DevelopMaskGenerateReceipt {
   mask: DevelopMask;
   preview_data_url: string;
+  preview_width?: number;
+  preview_height?: number;
   elapsed_ms: number;
 }
 
@@ -1428,8 +1393,17 @@ export async function developOpen(photoId: number): Promise<DevelopOpenResponse>
   return tauriInvoke<DevelopOpenResponse>('develop_open', { photoId });
 }
 
-export async function developApply(photoId: number, operations: DevelopOperations): Promise<RenderReceipt> {
-  return tauriInvoke<RenderReceipt>('develop_apply', { photoId, operations });
+export async function developApply(
+  photoId: number,
+  operations: DevelopOperations,
+  previewLongEdge?: number,
+): Promise<RenderReceipt> {
+  const args: { photoId: number; operations: DevelopOperations; previewLongEdge?: number } = {
+    photoId,
+    operations,
+  };
+  if (previewLongEdge !== undefined) args.previewLongEdge = previewLongEdge;
+  return tauriInvoke<RenderReceipt>('develop_apply', args);
 }
 
 export async function developSave(

@@ -384,33 +384,8 @@ select {
   padding: 4px var(--sidepanel-pad);
 }
 
-/* People grid + sources empty state + inline add-panel: sit flush with
-   the section-label's x-guide. */
-.sidepanel .people-grid {
-  padding: 0 var(--sidepanel-pad) 8px;
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 4px;
-}
-.sidepanel .people-grid .person {
-  text-align: center;
-}
-.sidepanel .people-grid .avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 1px solid var(--stroke);
-  margin: 0 auto;
-}
-.sidepanel .people-grid .name {
-  font-size: var(--text-2xs);
-  color: var(--fg-mute);
-  margin-top: 2px;
-  font-family: var(--mono-font);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* Sources empty state + inline add-panel: sit flush with the
+   section-label's x-guide. */
 .sidepanel .side-empty {
   font-size: 11px;
   color: var(--fg-mute);
@@ -890,13 +865,6 @@ select {
   height: 100%;
   border-radius: 3px;
   overflow: hidden;
-}
-
-/* People screen cluster cover: ph fills the square button */
-.person-card .faces > .ph {
-  width: 100%;
-  height: 100%;
-  border-radius: 0;
 }
 
 /* Library grid */
@@ -1638,46 +1606,6 @@ select {
   color: var(--fg-mute);
 }
 
-/* Person grid (used in Step 5 — face naming) */
-.person-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
-}
-.person-card {
-  border: 1px solid var(--stroke);
-  border-radius: 12px;
-  background: var(--bg-elev);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-}
-.person-card .faces {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 3px;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.person-card .face {
-  aspect-ratio: 1;
-  border-radius: 4px;
-}
-.person-card .meta input {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--stroke);
-  border-radius: 6px;
-  padding: 6px 8px;
-  font-size: 12px;
-  color: var(--fg);
-  outline: none;
-}
-.person-card .meta input:focus {
-  border-color: var(--accent);
-}
 .source-row {
   display: flex;
   align-items: center;
@@ -1856,7 +1784,7 @@ select {
   color: var(--accent);
 }
 
-/* ── Page-title — unified across Catalog, People, Settings, placeholders.
+/* ── Page-title — unified across Catalog, Settings, placeholders.
    Display-font + italic accent period. Size scales from 32 px at narrow
    window widths up to 56 px on wide. */
 .page-title {
