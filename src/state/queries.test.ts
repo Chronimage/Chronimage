@@ -21,7 +21,6 @@ import {
   usePhotoLocation,
   usePhotoQuality,
   usePhotos,
-  usePhotosForCluster,
   useRefreshSmartAlbums,
   useSearchSuggestions,
   useSources,
@@ -172,17 +171,6 @@ describe('catalog query hooks', () => {
     const { result } = renderHook(() => usePhotoLocation(1), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual({ lat: null, lng: null });
-  });
-
-  it('usePhotosForCluster returns empty array from mock', async () => {
-    const { result } = renderHook(() => usePhotosForCluster(7), { wrapper });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toEqual([]);
-  });
-
-  it('usePhotosForCluster is disabled when clusterId is null', () => {
-    const { result } = renderHook(() => usePhotosForCluster(null), { wrapper });
-    expect(result.current.fetchStatus).toBe('idle');
   });
 
   it('useFirstTimeOnNewCamera returns empty array from mock', async () => {

@@ -1,6 +1,5 @@
 import { Icon } from '../../primitives/Icon';
-import { useAlbums, useFaceClusters, useSources } from '../../state/queries';
-import { useUi } from '../../state/ui';
+import { useAlbums, useSources } from '../../state/queries';
 import { ImportProgressCard } from './ImportProgressCard';
 import { SourceDeleteProgressCard } from './SourceDeleteProgressCard';
 import { SourcesPanel } from './SourcesPanel';
@@ -13,18 +12,9 @@ export interface CatalogSidePanelProps {
 export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelProps) {
   const { data: albums = [] } = useAlbums();
   const { data: sources = [] } = useSources();
-  const { data: clusters = [] } = useFaceClusters(60);
-  const setScreen = useUi((s) => s.setScreen);
 
   const totalPhotos = sources.reduce((sum, s) => sum + s.photo_count, 0);
   const nonCullAlbums = albums.filter((a) => a.tag !== 'cull').slice(0, 9);
-  // Show up to 6 people in the sidebar, preferring named clusters, then largest.
-  const sidebarClusters = [...clusters]
-    .sort((a, b) => {
-      if (a.isNamed !== b.isNamed) return a.isNamed ? -1 : 1;
-      return b.faceCount - a.faceCount;
-    })
-    .slice(0, 6);
 
   return (
     <div className="sidepanel">
@@ -74,34 +64,6 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
             </button>
           ))}
         </div>
-
-        <div className="section-label">
-          <span>People</span>
-          <span className="ai-badge on">{clusters.length}</span>
-        </div>
-        {sidebarClusters.length === 0 ? (
-          <div className="side-empty">No face clusters yet. Import photos to populate.</div>
-        ) : (
-          <div className="people-grid">
-            {sidebarClusters.map((c) => {
-              const hue = (c.id * 47) % 360;
-              const label = c.name?.trim() || `#${c.id}`;
-              return (
-                <button
-                  key={c.id}
-                  type="button"
-                  className="person"
-                  title={`${label} · ${c.faceCount} faces`}
-                  onClick={() => setScreen('people')}
-                  style={{ border: 'none', cursor: 'pointer' }}
-                >
-                  <div className="avatar" style={{ background: `oklch(0.5 0.15 ${hue})` }} />
-                  <div className="name">{label}</div>
-                </button>
-              );
-            })}
-          </div>
-        )}
 
         <SourcesPanel />
       </div>

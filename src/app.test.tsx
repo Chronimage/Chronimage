@@ -25,8 +25,8 @@ describe('App shell', () => {
   it('renders the rail with the primary screen buttons plus Settings', () => {
     const { container } = renderApp();
     const buttons = container.querySelectorAll('.rail button');
-    // Catalog, People, Cull, Develop + Settings
-    expect(buttons.length).toBe(5);
+    // Catalog, Cull, Develop + Settings
+    expect(buttons.length).toBe(4);
   });
 
   it('renders the status bar', () => {

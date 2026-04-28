@@ -776,6 +776,47 @@ function DevelopStageSplit({
     start: Pick<DevelopValues, 'cropX' | 'cropY' | 'cropW' | 'cropH'>;
   } | null>(null);
 
+  // Photo-aspect rectangle that fits inside the frame at zoom=100 (the
+  // "Fit" size, in CSS px). Re-measured via ResizeObserver so the canvas
+  // stays correct across window resizes and crop-driven aspect changes.
+  // We size the zoom wrapper directly via `width`/`height` from
+  // `zoomedBox` instead of CSS `transform: scale()` — scale() rasterises
+  // at the original DPI then resamples, which softens detail at high
+  // zoom; explicit width/height keeps the browser's native bilinear path
+  // crisp end-to-end.
+  const [fittedBox, setFittedBox] = useState<{ width: number; height: number } | null>(null);
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const compute = () => {
+      const rect = frame.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        setFittedBox(null);
+        return;
+      }
+      const parts = stageAspect.split('/').map((s) => Number.parseFloat(s.trim()));
+      const aspect =
+        parts.length === 2 && parts[0] && parts[1] && parts[0] > 0 && parts[1] > 0 ? parts[0] / parts[1] : 1;
+      const frameAspect = rect.width / rect.height;
+      const fitted =
+        aspect >= frameAspect
+          ? { width: rect.width, height: rect.width / aspect }
+          : { width: rect.height * aspect, height: rect.height };
+      setFittedBox(fitted);
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(frame);
+    return () => ro.disconnect();
+  }, [stageAspect]);
+
+  const zoomedBox = fittedBox
+    ? {
+        width: fittedBox.width * (zoom / 100),
+        height: fittedBox.height * (zoom / 100),
+      }
+    : null;
+
   // Multiplicative zoom step matches Lightroom's "wheel notch" feel — at
   // 1.15 each notch zooms in by ~15%, four notches roughly doubles.
   const ZOOM_STEP = 1.15;
@@ -1071,27 +1112,26 @@ function DevelopStageSplit({
               cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'zoom-in',
             }}
           >
-            {/* The zoom wrapper sizes to the photo's aspect inside the
-                full-bleed frame so the crop overlay's percentage coords
-                stay aligned with the actual image. `width/height: auto`
-                + `max-width/height: 100%` resolves to the largest
-                photo-aspect rectangle that fits, centered via auto
-                margins (Lightroom's Fit semantics). */}
+            {/* The zoom wrapper is sized in CSS px from `zoomedBox`
+                (= fittedBox × zoom). Pan applies via `left`/`top` offsets
+                from the centre anchor; `translate(-50%, -50%)` keeps the
+                box centred on that anchor at any zoom. We avoid CSS
+                `transform: scale()` deliberately — scale() rasterises at
+                the original size then resamples, softening detail; an
+                explicit width/height resize keeps the browser's native
+                bilinear pipeline crisp through every zoom level. */}
             <div
               ref={zoomWrapperRef}
               className="develop-canvas-zoom"
               style={{
                 position: 'absolute',
-                inset: 0,
-                margin: 'auto',
-                aspectRatio: stageAspect,
-                width: 'auto',
-                height: 'auto',
-                maxWidth: '100%',
-                maxHeight: '100%',
+                left: `calc(50% + ${panX}px)`,
+                top: `calc(50% + ${panY}px)`,
+                width: zoomedBox ? `${zoomedBox.width}px` : '100%',
+                height: zoomedBox ? `${zoomedBox.height}px` : '100%',
                 transformOrigin: 'center center',
-                transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})`,
-                willChange: 'transform',
+                transform: 'translate(-50%, -50%)',
+                willChange: 'width, height, left, top',
               }}
             >
               {preview ? (

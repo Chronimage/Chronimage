@@ -7,7 +7,6 @@ import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
 import { CullScreen, CullSidePanel } from './screens/cull';
 import { DevelopScreen, DevelopSidePanel } from './screens/develop';
 import { MapScreen } from './screens/map/MapScreen';
-import { PeopleScreen } from './screens/PeopleScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { useImportProgressListener } from './state/import';
 import { useSourceDeleteProgressListener } from './state/sourceDelete';
@@ -80,9 +79,6 @@ export function App() {
     case 'map':
       mainPanel = <MapScreen />;
       break;
-    case 'people':
-      mainPanel = <PeopleScreen />;
-      break;
     case 'settings':
       mainPanel = <SettingsScreen />;
       break;
@@ -105,8 +101,8 @@ export function App() {
           <Rail screen={screen} onScreenChange={setScreen} />
           {/* Always render a grid slot for the side panel so the main panel
               lands in the `1fr` column; otherwise screens without a side
-              panel (Settings, People) sit in the `auto` column and get
-              sized to their content instead of filling the canvas. */}
+              panel (Settings, Map) sit in the `auto` column and get sized
+              to their content instead of filling the canvas. */}
           {sidePanel ?? <div />}
           {mainPanel}
         </div>
