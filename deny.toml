@@ -46,6 +46,11 @@ allow = [
   # rawler as a dynamic library. Tracked as a Phase 5 release-prep task
   # in docs/manual-setup.md §6 (code-signing / distribution).
   "LGPL-2.1",
+  # libbz2-rs-sys (transitive via zip 4 → bzip2 support). The
+  # `bzip2-1.0.6` license is the original Burrows–Wheeler library
+  # license — permissive, MIT-spirit ("you can do anything you want"
+  # with attribution + no warranty). Approved for redistribution.
+  "bzip2-1.0.6",
 ]
 # Ignore license checks for private (non-published) workspace crates.
 [licenses.private]

@@ -90,7 +90,7 @@ image_hasher = "3"
 kamadak-exif = "0.6"
 
 # Paths + misc
-dirs = "5"
+dirs = "6"
 once_cell = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -112,7 +112,7 @@ ed25519-dalek = { version = "2", features = ["pkcs8"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
 # Zip extraction for InsightFace buffalo_l.zip bundle (MIT licence)
-zip = "2"
+zip = "4"
 
 # AI / inference
 # ort is the ONNX Runtime Rust binding.
@@ -129,7 +129,7 @@ num_cpus = "1"
 # HDBSCAN face clustering — MIT OR Apache-2.0
 hdbscan = "0.12.0"
 # SigLIP-2 tokenizer — HuggingFace tokenizer.json format (MIT OR Apache-2.0)
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -141,7 +141,7 @@ trash = "5.2.5"
 
 # Phase 4 §7 — XMP sidecar parse (rating + subject tags). quick-xml is a
 # zero-copy pull parser, MIT-licensed, no system deps.
-quick-xml = "0.36"
+quick-xml = "0.38"
 
 # Phase 4 §8 — .chronimage-ignore support. MIT OR Unlicense, pure rust.
 ignore = "0.4"
@@ -173,7 +173,7 @@ mozjpeg = { version = "0.10", optional = true }
 tracing-appender = "0.2.5"
 
 [target.'cfg(windows)'.dependencies]
-window-vibrancy = "0.6"
+window-vibrancy = "0.7"
 windows = { version = "0.62", features = [
   "Win32_Devices_PortableDevices",
   "Win32_Foundation",

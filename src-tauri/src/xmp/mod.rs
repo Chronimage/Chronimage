@@ -145,8 +145,14 @@ pub fn sidecar_for(photo_path: &Path) -> Option<std::path::PathBuf> {
 /// Core parser — stream the XML, pluck the attributes / child text we
 /// care about. Robust to whitespace, comments, and attribute ordering.
 pub fn parse_str(xml: &str) -> XmpData {
+    // Don't enable `trim_text(true)` — quick-xml 0.38 splits entity refs
+    // (`&amp;`, `&#x27;`, etc.) into their own `Event::GeneralRef`, so a
+    // string like "night &amp; day" arrives as
+    //   Text("night ") · GeneralRef("amp") · Text(" day")
+    // and per-event trimming would strip the spaces flanking the entity.
+    // The Rating / Label / subject-li handlers below trim the assembled
+    // value themselves.
     let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(true);
 
     let mut data = XmpData::default();
     let mut in_subject_bag = false;
@@ -175,7 +181,7 @@ pub fn parse_str(xml: &str) -> XmpData {
                 } else if local == "Rating" && data.rating.is_none() {
                     // Child-element form: <xmp:Rating>4</xmp:Rating>
                     if let Ok(Event::Text(t)) = reader.read_event_into(&mut buf) {
-                        if let Ok(v) = t.unescape().map(|s| s.trim().to_string()) {
+                        if let Ok(v) = t.xml_content().map(|s| s.trim().to_string()) {
                             if let Ok(n) = v.parse::<i64>() {
                                 data.rating = Some(n.clamp(0, 5));
                             }
@@ -183,7 +189,7 @@ pub fn parse_str(xml: &str) -> XmpData {
                     }
                 } else if local == "Label" && data.color_label.is_none() {
                     if let Ok(Event::Text(t)) = reader.read_event_into(&mut buf) {
-                        if let Ok(v) = t.unescape().map(|s| s.trim().to_string()) {
+                        if let Ok(v) = t.xml_content().map(|s| s.trim().to_string()) {
                             data.color_label = normalise_label(&v);
                         }
                     }
@@ -195,8 +201,32 @@ pub fn parse_str(xml: &str) -> XmpData {
                 }
             }
             Ok(Event::Text(t)) if in_subject_li => {
-                if let Ok(v) = t.unescape() {
+                if let Ok(v) = t.xml_content() {
                     current_li.push_str(v.as_ref());
+                }
+            }
+            Ok(Event::GeneralRef(r)) if in_subject_li => {
+                // quick-xml 0.38 splits entity references out of Text
+                // events into their own GeneralRef. Resolve the standard
+                // five XML entities + numeric refs so subject text like
+                // "night & day" round-trips through serialise → parse.
+                let name = std::str::from_utf8(r.as_ref()).unwrap_or("");
+                let resolved: Option<char> = match name {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    n if n.starts_with("#x") || n.starts_with("#X") => {
+                        u32::from_str_radix(&n[2..], 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                    }
+                    n if n.starts_with('#') => n[1..].parse::<u32>().ok().and_then(char::from_u32),
+                    _ => None,
+                };
+                if let Some(c) = resolved {
+                    current_li.push(c);
                 }
             }
             Ok(Event::End(e)) => {
