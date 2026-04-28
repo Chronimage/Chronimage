@@ -759,9 +759,17 @@ function DevelopStageSplit({
   const [panY, setPanY] = useState(0);
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const panDragRef = useRef<{ startX: number; startY: number; basePanX: number; basePanY: number } | null>(
-    null,
-  );
+  const panDragRef = useRef<{
+    startX: number;
+    startY: number;
+    basePanX: number;
+    basePanY: number;
+    moved: boolean;
+  } | null>(null);
+  // A pointerup that comes within this many pixels of the pointerdown is
+  // treated as a click (toggle zoom anchored at the click) rather than a
+  // pan-drag. Matches the threshold most desktop UIs use for click-vs-drag.
+  const CLICK_THRESHOLD_PX = 4;
   const cropDragRef = useRef<{
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se';
     startX: number;
@@ -922,32 +930,65 @@ function DevelopStageSplit({
 
   const startPanDrag = (event: PointerEvent<HTMLDivElement>) => {
     if (cropMode) return;
-    if (zoom <= 100) return;
     const target = event.target as HTMLElement;
     // Don't hijack drags that started on a crop handle — those are
     // captured separately and need their own pointer-capture path.
     if (target.closest('.crop-handle, .crop-box')) return;
-    event.preventDefault();
+    // Capture even when zoom is at fit so we can detect a click (no
+    // movement on pointer-up) and toggle zoom-to-1:1 anchored there.
     event.currentTarget.setPointerCapture?.(event.pointerId);
     panDragRef.current = {
       startX: event.clientX,
       startY: event.clientY,
       basePanX: panX,
       basePanY: panY,
+      moved: false,
     };
   };
 
   const movePanDrag = (event: PointerEvent<HTMLDivElement>) => {
     const drag = panDragRef.current;
     if (!drag) return;
-    setPanX(drag.basePanX + (event.clientX - drag.startX));
-    setPanY(drag.basePanY + (event.clientY - drag.startY));
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(dx, dy) > CLICK_THRESHOLD_PX) {
+      drag.moved = true;
+    }
+    // Pan only kicks in when the image is actually larger than the
+    // viewport — at fit-zoom there's nothing to pan to, but we still
+    // want to capture the pointer so we can detect a click on release.
+    if (zoom <= 100) return;
+    setPanX(drag.basePanX + dx);
+    setPanY(drag.basePanY + dy);
   };
 
   const stopPanDrag = (event: PointerEvent<HTMLDivElement>) => {
-    if (!panDragRef.current) return;
+    const drag = panDragRef.current;
+    if (!drag) return;
     panDragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (drag.moved) return;
+    // No drag → click. Toggle between fit-zoom and 1:1, anchored at the
+    // click position so the pixel under the cursor stays put. Matches
+    // Lightroom's space-bar / click-to-zoom behavior.
+    const frame = frameRef.current;
+    if (!frame) return;
+    const rect = frame.getBoundingClientRect();
+    const cx = event.clientX - rect.left - rect.width / 2;
+    const cy = event.clientY - rect.top - rect.height / 2;
+    const longEdge = Math.max(rect.width, rect.height);
+    const oneToOneZoom = longEdge > 0 ? clampNumber((2048 / longEdge) * 100, ZOOM_MIN, ZOOM_MAX) : 200;
+    const isAtFit = Math.abs(zoom - 100) < 3;
+    if (isAtFit) {
+      const ratio = oneToOneZoom / zoom;
+      setZoom(oneToOneZoom);
+      setPanX(cx - (cx - panX) * ratio);
+      setPanY(cy - (cy - panY) * ratio);
+    } else {
+      setZoom(100);
+      setPanX(0);
+      setPanY(0);
+    }
   };
 
   return (
@@ -1020,7 +1061,7 @@ function DevelopStageSplit({
               maxHeight: '100%',
               position: 'relative',
               overflow: 'hidden',
-              cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'default',
+              cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'zoom-in',
             }}
           >
             <div
