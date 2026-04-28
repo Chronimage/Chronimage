@@ -759,6 +759,11 @@ function DevelopStageSplit({
   const [panY, setPanY] = useState(0);
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const frameRef = useRef<HTMLDivElement | null>(null);
+  // The inner photo-aspect wrapper. Frame is full-bleed (fills the
+  // editor canvas, light-dark background); the wrapper inside it sizes
+  // to the photo's aspect ratio so the crop overlay's percentage coords
+  // stay aligned to the actual image bounds.
+  const zoomWrapperRef = useRef<HTMLDivElement | null>(null);
   const panDragRef = useRef<{
     startX: number;
     startY: number;
@@ -790,15 +795,17 @@ function DevelopStageSplit({
     setPanY(0);
   };
   // 1:1 means one preview-source pixel per screen pixel. The preview is
-  // delivered at 2048 px long-edge (DevelopDecodeCache::PREVIEW_LONG_EDGE),
-  // and at zoom=100 the image is displayed at the frame's long edge.
+  // delivered at 2048 px long-edge (DevelopDecodeCache::PREVIEW_LONG_EDGE).
+  // At zoom=100 the wrapper renders at its photo-aspect-fit size inside
+  // the frame, so we measure the wrapper's long edge — not the frame's —
+  // to compute the zoom factor that maps preview pixels 1:1 to screen px.
   const goOneToOne = () => {
-    const frame = frameRef.current;
-    if (!frame) {
+    const wrapper = zoomWrapperRef.current;
+    if (!wrapper) {
       setZoom(200);
       return;
     }
-    const rect = frame.getBoundingClientRect();
+    const rect = wrapper.getBoundingClientRect();
     const longEdge = Math.max(rect.width, rect.height);
     if (longEdge <= 0) {
       setZoom(200);
@@ -842,8 +849,13 @@ function DevelopStageSplit({
 
   const updateCropDrag = (event: PointerEvent<HTMLDivElement>) => {
     const activeDrag = cropDragRef.current;
-    if (!activeDrag || !frameRef.current) return;
-    const rect = frameRef.current.getBoundingClientRect();
+    // Crop coords are % of the image. The wrapper has the photo aspect
+    // and is centered inside the (now full-bleed) frame, so divide by
+    // its rect — not the frame's — to get the right percentages.
+    const wrapper = zoomWrapperRef.current ?? frameRef.current;
+    if (!activeDrag || !wrapper) return;
+    const rect = wrapper.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
     const dx = ((event.clientX - activeDrag.startX) / rect.width) * 100;
     const dy = ((event.clientY - activeDrag.startY) / rect.height) * 100;
     const start = activeDrag.start;
@@ -972,11 +984,13 @@ function DevelopStageSplit({
     // click position so the pixel under the cursor stays put. Matches
     // Lightroom's space-bar / click-to-zoom behavior.
     const frame = frameRef.current;
-    if (!frame) return;
-    const rect = frame.getBoundingClientRect();
-    const cx = event.clientX - rect.left - rect.width / 2;
-    const cy = event.clientY - rect.top - rect.height / 2;
-    const longEdge = Math.max(rect.width, rect.height);
+    const wrapper = zoomWrapperRef.current;
+    if (!frame || !wrapper) return;
+    const frameRect = frame.getBoundingClientRect();
+    const cx = event.clientX - frameRect.left - frameRect.width / 2;
+    const cy = event.clientY - frameRect.top - frameRect.height / 2;
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const longEdge = Math.max(wrapperRect.width, wrapperRect.height);
     const oneToOneZoom = longEdge > 0 ? clampNumber((2048 / longEdge) * 100, ZOOM_MIN, ZOOM_MAX) : 200;
     const isAtFit = Math.abs(zoom - 100) < 3;
     if (isAtFit) {
@@ -1056,19 +1070,31 @@ function DevelopStageSplit({
               stopCropDrag();
             }}
             style={{
-              width: 'min(100%, 1100px)',
-              aspectRatio: stageAspect,
-              maxHeight: '100%',
+              width: '100%',
+              height: '100%',
               position: 'relative',
               overflow: 'hidden',
               cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'zoom-in',
             }}
           >
+            {/* The zoom wrapper sizes to the photo's aspect inside the
+                full-bleed frame so the crop overlay's percentage coords
+                stay aligned with the actual image. `width/height: auto`
+                + `max-width/height: 100%` resolves to the largest
+                photo-aspect rectangle that fits, centered via auto
+                margins (Lightroom's Fit semantics). */}
             <div
+              ref={zoomWrapperRef}
               className="develop-canvas-zoom"
               style={{
                 position: 'absolute',
                 inset: 0,
+                margin: 'auto',
+                aspectRatio: stageAspect,
+                width: 'auto',
+                height: 'auto',
+                maxWidth: '100%',
+                maxHeight: '100%',
                 transformOrigin: 'center center',
                 transform: `translate(${panX}px, ${panY}px) scale(${zoom / 100})`,
                 willChange: 'transform',
