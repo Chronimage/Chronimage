@@ -141,7 +141,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         let t = Instant::now();
-        let mask = sam.decode_normalized(&feats, prompts, w, h, false)?;
+        let mask = sam.decode_normalized(&feats, prompts, &img, false)?;
         eprintln!(
             "  decoded in {:?}, confidence={:.3}",
             t.elapsed(),
@@ -262,6 +262,21 @@ fn build_strategies(
             name_for("08_dense_cluster"),
             with_dense_border_negatives(prompts),
         ));
+
+        // S10 — box prompt + face anchor + dense negatives. Mirrors the
+        // production `build_prompts("subject", ...)` path so the bin
+        // exercises the same prompt set the Tauri app produces. SAM2 was
+        // trained extensively on box-prompted ground truth, so this
+        // typically beats every point-only strategy on object masks.
+        // Labels: 2.0 = box top-left, 3.0 = box bottom-right.
+        let bx0 = (face.x - face.w * 1.4).clamp(0.005, 0.995);
+        let by0 = (face.y - face.h * 0.5).clamp(0.005, 0.995);
+        let bx1 = (face.x + face.w + face.w * 1.4).clamp(0.005, 0.995);
+        let by1 = (face.y + face.h * 5.5).clamp(0.005, 0.995);
+        let mut box_prompts: Vec<NormalizedPrompt> =
+            vec![(bx0, by0, 2.0), (bx1, by1, 3.0), (cx, cy, 1.0)];
+        box_prompts = with_dense_border_negatives(box_prompts);
+        out.push(("10_box_plus_face_anchor".into(), box_prompts));
     }
 
     // S9 — multi-face: every face contributes a positive; everything else
@@ -306,16 +321,20 @@ fn decode_mask_alpha(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     let bytes = B64.decode(data_b64)?;
-    let img = image::load_from_memory(&bytes)?.to_luma8();
-    if img.dimensions() != (w, h) {
-        return Err(format!(
-            "mask dims {:?} != image dims {:?}",
-            img.dimensions(),
-            (w, h)
-        )
-        .into());
+    let dyn_img = image::load_from_memory(&bytes)?;
+    let (dw, dh) = (dyn_img.width(), dyn_img.height());
+    if (dw, dh) != (w, h) {
+        return Err(format!("mask dims ({dw},{dh}) != image dims ({w},{h})").into());
     }
-    Ok(img.into_raw())
+    // SamSession writes the matte into the alpha channel of a LumaA8
+    // PNG (luma is constant 255). Reading luminance instead would give
+    // a flat 255 buffer and report 100% coverage on every photo.
+    let raw: Vec<u8> = if dyn_img.color().has_alpha() {
+        dyn_img.to_rgba8().pixels().map(|p| p.0[3]).collect()
+    } else {
+        dyn_img.to_luma8().into_raw()
+    };
+    Ok(raw)
 }
 
 fn save_alpha_png(
