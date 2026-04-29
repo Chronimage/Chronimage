@@ -778,6 +778,39 @@ async fn execute_pipeline(
                             return;
                         }
                     };
+                    // SCRFD ran against the AI-preview cache (≤ AI_PREVIEW_MAX_EDGE
+                    // longest edge), so `face.{x,y,w,h}` are in *preview-pixel*
+                    // space — not the full-image space `photos.width/height` and
+                    // every downstream consumer (subject masks, develop face hints)
+                    // assumes. Without this rescale, a face stored at (764, 338)
+                    // in a 7008×4672 catalog row points at the top-left rangoli
+                    // instead of the actual subject (~5.4× off — the AI-preview
+                    // ratio for an A7 IV frame). Scale up to full-image coords
+                    // before INSERT.
+                    let face_scale = {
+                        let dims: Option<(Option<i64>, Option<i64>)> =
+                            sqlx::query_as("SELECT width, height FROM photos WHERE id = ?1")
+                                .bind(photo_id)
+                                .fetch_optional(&pool)
+                                .await
+                                .ok()
+                                .flatten();
+                        match dims {
+                            Some((Some(full_w), Some(full_h))) if full_w > 0 && full_h > 0 => {
+                                let (preview_w, preview_h) =
+                                    crate::ai::image_util::preview_dims_for_full(
+                                        full_w as u32,
+                                        full_h as u32,
+                                        crate::ai::image_util::AI_PREVIEW_MAX_EDGE,
+                                    );
+                                Some((
+                                    full_w as f32 / preview_w as f32,
+                                    full_h as f32 / preview_h as f32,
+                                ))
+                            }
+                            _ => None,
+                        }
+                    };
                     let now_ts = Utc::now().to_rfc3339();
                     for face in faces {
                         let path_c = path.clone();
@@ -800,6 +833,7 @@ async fn execute_pipeline(
                         };
                         let embedding_bytes: Vec<u8> =
                             embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+                        let (sx, sy) = face_scale.unwrap_or((1.0, 1.0));
                         if let Err(e) = sqlx::query(
                             "INSERT INTO faces \
                              (photo_id, bbox_x, bbox_y, bbox_w, bbox_h, quality, \
@@ -807,10 +841,10 @@ async fn execute_pipeline(
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         )
                         .bind(photo_id)
-                        .bind(face.x as f64)
-                        .bind(face.y as f64)
-                        .bind(face.w as f64)
-                        .bind(face.h as f64)
+                        .bind((face.x * sx) as f64)
+                        .bind((face.y * sy) as f64)
+                        .bind((face.w * sx) as f64)
+                        .bind((face.h * sy) as f64)
                         .bind(face.score as f64)
                         .bind(&embedding_bytes)
                         .bind(&now_ts)

@@ -22,12 +22,20 @@ struct TensorData {
     data: Vec<f32>,
 }
 
+/// Encoder output reused across many decoder calls. `pub` so the
+/// `chronimage-mask-debug` bin can encode an image once and iterate
+/// prompt strategies through `decode_normalized` without re-running
+/// the (expensive) image encoder.
 #[derive(Debug, Clone)]
-struct Sam2Features {
+pub struct Sam2Features {
     image_embed: TensorData,
     high_res_feats_0: TensorData,
     high_res_feats_1: TensorData,
 }
+
+/// Single SAM2.1 point prompt expressed in normalised image coords.
+/// `(x, y)` are in `[0, 1]`; `label` is `1.0` for foreground, `0.0` for background.
+pub type NormalizedPrompt = (f32, f32, f32);
 
 #[derive(Debug)]
 pub struct SamSession {
@@ -107,8 +115,63 @@ impl SamSession {
         }
         let embeddings = self.encode(img)?;
         let (coords, labels) = build_prompts(source, face_hints, orig_w, orig_h);
-        let logits = self.decode(&embeddings, &coords, &labels, orig_h, orig_w)?;
-        let alpha = threshold_to_alpha(source, &logits, orig_w, orig_h);
+        let decoded = self.decode(&embeddings, &coords, &labels, orig_h, orig_w)?;
+        let alpha = threshold_to_alpha(source, &decoded, orig_w, orig_h);
+        let confidence = mask_confidence(&alpha);
+        let data_b64 = encode_luma_png(orig_w, orig_h, &alpha)?;
+        Ok(GeneratedMask {
+            width: orig_w,
+            height: orig_h,
+            data_b64,
+            confidence,
+            model: "sam2.1-hiera-large",
+        })
+    }
+
+    /// Encode an image into reusable SAM2.1 features. Public so debug
+    /// tooling can run the encoder once and decode many prompt
+    /// strategies against the cached features.
+    pub fn encode_features(&self, img: &RgbImage) -> AppResult<Sam2Features> {
+        if self.is_stub {
+            return Err(AppError::NotFound(
+                "SAM2.1 stub -- models not loaded".into(),
+            ));
+        }
+        self.encode(img)
+    }
+
+    /// Decode a mask from cached features using normalised `(x, y, label)`
+    /// prompts. `invert` produces a background-style alpha (1 - sigmoid).
+    /// Used by `chronimage-mask-debug` to iterate prompt strategies.
+    pub fn decode_normalized(
+        &self,
+        features: &Sam2Features,
+        prompts: &[NormalizedPrompt],
+        orig_w: u32,
+        orig_h: u32,
+        invert: bool,
+    ) -> AppResult<GeneratedMask> {
+        if self.is_stub {
+            return Err(AppError::NotFound(
+                "SAM2.1 stub -- models not loaded".into(),
+            ));
+        }
+        if orig_w == 0 || orig_h == 0 {
+            return Err(AppError::InvalidInput(
+                "cannot decode SAM mask for empty image".into(),
+            ));
+        }
+        let scale = ENCODER_SIZE as f32 / orig_w.max(orig_h) as f32;
+        let sw = orig_w as f32 * scale;
+        let sh = orig_h as f32 * scale;
+        let coords: Vec<[f32; 2]> = prompts
+            .iter()
+            .map(|(xn, yn, _)| [xn * sw, yn * sh])
+            .collect();
+        let labels: Vec<f32> = prompts.iter().map(|(_, _, l)| *l).collect();
+        let decoded = self.decode(features, &coords, &labels, orig_h, orig_w)?;
+        let source = if invert { "background" } else { "subject" };
+        let alpha = threshold_to_alpha(source, &decoded, orig_w, orig_h);
         let confidence = mask_confidence(&alpha);
         let data_b64 = encode_luma_png(orig_w, orig_h, &alpha)?;
         Ok(GeneratedMask {
@@ -150,7 +213,7 @@ impl SamSession {
         point_labels: &[f32],
         _orig_h: u32,
         _orig_w: u32,
-    ) -> AppResult<Vec<f32>> {
+    ) -> AppResult<DecodedMask> {
         let n = point_coords.len() as i64;
         let image_embed_tensor = tensor_from_data("image_embed", &features.image_embed)?;
         let high_res_0_tensor = tensor_from_data("high_res_feats_0", &features.high_res_feats_0)?;
@@ -189,7 +252,7 @@ impl SamSession {
                 "has_mask_input"   => has_mask_tensor
             ])
             .map_err(|e| AppError::Internal(format!("ort run (sam-decoder): {e}")))?;
-        let (_ms, masks_data) = outputs["masks"]
+        let (mask_shape, masks_data) = outputs["masks"]
             .try_extract_tensor::<f32>()
             .map_err(|e| AppError::Internal(format!("sam-decoder extract masks: {e}")))?;
         let masks_flat = masks_data.to_vec();
@@ -197,6 +260,13 @@ impl SamSession {
             .try_extract_tensor::<f32>()
             .map_err(|e| AppError::Internal(format!("sam-decoder extract iou: {e}")))?;
         let iou_flat = iou_data.to_vec();
+        tracing::debug!(
+            "sam-decoder: masks shape={:?}, iou len={} (min={:.3} max={:.3})",
+            mask_shape,
+            iou_flat.len(),
+            iou_flat.iter().cloned().fold(f32::INFINITY, f32::min),
+            iou_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+        );
         let num_masks = iou_flat.len().clamp(1, 3);
         if masks_flat.is_empty() {
             return Err(AppError::Internal("sam-decoder: empty masks tensor".into()));
@@ -207,6 +277,17 @@ impl SamSession {
                 "sam-decoder: cannot determine pixels_per_mask".into(),
             ));
         }
+        // Mask shape is `[batch, num_masks, mask_h, mask_w]`. The
+        // vietanhdev SAM2 ONNX export keeps masks at the native 256×256
+        // decoder resolution; older / custom exports may emit 1024×1024.
+        // We read the actual dims out of the shape so `threshold_to_alpha`
+        // can upsample correctly in either case.
+        let (mask_h, mask_w) = if mask_shape.len() >= 4 {
+            (mask_shape[2] as u32, mask_shape[3] as u32)
+        } else {
+            let side = (pixels_per_mask as f64).sqrt().round() as u32;
+            (side, side)
+        };
         let best_idx = (0..num_masks)
             .max_by(|&a, &b| {
                 iou_flat
@@ -217,8 +298,22 @@ impl SamSession {
             })
             .unwrap_or(0);
         let offset = best_idx * pixels_per_mask;
-        Ok(masks_flat[offset..offset + pixels_per_mask].to_vec())
+        Ok(DecodedMask {
+            logits: masks_flat[offset..offset + pixels_per_mask].to_vec(),
+            mask_w,
+            mask_h,
+        })
     }
+}
+
+/// Raw decoder output: SAM2's mask logits at their native grid resolution
+/// (typically 256×256), still in letterboxed encoder coordinate space.
+/// `threshold_to_alpha` is responsible for unletterboxing + upsampling
+/// back to original image dimensions.
+struct DecodedMask {
+    logits: Vec<f32>,
+    mask_w: u32,
+    mask_h: u32,
 }
 
 fn extract_tensor(outputs: &ort::session::SessionOutputs, name: &str) -> AppResult<TensorData> {
@@ -342,7 +437,7 @@ fn build_prompts(
     (coords, labels)
 }
 
-fn threshold_to_alpha(source: &str, logits: &[f32], w: u32, h: u32) -> Vec<u8> {
+fn threshold_to_alpha(source: &str, decoded: &DecodedMask, w: u32, h: u32) -> Vec<u8> {
     let pixels = (w as usize) * (h as usize);
     let invert = matches!(source, "background" | "landscape");
     let to_alpha = |l: f32| {
@@ -351,26 +446,57 @@ fn threshold_to_alpha(source: &str, logits: &[f32], w: u32, h: u32) -> Vec<u8> {
         (a * 255.0).round().clamp(0.0, 255.0) as u8
     };
 
-    if logits.len() >= pixels {
-        return logits.iter().take(pixels).map(|&l| to_alpha(l)).collect();
+    let logits = &decoded.logits;
+    let mw = decoded.mask_w as usize;
+    let mh = decoded.mask_h as usize;
+    if mw == 0 || mh == 0 || logits.len() < mw * mh {
+        return vec![0_u8; pixels];
     }
 
-    let padded_pixels = (ENCODER_SIZE as usize) * (ENCODER_SIZE as usize);
-    if logits.len() >= padded_pixels {
-        let scale = ENCODER_SIZE as f32 / w.max(h) as f32;
-        let mut alpha = vec![0_u8; pixels];
-        for y in 0..h as usize {
-            for x in 0..w as usize {
-                let sx = ((x as f32 * scale).round() as usize).min(ENCODER_SIZE as usize - 1);
-                let sy = ((y as f32 * scale).round() as usize).min(ENCODER_SIZE as usize - 1);
-                alpha[y * w as usize + x] = to_alpha(logits[sy * ENCODER_SIZE as usize + sx]);
-            }
+    // The encoder letterboxes the original image into a 1024×1024 square:
+    // longest side scales to ENCODER_SIZE; the shorter side is padded with
+    // black to fill the square. The decoder then emits a `mw × mh` logit
+    // grid (typically 256×256) that covers the *full letterbox*, padding
+    // included. To map a pixel `(x, y)` in the original image into mask
+    // grid coordinates we therefore go original → letterbox → mask grid:
+    //   lx = x * scale,  ly = y * scale     (letterbox space, 0..1024)
+    //   mx = lx * mw / 1024, my = ly * mh / 1024
+    // The padding region is outside `(orig_w*scale, orig_h*scale)` so we
+    // never sample logits from it for any visible original pixel — i.e.
+    // the alpha matte we produce is automatically pad-free.
+    let scale = ENCODER_SIZE as f32 / w.max(h) as f32;
+    let mx_per_x = scale * mw as f32 / ENCODER_SIZE as f32;
+    let my_per_y = scale * mh as f32 / ENCODER_SIZE as f32;
+    // Image content occupies the first `image_mw × image_mh` cells of
+    // the logit grid; the remaining cells are over the letterbox pad.
+    // Clamp bilinear sampling to that region so the right-/bottom-edge
+    // pixels don't pull in pad logits during interpolation.
+    let image_mw_f = (w as f32 * mx_per_x).min(mw as f32);
+    let image_mh_f = (h as f32 * my_per_y).min(mh as f32);
+    let mx_max = (image_mw_f - 1.0).max(0.0);
+    let my_max = (image_mh_f - 1.0).max(0.0);
+
+    let mut alpha = vec![0_u8; pixels];
+    for y in 0..h as usize {
+        let my = (y as f32 * my_per_y).clamp(0.0, my_max);
+        let y0 = my.floor() as usize;
+        let y1 = (y0 + 1).min(my_max as usize);
+        let fy = my - y0 as f32;
+        for x in 0..w as usize {
+            let mx = (x as f32 * mx_per_x).clamp(0.0, mx_max);
+            let x0 = mx.floor() as usize;
+            let x1 = (x0 + 1).min(mx_max as usize);
+            let fx = mx - x0 as f32;
+            let l00 = logits[y0 * mw + x0];
+            let l01 = logits[y0 * mw + x1];
+            let l10 = logits[y1 * mw + x0];
+            let l11 = logits[y1 * mw + x1];
+            let l0 = l00 * (1.0 - fx) + l01 * fx;
+            let l1 = l10 * (1.0 - fx) + l11 * fx;
+            let l = l0 * (1.0 - fy) + l1 * fy;
+            alpha[y * w as usize + x] = to_alpha(l);
         }
-        return alpha;
     }
-
-    let mut alpha: Vec<u8> = logits.iter().map(|&l| to_alpha(l)).collect();
-    alpha.resize(pixels, 0);
     alpha
 }
 
@@ -413,9 +539,23 @@ fn encode_luma_png(width: u32, height: u32, alpha: &[u8]) -> AppResult<String> {
             "sam mask alpha buffer has wrong size".into(),
         ));
     }
+    // Encoded as LumaA8 (greyscale + alpha) where the alpha channel carries
+    // the mask coverage and the luma channel is constant white. Storing the
+    // mask in the *alpha* channel — not luminance — is what makes the
+    // frontend's `mask-image: url(...)` overlay work reliably in WebView2:
+    // CSS `mask-mode: match-source` defaults to `alpha` for raster sources,
+    // so a luminance-only L8 PNG (with no alpha channel) gets a default
+    // alpha of 255 across the whole image and the mask covers the entire
+    // frame regardless of where the subject is. Encoding the matte into
+    // the alpha channel makes the contract unambiguous for every browser.
+    let mut interleaved = Vec::with_capacity(expected * 2);
+    for &a in alpha {
+        interleaved.push(255_u8);
+        interleaved.push(a);
+    }
     let mut out = Vec::new();
     PngEncoder::new(&mut out)
-        .write_image(alpha, width, height, image::ExtendedColorType::L8)
+        .write_image(&interleaved, width, height, image::ExtendedColorType::La8)
         .map_err(|e| AppError::Internal(format!("encode sam mask png: {e}")))?;
     Ok(B64.encode(out))
 }
@@ -582,21 +722,91 @@ mod tests {
 
     #[test]
     fn threshold_inverts_for_background() {
-        let logits = vec![4.0_f32, -4.0];
-        let fg = threshold_to_alpha("subject", &logits, 2, 1);
-        let bg = threshold_to_alpha("background", &logits, 2, 1);
+        // 2×1 mask grid (mw=2, mh=1). Image is square so the encoder
+        // letterbox is 1:1 and the mask grid covers the full image.
+        let decoded = DecodedMask {
+            logits: vec![4.0_f32, -4.0],
+            mask_w: 2,
+            mask_h: 1,
+        };
+        let fg = threshold_to_alpha("subject", &decoded, 2, 1);
+        let bg = threshold_to_alpha("background", &decoded, 2, 1);
         assert!(fg[0] > 200 && fg[1] < 55);
         assert!(bg[0] < 55 && bg[1] > 200);
     }
 
     #[test]
-    fn encode_luma_png_roundtrips() {
+    fn threshold_upsamples_small_grid_to_full_image() {
+        // 4×4 logit grid covers a 1024×1024 letterboxed encoder space.
+        // Original image is 800×800 (square → fills letterbox cleanly):
+        // expect a coarse but non-zero alpha across the whole image.
+        let mut logits = vec![-10.0_f32; 16];
+        for i in 0..4 {
+            logits[i * 4 + i] = 10.0;
+        }
+        let decoded = DecodedMask {
+            logits,
+            mask_w: 4,
+            mask_h: 4,
+        };
+        let alpha = threshold_to_alpha("subject", &decoded, 800, 800);
+        assert_eq!(alpha.len(), 800 * 800);
+        let hot = alpha.iter().filter(|&&a| a > 200).count();
+        assert!(hot > 0, "expected some hot diagonal pixels");
+        let cold = alpha.iter().filter(|&&a| a < 32).count();
+        assert!(cold > 0, "expected some cold off-diagonal pixels");
+    }
+
+    #[test]
+    fn threshold_skips_letterbox_padding_for_landscape_image() {
+        // Wide image: 200×100. After letterboxing (longest side → 1024),
+        // pixels live in y ∈ [0, 512] of the 1024-tall letterbox; the
+        // bottom half is black padding. We should NEVER sample logits
+        // from the padded region for any visible image pixel.
+        let mut logits = vec![-10.0_f32; 16 * 16];
+        // Mark the bottom half of the logit grid hot (the padded region).
+        for y in 8..16 {
+            for x in 0..16 {
+                logits[y * 16 + x] = 10.0;
+            }
+        }
+        let decoded = DecodedMask {
+            logits,
+            mask_w: 16,
+            mask_h: 16,
+        };
+        let alpha = threshold_to_alpha("subject", &decoded, 200, 100);
+        // Image only maps to the top 1024×512 of the letterbox → top
+        // half of the logit grid → all logits read should be cold.
+        let hot = alpha.iter().filter(|&&a| a > 200).count();
+        assert_eq!(
+            hot, 0,
+            "no visible pixel should sample from the padded region of the logit grid"
+        );
+    }
+
+    #[test]
+    fn encode_luma_png_carries_mask_in_alpha_channel() {
+        // The mask matte must live in the *alpha* channel — not luminance —
+        // so the frontend's CSS `mask-image` overlay reads it correctly in
+        // WebView2. If we slipped back to L8 the mask would cover the whole
+        // frame regardless of subject position.
         let alpha: Vec<u8> = (0..16_u8).collect();
         let b64 = encode_luma_png(4, 4, &alpha).expect("encode");
         let bytes = B64.decode(&b64).expect("b64 decode");
-        let img = image::load_from_memory(&bytes)
-            .expect("png decode")
-            .to_luma8();
-        assert_eq!(img.dimensions(), (4, 4));
+        let img = image::load_from_memory(&bytes).expect("png decode");
+        let color = img.color();
+        assert!(
+            color.has_alpha(),
+            "encoded mask PNG must have an alpha channel, got {color:?}"
+        );
+        let rgba = img.to_rgba8();
+        assert_eq!(rgba.dimensions(), (4, 4));
+        for (i, p) in rgba.pixels().enumerate() {
+            assert_eq!(
+                p.0[3], alpha[i],
+                "alpha channel at index {i} must equal source mask",
+            );
+        }
     }
 }
