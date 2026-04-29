@@ -238,3 +238,80 @@
   --accent-soft: oklch(0.965 0.045 88);
   --accent-ink: oklch(0.14 0.03 88);
 }
+
+/* === Shape tweaks ===============================================
+   Three orthogonal axes that re-skin every primitive at once:
+     - data-radii=…   sharp | soft | pillowy
+     - data-stroke=…  hairline | standard | bold
+     - data-shadow=…  flat | subtle | pronounced
+   Rules cascade through `var(--radius-*)`, `--stroke-w`, and
+   `--shadow-*` so any component already consuming the tokens picks
+   the new values up automatically. */
+
+/* Radii — `sharp` is the editorial default; `soft` mirrors stock
+   shadcn; `pillowy` is rounded enough to feel like a consumer app. */
+.app[data-radii="sharp"] {
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius: 6px;
+}
+.app[data-radii="soft"] {
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius: 10px;
+}
+.app[data-radii="pillowy"] {
+  --radius-xs: 8px;
+  --radius-sm: 12px;
+  --radius-md: 18px;
+  --radius-lg: 24px;
+  --radius: 18px;
+}
+
+/* Strokes — controls every `1px solid var(--stroke)` border via
+   the `--stroke-w` token. Hairline reads tight + clean; bold reads
+   like a brutalist UI. */
+.app[data-stroke="hairline"] {
+  --stroke-w: 1px;
+  --stroke-w-strong: 1px;
+}
+.app[data-stroke="standard"] {
+  --stroke-w: 1px;
+  --stroke-w-strong: 1.5px;
+}
+.app[data-stroke="bold"] {
+  --stroke-w: 1.5px;
+  --stroke-w-strong: 2px;
+}
+
+/* Shadows — `flat` removes ambient shadows entirely; `pronounced`
+   pushes them into Material-style elevation. */
+.app[data-shadow="flat"] {
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: 0 4px 12px oklch(0 0 0 / 0.3);
+}
+.app[data-shadow="subtle"] {
+  --shadow-sm: 0 1px 0 0 oklch(0 0 0 / 0.4);
+  --shadow-md: 0 4px 14px oklch(0 0 0 / 0.45);
+  --shadow-lg: 0 12px 32px oklch(0 0 0 / 0.55);
+}
+.app[data-shadow="pronounced"] {
+  --shadow-sm: 0 2px 4px oklch(0 0 0 / 0.4);
+  --shadow-md: 0 8px 24px oklch(0 0 0 / 0.55);
+  --shadow-lg: 0 24px 56px oklch(0 0 0 / 0.65);
+}
+[data-theme="light"].app[data-shadow="flat"] {
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: 0 4px 12px oklch(0 0 0 / 0.08);
+}
+[data-theme="light"].app[data-shadow="pronounced"] {
+  --shadow-sm: 0 2px 4px oklch(0 0 0 / 0.1);
+  --shadow-md: 0 8px 24px oklch(0 0 0 / 0.15);
+  --shadow-lg: 0 24px 56px oklch(0 0 0 / 0.22);
+}

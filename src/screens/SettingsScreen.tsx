@@ -12,6 +12,7 @@ import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useState } from 'react';
 import { Switch } from '@/components/ui/switch';
+import { Slider as PrimitiveSlider } from '../primitives/Slider';
 import {
   type ModelSource,
   type ModelStatus,
@@ -299,23 +300,128 @@ interface SliderProps {
   label: string;
 }
 
+// ── Appearance / theme tweaks ──────────────────────────────────────────────
+
+const RADII_OPTIONS = [
+  { value: 'sharp' as const, label: 'Sharp' },
+  { value: 'soft' as const, label: 'Soft' },
+  { value: 'pillowy' as const, label: 'Pillowy' },
+];
+const STROKE_OPTIONS = [
+  { value: 'hairline' as const, label: 'Hairline' },
+  { value: 'standard' as const, label: 'Standard' },
+  { value: 'bold' as const, label: 'Bold' },
+];
+const SHADOW_OPTIONS = [
+  { value: 'flat' as const, label: 'Flat' },
+  { value: 'subtle' as const, label: 'Subtle' },
+  { value: 'pronounced' as const, label: 'Pronounced' },
+];
+const THEME_OPTIONS = [
+  { value: 'dark' as const, label: 'Dark' },
+  { value: 'light' as const, label: 'Light' },
+];
+const ACCENT_OPTIONS = [
+  { value: 'mint' as const, label: 'Mint' },
+  { value: 'ember' as const, label: 'Ember' },
+  { value: 'violet' as const, label: 'Violet' },
+  { value: 'sky' as const, label: 'Sky' },
+  { value: 'gold' as const, label: 'Gold' },
+];
+
+function ThemeTweaksSection() {
+  const tweaks = useUi((s) => s.tweaks);
+  const setTweaks = useUi((s) => s.setTweaks);
+
+  return (
+    <div className="set-section theme-tweaks-section" style={{ marginTop: 28 }}>
+      <h3 className="theme-tweaks-head">Appearance</h3>
+      <div className="theme-tweaks-grid">
+        <ThemeTweakRow
+          label="Theme"
+          hint="Light or dark surface"
+          value={tweaks.theme}
+          options={THEME_OPTIONS}
+          onChange={(v) => setTweaks({ theme: v })}
+        />
+        <ThemeTweakRow
+          label="Accent"
+          hint="Drives every active state"
+          value={tweaks.accent}
+          options={ACCENT_OPTIONS}
+          onChange={(v) => setTweaks({ accent: v })}
+        />
+        <ThemeTweakRow
+          label="Radii"
+          hint="Sharper = more editorial"
+          value={tweaks.radii}
+          options={RADII_OPTIONS}
+          onChange={(v) => setTweaks({ radii: v })}
+        />
+        <ThemeTweakRow
+          label="Strokes"
+          hint="Border weight, app-wide"
+          value={tweaks.stroke}
+          options={STROKE_OPTIONS}
+          onChange={(v) => setTweaks({ stroke: v })}
+        />
+        <ThemeTweakRow
+          label="Shadows"
+          hint="Ambient elevation depth"
+          value={tweaks.shadow}
+          options={SHADOW_OPTIONS}
+          onChange={(v) => setTweaks({ shadow: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+interface ThemeTweakRowProps<T extends string> {
+  readonly label: string;
+  readonly hint: string;
+  readonly value: T;
+  readonly options: { value: T; label: string }[];
+  readonly onChange: (value: T) => void;
+}
+
+function ThemeTweakRow<T extends string>({ label, hint, value, options, onChange }: ThemeTweakRowProps<T>) {
+  return (
+    <div className="theme-tweak-row">
+      <div className="theme-tweak-meta">
+        <div className="theme-tweak-label">{label}</div>
+        <div className="theme-tweak-hint">{hint}</div>
+      </div>
+      <div className="theme-tweak-options">
+        {options.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            className={`theme-tweak-pill${value === o.value ? ' is-active' : ''}`}
+            onClick={() => onChange(o.value)}
+            aria-pressed={value === o.value}
+            data-accent={label === 'Accent' ? o.value : undefined}
+          >
+            {label === 'Accent' && <span className="theme-tweak-swatch" aria-hidden="true" />}
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Slider({ value, onChange, min, max, suffix, label }: SliderProps) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        aria-label={label}
-        style={{ accentColor: 'var(--accent)', width: 160 }}
-      />
-      <span className="mono" style={{ fontSize: 12, color: 'var(--fg-dim)', minWidth: 40 }}>
-        {value}
-        {suffix ?? ''}
-      </span>
-    </div>
+    <PrimitiveSlider
+      label={label}
+      value={value}
+      onChange={onChange}
+      min={min}
+      max={max}
+      suffix={suffix ?? ''}
+      className="settings-slider"
+    />
   );
 }
 
@@ -963,6 +1069,9 @@ export function SettingsScreen() {
               />
             </div>
           </div>
+
+          {/* ── 1b. Appearance ── */}
+          <ThemeTweaksSection />
 
           {/* ── 1a. Library ── */}
           <div className="set-section" style={{ marginTop: 28 }}>

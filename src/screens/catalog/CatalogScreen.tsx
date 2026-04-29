@@ -1,4 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Chip } from '../../primitives/Chip';
 import { ConfirmDialog } from '../../primitives/ConfirmDialog';
 import { Icon } from '../../primitives/Icon';
@@ -203,35 +219,33 @@ function PeopleTaggingSection({ photoId, faces, selectedFaceId, onSelectFace }: 
                     {Math.round(face.quality * 100)}%
                   </span>
                 </button>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <select
-                    aria-label={`Assign ${label} to an existing person`}
-                    value={face.clusterId ?? ''}
-                    onChange={(e) => {
-                      if (e.target.value === '') return;
-                      const nextClusterId = Number(e.target.value);
+                <div className="face-actions">
+                  <Select
+                    value={face.clusterId == null ? '' : String(face.clusterId)}
+                    onValueChange={(next) => {
+                      if (!next) return;
+                      const nextClusterId = Number(next);
                       if (Number.isFinite(nextClusterId)) {
                         assignCluster.mutate({ faceId: face.id, clusterId: nextClusterId, photoId });
                       }
                     }}
-                    style={{
-                      flex: '1 1 150px',
-                      minWidth: 0,
-                      background: 'var(--bg)',
-                      color: 'var(--fg)',
-                      border: '1px solid var(--stroke)',
-                      borderRadius: 'var(--radius-sm)',
-                      padding: '6px 8px',
-                      fontSize: 12,
-                    }}
                   >
-                    <option value="">Choose person…</option>
-                    {namedClusters.map((cluster) => (
-                      <option key={cluster.id} value={cluster.id}>
-                        {cluster.name ?? `Person ${cluster.id}`}
-                      </option>
-                    ))}
-                  </select>
+                    <SelectTrigger
+                      className="face-cluster-trigger"
+                      aria-label={`Assign ${label} to an existing person`}
+                    >
+                      <SelectValue placeholder="Choose person…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {namedClusters.map((cluster) => (
+                          <SelectItem key={cluster.id} value={String(cluster.id)}>
+                            {cluster.name ?? `Person ${cluster.id}`}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                   {face.clusterId != null && (
                     <button
                       type="button"
@@ -242,14 +256,13 @@ function PeopleTaggingSection({ photoId, faces, selectedFaceId, onSelectFace }: 
                     </button>
                   )}
                 </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    className="tx-input"
+                <div className="face-name-row">
+                  <Input
                     value={drafts[face.id] ?? ''}
                     onChange={(e) => setDraft(face.id, e.target.value)}
                     placeholder="Type a name"
                     aria-label={`Create a person for ${label}`}
-                    style={{ flex: 1, minWidth: 0, fontSize: 12, padding: '6px 8px' }}
+                    className="face-name-input"
                   />
                   <button
                     type="button"
@@ -1083,43 +1096,33 @@ export function CatalogScreen({ albumId }: CatalogScreenProps) {
         >
           <Icon name="layers" size={13} />
         </button>
-        <div className="sort-wrap" style={{ position: 'relative' }}>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setSortMenuOpen((v) => !v)}
-            aria-haspopup="menu"
-            aria-expanded={sortMenuOpen}
-            title="Sort order"
-          >
-            <Icon name="history" size={13} /> {SORT_LABELS[sortBy]}
-            <Icon name="chevD" size={10} />
-          </button>
-          {sortMenuOpen && (
-            <div role="menu" className="sort-menu" onMouseLeave={() => setSortMenuOpen(false)}>
+        <DropdownMenu open={sortMenuOpen} onOpenChange={setSortMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button type="button" className="btn" title="Sort order">
+              <Icon name="history" size={13} /> {SORT_LABELS[sortBy]}
+              <Icon name="chevD" size={10} />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="sort-menu-content">
+            <DropdownMenuRadioGroup
+              value={sortBy}
+              onValueChange={(next) => {
+                const key = next as keyof typeof SORT_LABELS;
+                if (key === 'random') {
+                  setRandomSeed(Math.floor(Math.random() * 0x7fffffff));
+                }
+                setTweaks({ sortBy: key });
+                setSortMenuOpen(false);
+              }}
+            >
               {(Object.keys(SORT_LABELS) as Array<keyof typeof SORT_LABELS>).map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  className={`sort-menu-item${sortBy === key ? ' active' : ''}`}
-                  role="menuitemradio"
-                  aria-checked={sortBy === key}
-                  onClick={() => {
-                    // Picking Random (or re-picking it) regenerates the seed
-                    // so the user gets a fresh shuffle each time.
-                    if (key === 'random') {
-                      setRandomSeed(Math.floor(Math.random() * 0x7fffffff));
-                    }
-                    setTweaks({ sortBy: key });
-                    setSortMenuOpen(false);
-                  }}
-                >
+                <DropdownMenuRadioItem key={key} value={key}>
                   {SORT_LABELS[key]}
-                </button>
+                </DropdownMenuRadioItem>
               ))}
-            </div>
-          )}
-        </div>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <button
           type="button"
           className="btn"

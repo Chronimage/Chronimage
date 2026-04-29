@@ -24,6 +24,16 @@ export type PhotoSortBy =
   | 'aesthetic_desc'
   | 'random';
 
+/**
+ * Global "shape" tweaks that re-skin every shadcn-derived primitive at
+ * once via CSS variables. Each value maps to a `[data-radii=…]`,
+ * `[data-stroke=…]`, or `[data-shadow=…]` attribute on the app root,
+ * which the rules in `tokens.css` swap on.
+ */
+export type RadiiSize = 'sharp' | 'soft' | 'pillowy';
+export type StrokeWeight = 'hairline' | 'standard' | 'bold';
+export type ShadowDepth = 'flat' | 'subtle' | 'pronounced';
+
 export interface Tweaks {
   theme: 'dark' | 'light';
   accent: 'mint' | 'ember' | 'violet' | 'sky' | 'gold';
@@ -33,6 +43,9 @@ export interface Tweaks {
   cullMode: 'compare' | 'grid' | 'swipe';
   editorLayout: 'right-panel' | 'left-panel';
   appName: string;
+  radii: RadiiSize;
+  stroke: StrokeWeight;
+  shadow: ShadowDepth;
   // Persisted Settings screen controls (PRD §14).
   dupeSimilarity: number;
   sharpnessCutoff: number;
@@ -59,6 +72,9 @@ export const DEFAULT_TWEAKS: Tweaks = {
   cullMode: 'compare',
   editorLayout: 'right-panel',
   appName: 'Chronimage',
+  radii: 'sharp',
+  stroke: 'standard',
+  shadow: 'subtle',
   dupeSimilarity: 85,
   sharpnessCutoff: 32,
   requireReview: true,

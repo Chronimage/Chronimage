@@ -10,9 +10,17 @@ export const MASK_PRESETS = [
 export type MaskPreset = (typeof MASK_PRESETS)[number];
 export type MaskMode = 'normal' | 'add' | 'subtract' | 'intersect';
 
-export const MASK_MODES: { id: MaskMode; label: string }[] = [
-  { id: 'normal', label: 'New' },
-  { id: 'add', label: 'Add' },
-  { id: 'subtract', label: 'Subtract' },
-  { id: 'intersect', label: 'Intersect' },
+// Short labels keep the 4-button mode-seg readable inside the 252-px
+// sidepanel column. Full names live in `aria-label` and the per-mode
+// tooltip via `title`.
+export interface MaskModeOption {
+  id: MaskMode;
+  label: string;
+  full: string;
+}
+export const MASK_MODES: MaskModeOption[] = [
+  { id: 'normal', label: 'New', full: 'New mask' },
+  { id: 'add', label: 'Add', full: 'Add to mask' },
+  { id: 'subtract', label: 'Sub', full: 'Subtract from mask' },
+  { id: 'intersect', label: 'Int', full: 'Intersect with mask' },
 ];

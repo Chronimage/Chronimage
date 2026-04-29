@@ -29,6 +29,11 @@ export interface ActiveDevelopMask {
   createdAt: string;
 }
 
+/** Drawable mask kinds — when set, DevelopScreen captures the next
+ *  click+drag on the canvas to define the gradient/radial bounds and
+ *  posts a new mask via `createManualMask`. */
+export type DrawMaskKind = 'linear_gradient' | 'radial_gradient' | 'brush';
+
 interface DevelopUiState {
   focusedPhotoId: number | null;
   preview: string | null;
@@ -38,6 +43,7 @@ interface DevelopUiState {
   selectedMaskId: number | null;
   maskOverlayVisible: boolean;
   maskOverlayOpacity: number;
+  drawMaskKind: DrawMaskKind | null;
   /**
    * Open/closed state for each `<CollapsibleSection>` in the editor inspector,
    * keyed by section id (e.g. `'light'`, `'curves'`). Survives photo
@@ -51,6 +57,7 @@ interface DevelopUiState {
   setSelectedMaskId: (id: number | null) => void;
   setMaskOverlayVisible: (visible: boolean) => void;
   setMaskOverlayOpacity: (opacity: number) => void;
+  setDrawMaskKind: (kind: DrawMaskKind | null) => void;
   setPanelOpen: (id: string, open: boolean) => void;
 }
 
@@ -80,6 +87,7 @@ export const useDevelopUi = create<DevelopUiState>((set) => ({
   selectedMaskId: null,
   maskOverlayVisible: true,
   maskOverlayOpacity: 62,
+  drawMaskKind: null,
   panelOpen: DEFAULT_PANEL_OPEN,
   setFocusedPhotoId: (id) => set({ focusedPhotoId: id }),
   setPreview: (url) => set({ preview: url }),
@@ -88,5 +96,6 @@ export const useDevelopUi = create<DevelopUiState>((set) => ({
   setSelectedMaskId: (selectedMaskId) => set({ selectedMaskId }),
   setMaskOverlayVisible: (maskOverlayVisible) => set({ maskOverlayVisible }),
   setMaskOverlayOpacity: (maskOverlayOpacity) => set({ maskOverlayOpacity }),
+  setDrawMaskKind: (drawMaskKind) => set({ drawMaskKind }),
   setPanelOpen: (id, open) => set((state) => ({ panelOpen: { ...state.panelOpen, [id]: open } })),
 }));

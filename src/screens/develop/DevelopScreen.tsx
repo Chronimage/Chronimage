@@ -26,6 +26,7 @@ import {
   useAiEditStatus,
   useDevelopApply,
   useDevelopMaskApplyPreview,
+  useDevelopMaskCreate,
   useDevelopMasks,
   useDevelopMaskUpdate,
   useDevelopOpen,
@@ -47,6 +48,7 @@ import {
   type SidecarStatus,
 } from '../../tauri/invoke';
 import { warn } from '../../util/log';
+import { DevelopSidePanel } from './DevelopSidePanel';
 import { EditorInspector } from './EditorInspector';
 import {
   type DevelopTab,
@@ -760,6 +762,18 @@ function DevelopStageSplit({
   const [panX, setPanX] = useState(0);
   const [panY, setPanY] = useState(0);
   const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
+  const drawMaskKind = useDevelopUi((s) => s.drawMaskKind);
+  const setDrawMaskKind = useDevelopUi((s) => s.setDrawMaskKind);
+  const setSelectedMaskId = useDevelopUi((s) => s.setSelectedMaskId);
+  const drawCreateMask = useDevelopMaskCreate();
+  const [drawPreview, setDrawPreview] = useState<{
+    startX: number;
+    startY: number;
+    endX: number;
+    endY: number;
+  } | null>(null);
+  const drawStartRef = useRef<{ startX: number; startY: number } | null>(null);
+  const focusedPhotoId = photo?.id ?? null;
   const frameRef = useRef<HTMLDivElement | null>(null);
   // The inner photo-aspect wrapper. Frame is full-bleed (fills the
   // editor canvas, light-dark background); the wrapper inside it sizes
@@ -1136,8 +1150,19 @@ function DevelopStageSplit({
   };
 
   return (
-    <ResizablePanelGroup direction="horizontal" autoSaveId="develop-stage-v2" className="editor-stage">
-      <ResizablePanel id="develop-main" order={1} defaultSize={72} minSize={45} className="editor-main-panel">
+    <ResizablePanelGroup direction="horizontal" autoSaveId="develop-stage-v3" className="editor-stage">
+      <ResizablePanel
+        id="develop-sidepanel"
+        order={1}
+        defaultSize={20}
+        minSize={14}
+        maxSize={32}
+        className="editor-sidepanel-panel"
+      >
+        <DevelopSidePanel />
+      </ResizablePanel>
+      <ResizableHandle className="editor-resize-handle" />
+      <ResizablePanel id="develop-main" order={2} defaultSize={52} minSize={30} className="editor-main-panel">
         <div className="editor-main">
           <div className="editor-canvas">
             <div className="develop-canvas-toolbar">
@@ -1317,6 +1342,132 @@ function DevelopStageSplit({
                 )}
               </div>
             </div>
+            {drawMaskKind && drawMaskKind !== 'brush' && photo && (
+              <div
+                className="develop-mask-draw-overlay"
+                data-kind={drawMaskKind}
+                onPointerDown={(e) => {
+                  const wrapper = zoomWrapperRef.current;
+                  if (!wrapper) return;
+                  e.currentTarget.setPointerCapture?.(e.pointerId);
+                  const rect = wrapper.getBoundingClientRect();
+                  const x = clampNumber((e.clientX - rect.left) / rect.width, 0, 1);
+                  const y = clampNumber((e.clientY - rect.top) / rect.height, 0, 1);
+                  drawStartRef.current = { startX: x, startY: y };
+                  setDrawPreview({ startX: x, startY: y, endX: x, endY: y });
+                }}
+                onPointerMove={(e) => {
+                  if (!drawStartRef.current) return;
+                  const wrapper = zoomWrapperRef.current;
+                  if (!wrapper) return;
+                  const rect = wrapper.getBoundingClientRect();
+                  const x = clampNumber((e.clientX - rect.left) / rect.width, 0, 1);
+                  const y = clampNumber((e.clientY - rect.top) / rect.height, 0, 1);
+                  setDrawPreview({ ...drawStartRef.current, endX: x, endY: y });
+                }}
+                onPointerUp={(e) => {
+                  const start = drawStartRef.current;
+                  drawStartRef.current = null;
+                  e.currentTarget.releasePointerCapture?.(e.pointerId);
+                  if (!start) {
+                    setDrawPreview(null);
+                    return;
+                  }
+                  const wrapper = zoomWrapperRef.current;
+                  if (!wrapper) return;
+                  const rect = wrapper.getBoundingClientRect();
+                  const endX = clampNumber((e.clientX - rect.left) / rect.width, 0, 1);
+                  const endY = clampNumber((e.clientY - rect.top) / rect.height, 0, 1);
+                  setDrawPreview(null);
+                  if (focusedPhotoId == null) {
+                    setDrawMaskKind(null);
+                    return;
+                  }
+                  if (drawMaskKind === 'linear_gradient') {
+                    const top = Math.min(start.startY, endY);
+                    const bottom = Math.max(start.startY, endY);
+                    if (Math.abs(bottom - top) < 0.01) {
+                      setDrawMaskKind(null);
+                      return;
+                    }
+                    drawCreateMask.mutate(
+                      {
+                        photo_id: focusedPhotoId,
+                        name: 'Linear gradient',
+                        source: 'linear_gradient',
+                        mode: 'normal',
+                        payload_storage: 'inline',
+                        mask_payload: { kind: 'linear_gradient', top, bottom },
+                        operations: { ...identityOperations(), exposure: 0.35 },
+                      },
+                      {
+                        onSuccess: (maskId) => setSelectedMaskId(maskId),
+                        onError: (err) => warn('linear gradient draw failed', err),
+                      },
+                    );
+                  } else if (drawMaskKind === 'radial_gradient') {
+                    const radius = clampNumber(
+                      Math.hypot(endX - start.startX, endY - start.startY),
+                      0.05,
+                      0.95,
+                    );
+                    drawCreateMask.mutate(
+                      {
+                        photo_id: focusedPhotoId,
+                        name: 'Radial gradient',
+                        source: 'radial_gradient',
+                        mode: 'normal',
+                        payload_storage: 'inline',
+                        mask_payload: {
+                          kind: 'radial_gradient',
+                          cx: start.startX,
+                          cy: start.startY,
+                          radius,
+                          feather: 0.4,
+                        },
+                        operations: { ...identityOperations(), exposure: 0.35 },
+                      },
+                      {
+                        onSuccess: (maskId) => setSelectedMaskId(maskId),
+                        onError: (err) => warn('radial gradient draw failed', err),
+                      },
+                    );
+                  }
+                  setDrawMaskKind(null);
+                }}
+                onPointerCancel={() => {
+                  drawStartRef.current = null;
+                  setDrawPreview(null);
+                }}
+              >
+                {drawPreview && drawMaskKind === 'linear_gradient' && (
+                  <div
+                    className="develop-mask-draw-line"
+                    style={{
+                      top: `${Math.min(drawPreview.startY, drawPreview.endY) * 100}%`,
+                      height: `${Math.abs(drawPreview.endY - drawPreview.startY) * 100}%`,
+                    }}
+                  />
+                )}
+                {drawPreview && drawMaskKind === 'radial_gradient' && (
+                  <div
+                    className="develop-mask-draw-circle"
+                    style={(() => {
+                      const r = Math.hypot(
+                        drawPreview.endX - drawPreview.startX,
+                        drawPreview.endY - drawPreview.startY,
+                      );
+                      return {
+                        left: `${(drawPreview.startX - r) * 100}%`,
+                        top: `${(drawPreview.startY - r) * 100}%`,
+                        width: `${r * 200}%`,
+                        height: `${r * 200}%`,
+                      };
+                    })()}
+                  />
+                )}
+              </div>
+            )}
             {cropMode && (
               <div className="develop-crop-toolbar">
                 <span className="mono">Crop</span>
@@ -1366,7 +1517,7 @@ function DevelopStageSplit({
       <ResizableHandle className="editor-resize-handle" />
       <ResizablePanel
         id="develop-inspector"
-        order={2}
+        order={3}
         defaultSize={28}
         minSize={20}
         maxSize={45}

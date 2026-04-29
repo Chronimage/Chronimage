@@ -314,16 +314,18 @@ describe('DevelopScreen', () => {
       ],
     );
 
+    // DevelopScreen now renders the sidepanel internally as the leftmost
+    // ResizablePanel, so the test no longer needs to mount it separately.
     render(
       <React.StrictMode>
-        <DevelopSidePanel />
         <DevelopScreen />
       </React.StrictMode>,
       { wrapper },
     );
 
     await screen.findByText(/photo 1/i);
-    fireEvent.click(screen.getByRole('button', { name: 'Scene' }));
+    // Preset categories migrated to shadcn ToggleGroup (radio role).
+    fireEvent.click(screen.getByRole('radio', { name: 'Scene' }));
     invoke.mockClear();
     fireEvent.click(screen.getByRole('button', { name: /enhance sky/i }));
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
@@ -453,14 +455,17 @@ describe('DevelopScreen', () => {
 describe('DevelopSidePanel', () => {
   it('switches preset category on click', () => {
     render(<DevelopSidePanel />, { wrapper });
-    const sceneBtn = screen.getByRole('button', { name: 'Scene' });
+    // Preset categories are now a shadcn ToggleGroup (single-select), so
+    // each option is a radio. The selected one carries `aria-checked`,
+    // not `aria-pressed`.
+    const sceneBtn = screen.getByRole('radio', { name: 'Scene' });
     fireEvent.click(sceneBtn);
-    expect(sceneBtn).toHaveAttribute('aria-pressed', 'true');
+    expect(sceneBtn).toHaveAttribute('aria-checked', 'true');
   });
 
   it('shows the empty-state message in the custom-presets tab when none exist', () => {
     render(<DevelopSidePanel />, { wrapper });
-    fireEvent.click(screen.getByRole('button', { name: /my presets/i }));
+    fireEvent.click(screen.getByRole('radio', { name: /my presets/i }));
     expect(screen.getByText(/no custom presets yet/i)).toBeInTheDocument();
   });
 });
