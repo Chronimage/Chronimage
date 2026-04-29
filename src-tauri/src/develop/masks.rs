@@ -246,7 +246,7 @@ pub fn apply_mask_layers(
         if ops.is_identity() {
             continue;
         }
-        let alpha = rasterize_mask(mask, w as usize, h as usize)?;
+        let alpha = rasterize_mask(mask, Some(img), w as usize, h as usize)?;
         compose_mask_layer(&mut layers, &mut coverage, ops, alpha, &mask.mode);
     }
 
@@ -269,12 +269,31 @@ pub fn apply_mask_layers(
     Ok(crate::develop::pipeline::apply_spatial(out, global_ops))
 }
 
-pub fn rasterize_mask(mask: &DevelopMask, w: usize, h: usize) -> AppResult<Vec<f32>> {
+/// Rasterise a `DevelopMask` to a per-pixel `[0, 1]` alpha matte at
+/// `(w, h)`.
+///
+/// The optional `source_img` is the photo the mask is being applied
+/// to — passing it lets pixel-driven mask kinds (`color_range`,
+/// `luminance_range`) sample the actual image data. `None` is
+/// supported for callers that only have geometric masks (gradients,
+/// bitmaps); pixel-driven kinds fall back to a fully-transparent
+/// matte in that case so missing context doesn't surface as an error.
+pub fn rasterize_mask(
+    mask: &DevelopMask,
+    source_img: Option<&RgbImage>,
+    w: usize,
+    h: usize,
+) -> AppResult<Vec<f32>> {
     let payload = mask.payload()?;
-    rasterize_payload(&payload, w, h)
+    rasterize_payload(&payload, source_img, w, h)
 }
 
-fn rasterize_payload(payload: &serde_json::Value, w: usize, h: usize) -> AppResult<Vec<f32>> {
+fn rasterize_payload(
+    payload: &serde_json::Value,
+    source_img: Option<&RgbImage>,
+    w: usize,
+    h: usize,
+) -> AppResult<Vec<f32>> {
     if w == 0 || h == 0 {
         return Ok(Vec::new());
     }
@@ -285,6 +304,12 @@ fn rasterize_payload(payload: &serde_json::Value, w: usize, h: usize) -> AppResu
     let mut alpha = vec![0.0_f32; w * h];
     match kind {
         "bitmap" => return rasterize_bitmap_payload(payload, w, h),
+        "color_range" => {
+            rasterize_color_range_payload(payload, source_img, w, h, &mut alpha);
+        }
+        "luminance_range" => {
+            rasterize_luminance_range_payload(payload, source_img, w, h, &mut alpha);
+        }
         "full" | "all" | "prompt" => {
             alpha.fill(1.0);
         }
@@ -396,6 +421,144 @@ fn rasterize_bitmap_payload(
         imageops::resize(&buf, w as u32, h as u32, imageops::FilterType::Triangle)
     };
     Ok(resized.pixels().map(|p| p.0[0] as f32 / 255.0).collect())
+}
+
+/// Rasterise a `color_range` mask: select pixels whose colour distance
+/// to a sampled `target_rgb` is within `tolerance`, with a soft
+/// `feather` band on the outside.
+///
+/// Distance is RGB Euclidean in `[0, 1]` linear-ish space — close
+/// enough to perceptual ΔE for "select all the orange flowers" without
+/// pulling in a full Lab conversion crate. The smoothstep edges are
+/// `tolerance·(1 − feather)` (fully selected) and `tolerance·(1 + feather)`
+/// (no longer selected) so increasing feather widens the soft band
+/// symmetrically without changing the threshold.
+///
+/// Payload schema:
+/// ```json
+/// {
+///   "kind": "color_range",
+///   "target_rgb": [180, 100, 50],   // 0–255 sample from the eyedropper
+///   "tolerance": 0.25,              // 0–1, sphere radius in unit RGB
+///   "feather":   0.40               // 0–1, soft band as a fraction
+/// }
+/// ```
+fn rasterize_color_range_payload(
+    payload: &serde_json::Value,
+    source_img: Option<&RgbImage>,
+    w: usize,
+    h: usize,
+    alpha: &mut [f32],
+) {
+    let Some(src) = source_img else {
+        // No source image → mask covers nothing. Caller's choice
+        // whether to surface that as an error; we keep it transparent
+        // so a missing-context bug looks like "the slider does
+        // nothing" rather than "the rasteriser panicked".
+        alpha.fill(0.0);
+        return;
+    };
+    let target = json_rgb_array(payload, "target_rgb").unwrap_or([128, 128, 128]);
+    let tolerance = json_f32(payload, "tolerance")
+        .unwrap_or(0.25)
+        .clamp(0.005, 1.732);
+    let feather = json_f32(payload, "feather").unwrap_or(0.4).clamp(0.0, 1.0);
+    let edge0 = tolerance * (1.0 - feather);
+    let edge1 = (tolerance * (1.0 + feather)).max(edge0 + 1e-4);
+    let tr = target[0] as f32 / 255.0;
+    let tg = target[1] as f32 / 255.0;
+    let tb = target[2] as f32 / 255.0;
+
+    let resized;
+    let pixels: &[u8] = if src.width() as usize == w && src.height() as usize == h {
+        src.as_raw()
+    } else {
+        // The mask is rasterised at preview size, not source size, so
+        // the eyedropper pixel chosen at full resolution still lines up
+        // visually after the resize. Triangle filtering is fine here —
+        // no need for the better-quality Lanczos because we're going
+        // to threshold the result with a smoothstep anyway.
+        resized = imageops::resize(src, w as u32, h as u32, imageops::FilterType::Triangle);
+        resized.as_raw()
+    };
+    for k in 0..(w * h) {
+        let r = pixels[k * 3] as f32 / 255.0;
+        let g = pixels[k * 3 + 1] as f32 / 255.0;
+        let b = pixels[k * 3 + 2] as f32 / 255.0;
+        let dr = r - tr;
+        let dg = g - tg;
+        let db = b - tb;
+        let d = (dr * dr + dg * dg + db * db).sqrt();
+        // 1 inside tolerance, smooth falloff to 0 across the feather band.
+        alpha[k] = (1.0 - smoothstep(edge0, edge1, d)).clamp(0.0, 1.0);
+    }
+}
+
+/// Rasterise a `luminance_range` mask: select pixels whose rec.709
+/// luma falls inside `[lo, hi]`, with a `feather` band on each edge.
+///
+/// Useful for "darken everything below 30% luma" and similar
+/// tone-targeted edits without a full curves panel.
+///
+/// Payload schema:
+/// ```json
+/// {
+///   "kind": "luminance_range",
+///   "lo":      0.30,    // 0–1, lower bound (start of full selection)
+///   "hi":      0.70,    // 0–1, upper bound (end of full selection)
+///   "feather": 0.10     // 0–1, soft band added on each side of [lo, hi]
+/// }
+/// ```
+fn rasterize_luminance_range_payload(
+    payload: &serde_json::Value,
+    source_img: Option<&RgbImage>,
+    w: usize,
+    h: usize,
+    alpha: &mut [f32],
+) {
+    let Some(src) = source_img else {
+        alpha.fill(0.0);
+        return;
+    };
+    let raw_lo = json_f32(payload, "lo").unwrap_or(0.3).clamp(0.0, 1.0);
+    let raw_hi = json_f32(payload, "hi").unwrap_or(0.7).clamp(0.0, 1.0);
+    let lo = raw_lo.min(raw_hi);
+    let hi = raw_lo.max(raw_hi).max(lo + 1e-4);
+    let feather = json_f32(payload, "feather").unwrap_or(0.1).clamp(0.0, 0.5);
+
+    let resized;
+    let pixels: &[u8] = if src.width() as usize == w && src.height() as usize == h {
+        src.as_raw()
+    } else {
+        resized = imageops::resize(src, w as u32, h as u32, imageops::FilterType::Triangle);
+        resized.as_raw()
+    };
+    let edge_lo_outer = (lo - feather).max(0.0);
+    let edge_hi_outer = (hi + feather).min(1.0);
+    for k in 0..(w * h) {
+        let r = pixels[k * 3] as f32 / 255.0;
+        let g = pixels[k * 3 + 1] as f32 / 255.0;
+        let b = pixels[k * 3 + 2] as f32 / 255.0;
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        // Two smoothsteps form a soft window: ramp up from
+        // `edge_lo_outer` to `lo`, then back down from `hi` to
+        // `edge_hi_outer`. Multiplied so we get 1 only inside
+        // `[lo, hi]` and 0 outside the feathered band.
+        let rise = smoothstep(edge_lo_outer, lo, luma);
+        let fall = 1.0 - smoothstep(hi, edge_hi_outer, luma);
+        alpha[k] = (rise * fall).clamp(0.0, 1.0);
+    }
+}
+
+fn json_rgb_array(payload: &serde_json::Value, key: &str) -> Option<[u8; 3]> {
+    let arr = payload.get(key)?.as_array()?;
+    if arr.len() != 3 {
+        return None;
+    }
+    let r = arr[0].as_f64()?.clamp(0.0, 255.0) as u8;
+    let g = arr[1].as_f64()?.clamp(0.0, 255.0) as u8;
+    let b = arr[2].as_f64()?.clamp(0.0, 255.0) as u8;
+    Some([r, g, b])
 }
 
 fn compose_mask_layer(
@@ -688,9 +851,125 @@ mod tests {
             "format": "png-luma8",
             "data_b64": png_b64,
         });
-        let alpha = rasterize_payload(&payload, 4, 4).expect("rasterized");
+        let alpha = rasterize_payload(&payload, None, 4, 4).expect("rasterized");
         assert_eq!(alpha.len(), 16);
         assert!(alpha.iter().all(|a| (0.0..=1.0).contains(a)));
+    }
+
+    #[test]
+    fn color_range_rasterizer_selects_pixels_close_to_target() {
+        // 8×4 image: left half pure red, right half pure blue. A
+        // color_range mask targeting red should pick the left half
+        // and exclude the right half regardless of feather.
+        let mut img = RgbImage::new(8, 4);
+        for y in 0..4 {
+            for x in 0..8 {
+                let c = if x < 4 {
+                    image::Rgb([220, 30, 30])
+                } else {
+                    image::Rgb([30, 30, 220])
+                };
+                img.put_pixel(x, y, c);
+            }
+        }
+        let payload = serde_json::json!({
+            "kind": "color_range",
+            "target_rgb": [220, 30, 30],
+            "tolerance": 0.2,
+            "feather": 0.3,
+        });
+        let alpha = rasterize_payload(&payload, Some(&img), 8, 4).expect("rasterized");
+        assert_eq!(alpha.len(), 32);
+        // Left half: high alpha (close to target). Right half: zero.
+        for y in 0..4 {
+            for x in 0..4 {
+                let a = alpha[y * 8 + x];
+                assert!(a > 0.95, "left-half pixel ({x},{y}) alpha {a} not solid");
+            }
+            for x in 4..8 {
+                let a = alpha[y * 8 + x];
+                assert!(
+                    a < 0.05,
+                    "right-half pixel ({x},{y}) alpha {a} should be zero"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn color_range_rasterizer_returns_zero_alpha_without_source() {
+        // Defensive contract: pixel-driven kinds need source pixels.
+        // Without them we MUST NOT panic and MUST NOT return a fully
+        // selected mask — both surface as user-visible bugs.
+        let payload = serde_json::json!({
+            "kind": "color_range",
+            "target_rgb": [128, 128, 128],
+            "tolerance": 0.5,
+            "feather": 0.5,
+        });
+        let alpha = rasterize_payload(&payload, None, 4, 4).expect("rasterized");
+        assert_eq!(alpha.len(), 16);
+        assert!(alpha.iter().all(|a| *a == 0.0));
+    }
+
+    #[test]
+    fn luminance_range_rasterizer_picks_band_and_feathers_outside() {
+        // Luma ramp 0 → 1 across width. A range mask with [0.3, 0.7]
+        // should be ~1 inside that band and ~0 well outside it, with
+        // a soft feathered edge in between.
+        let w = 100;
+        let h = 1;
+        let mut img = RgbImage::new(w, h);
+        for x in 0..w {
+            let v = ((x as f32 / (w - 1) as f32) * 255.0).round() as u8;
+            img.put_pixel(x, 0, image::Rgb([v, v, v]));
+        }
+        let payload = serde_json::json!({
+            "kind": "luminance_range",
+            "lo": 0.3,
+            "hi": 0.7,
+            "feather": 0.05,
+        });
+        let alpha =
+            rasterize_payload(&payload, Some(&img), w as usize, h as usize).expect("rasterized");
+        // Inside the band: solidly selected.
+        for (x, a) in alpha.iter().enumerate().take(60).skip(40) {
+            assert!(*a > 0.95, "luma ~{x}/100 alpha {a} not solid");
+        }
+        // Far below `lo`: not selected.
+        for (x, a) in alpha.iter().enumerate().take(15) {
+            assert!(*a < 0.05, "luma ~{x}/100 alpha {a} should be zero");
+        }
+        // Far above `hi`: not selected.
+        for (x, a) in alpha.iter().enumerate().take(w as usize).skip(85) {
+            assert!(*a < 0.05, "luma ~{x}/100 alpha {a} should be zero");
+        }
+    }
+
+    #[test]
+    fn luminance_range_rasterizer_swaps_inverted_lo_hi() {
+        // Defensive: if a UI bug passes lo > hi, the mask must still
+        // pick the intended luma band rather than producing nothing.
+        let w = 100;
+        let h = 1;
+        let mut img = RgbImage::new(w, h);
+        for x in 0..w {
+            let v = ((x as f32 / (w - 1) as f32) * 255.0).round() as u8;
+            img.put_pixel(x, 0, image::Rgb([v, v, v]));
+        }
+        let payload = serde_json::json!({
+            "kind": "luminance_range",
+            "lo": 0.7,
+            "hi": 0.3,
+            "feather": 0.0,
+        });
+        let alpha =
+            rasterize_payload(&payload, Some(&img), w as usize, h as usize).expect("rasterized");
+        let middle_alpha: f32 = alpha[40..60].iter().sum::<f32>() / 20.0;
+        assert!(
+            middle_alpha > 0.9,
+            "swapped lo/hi must still select the [0.3, 0.7] band, got mean {middle_alpha}"
+        );
     }
 
     #[test]

@@ -50,6 +50,7 @@ import {
 import { warn } from '../../util/log';
 import { DevelopSidePanel } from './DevelopSidePanel';
 import { EditorInspector } from './EditorInspector';
+import { BrushMaskGizmo, RadialMaskGizmo } from './MaskGizmo';
 import {
   type DevelopTab,
   type DevelopValues,
@@ -449,6 +450,24 @@ export function DevelopScreen() {
     queueMaskOperationUpdate(selectedMask.id, nextOps);
   }, [queueMaskOperationUpdate, selectedMask]);
 
+  // On-canvas gizmo drag handler — bulk-replaces the mask payload
+  // (cx / cy / radius / feather) with the new geometry the user just
+  // dragged into. Debounced is unnecessary here because gizmos commit
+  // on pointer-up, not per move; one round-trip + preview refresh per
+  // drag is the right shape.
+  const updateMaskPayload = useCallback(
+    (maskId: number, payload: Record<string, unknown>) => {
+      updateMask.mutate(
+        { mask_id: maskId, mask_payload: payload },
+        {
+          onSuccess: () => refreshMaskPreview(),
+          onError: (e) => warn('develop_mask_update (payload) failed', e),
+        },
+      );
+    },
+    [refreshMaskPreview, updateMask],
+  );
+
   const saveEdits = useCallback(() => {
     if (focusedPhotoId == null) return;
     saveMut.mutate({ photoId: focusedPhotoId, operations: currentOperations() });
@@ -600,6 +619,7 @@ export function DevelopScreen() {
           onGlobalValuesChange={updateValues}
           setCropMode={setCropMode}
           onClearMaskSelection={() => setSelectedMaskId(null)}
+          onMaskPayloadUpdate={updateMaskPayload}
         />
       )}
     </div>
@@ -731,6 +751,7 @@ interface DevelopStageSplitProps {
   cropMode: boolean;
   setCropMode: (active: boolean) => void;
   onClearMaskSelection: () => void;
+  onMaskPayloadUpdate: (maskId: number, payload: Record<string, unknown>) => void;
 }
 
 function DevelopStageSplit({
@@ -757,6 +778,7 @@ function DevelopStageSplit({
   cropMode,
   setCropMode,
   onClearMaskSelection,
+  onMaskPayloadUpdate,
 }: DevelopStageSplitProps) {
   const [zoom, setZoom] = useState(100);
   const [panX, setPanX] = useState(0);
@@ -765,6 +787,8 @@ function DevelopStageSplit({
   const drawMaskKind = useDevelopUi((s) => s.drawMaskKind);
   const setDrawMaskKind = useDevelopUi((s) => s.setDrawMaskKind);
   const setSelectedMaskId = useDevelopUi((s) => s.setSelectedMaskId);
+  const eyedropperMode = useDevelopUi((s) => s.eyedropperMode);
+  const setEyedropperMode = useDevelopUi((s) => s.setEyedropperMode);
   const drawCreateMask = useDevelopMaskCreate();
   const [drawPreview, setDrawPreview] = useState<{
     startX: number;
@@ -1295,6 +1319,26 @@ function DevelopStageSplit({
                     data-testid="selected-mask-overlay"
                   />
                 )}
+                {/* Lightroom-style on-canvas gizmos for editable mask
+                    kinds. Rendered above the mask overlay so the
+                    handles show through any green tint. The gizmo's
+                    parent SVG is `pointer-events: none` so wheel-zoom
+                    keeps working everywhere except directly over a
+                    handle — see `MaskGizmo.tsx`. */}
+                {selectedMask && selectedMask.source === 'radial_gradient' && !cropMode && (
+                  <RadialMaskGizmo
+                    mask={selectedMask}
+                    containerRef={zoomWrapperRef}
+                    onPayloadChange={(payload) => onMaskPayloadUpdate(selectedMask.id, payload)}
+                  />
+                )}
+                {selectedMask && selectedMask.source === 'brush' && !cropMode && (
+                  <BrushMaskGizmo
+                    mask={selectedMask}
+                    containerRef={zoomWrapperRef}
+                    onPayloadChange={(payload) => onMaskPayloadUpdate(selectedMask.id, payload)}
+                  />
+                )}
                 {showCropOverlay && (
                   <>
                     <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
@@ -1467,6 +1511,112 @@ function DevelopStageSplit({
                   />
                 )}
               </div>
+            )}
+            {/* Eyedropper overlay — armed by Color Range / Luminance
+                Range buttons in the side panel. Captures the next
+                pointer-down on the canvas, samples the pixel under
+                the cursor from the rendered preview JPEG, and posts a
+                pixel-driven mask. The preview is the most-recent
+                base64 data URL emitted by the backend, so the colour
+                the user clicks is the colour the rasteriser will
+                match against. */}
+            {eyedropperMode && photo && focusedPhotoId != null && preview && (
+              <div
+                className="develop-mask-eyedropper-overlay"
+                onPointerDown={(e) => {
+                  const wrapper = zoomWrapperRef.current;
+                  if (!wrapper) return;
+                  e.currentTarget.setPointerCapture?.(e.pointerId);
+                  const rect = wrapper.getBoundingClientRect();
+                  const xn = clampNumber((e.clientX - rect.left) / rect.width, 0, 1);
+                  const yn = clampNumber((e.clientY - rect.top) / rect.height, 0, 1);
+                  // Decode the preview into an in-memory canvas to
+                  // sample one pixel. Throwaway image → safe to
+                  // construct in-handler; the Promise resolves before
+                  // the next microtask given a data URL.
+                  const img = new Image();
+                  img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = img.naturalWidth;
+                    canvas.height = img.naturalHeight;
+                    const ctx = canvas.getContext('2d');
+                    if (!ctx) return;
+                    ctx.drawImage(img, 0, 0);
+                    const sx = Math.min(
+                      Math.max(0, Math.round(xn * (img.naturalWidth - 1))),
+                      img.naturalWidth - 1,
+                    );
+                    const sy = Math.min(
+                      Math.max(0, Math.round(yn * (img.naturalHeight - 1))),
+                      img.naturalHeight - 1,
+                    );
+                    const px = ctx.getImageData(sx, sy, 1, 1).data;
+                    // `getImageData` returns Uint8ClampedArray which TS
+                    // types as potentially-sparse; in practice the four
+                    // channels are always present for a 1×1 read, but
+                    // we coalesce to 0 to keep the typechecker happy.
+                    const r = px[0] ?? 0;
+                    const g = px[1] ?? 0;
+                    const b = px[2] ?? 0;
+                    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    if (eyedropperMode === 'color_range') {
+                      drawCreateMask.mutate(
+                        {
+                          photo_id: focusedPhotoId,
+                          name: 'Color range',
+                          source: 'color_range',
+                          mode: 'normal',
+                          payload_storage: 'inline',
+                          mask_payload: {
+                            kind: 'color_range',
+                            target_rgb: [r, g, b],
+                            tolerance: 0.25,
+                            feather: 0.4,
+                          },
+                          operations: { ...identityOperations(), exposure: 0.2 },
+                        },
+                        {
+                          onSuccess: (id) => setSelectedMaskId(id),
+                          onError: (err) => warn('color range mask create failed', err),
+                        },
+                      );
+                    } else {
+                      // luminance_range: pick a band centred on the
+                      // sampled luma, ± 12% by default (Lightroom's
+                      // initial range). User refines via the inspector.
+                      const center = luma / 255;
+                      const lo = Math.max(0, center - 0.12);
+                      const hi = Math.min(1, center + 0.12);
+                      drawCreateMask.mutate(
+                        {
+                          photo_id: focusedPhotoId,
+                          name: 'Luminance range',
+                          source: 'luminance_range',
+                          mode: 'normal',
+                          payload_storage: 'inline',
+                          mask_payload: {
+                            kind: 'luminance_range',
+                            lo,
+                            hi,
+                            feather: 0.1,
+                          },
+                          operations: { ...identityOperations(), exposure: 0.2 },
+                        },
+                        {
+                          onSuccess: (id) => setSelectedMaskId(id),
+                          onError: (err) => warn('luminance range mask create failed', err),
+                        },
+                      );
+                    }
+                    setEyedropperMode(null);
+                  };
+                  img.onerror = () => {
+                    warn('eyedropper preview load failed', img.src);
+                    setEyedropperMode(null);
+                  };
+                  img.src = preview;
+                }}
+              />
             )}
             {cropMode && (
               <div className="develop-crop-toolbar">

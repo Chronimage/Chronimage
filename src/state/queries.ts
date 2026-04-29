@@ -804,6 +804,7 @@ import {
   type DevelopHistoryRow,
   type DevelopMask,
   type DevelopMaskCreateRequest,
+  type DevelopMaskFaceEntry,
   type DevelopMaskGenerateReceipt,
   type DevelopMaskGenerateRequest,
   type DevelopMaskUpdateRequest,
@@ -818,6 +819,7 @@ import {
   developMaskCreate,
   developMaskDelete,
   developMaskGenerate,
+  developMaskListFaces,
   developMasksList,
   developMaskUpdate,
   developOpen,
@@ -950,6 +952,18 @@ export function useDevelopMasks(photoId: number | null) {
     queryKey: ['develop_masks', photoId],
     queryFn: () => developMasksList(photoId as number),
     enabled: photoId != null,
+  });
+}
+
+export function useDevelopMaskFaces(photoId: number | null) {
+  return useQuery<DevelopMaskFaceEntry[], Error>({
+    queryKey: ['develop_mask_faces', photoId],
+    queryFn: () => developMaskListFaces(photoId as number),
+    enabled: photoId != null,
+    // Faces are stored at import; they don't change while the editor
+    // is open. Cached aggressively so flipping between photos in the
+    // filmstrip doesn't refetch each time.
+    staleTime: 60_000,
   });
 }
 

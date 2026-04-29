@@ -14,7 +14,8 @@
  * directly from `@/components/ui/slider`.
  */
 
-import { useId } from 'react';
+import type { KeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 
 export interface SliderProps {
@@ -29,6 +30,19 @@ export interface SliderProps {
   readonly className?: string;
 }
 
+const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
+
+/// Format the current value for display in the editable read-out: signed
+/// integer with no leading zero, suffix appended. Used for both the
+/// passive "show me the number" mode and the initial draft when the user
+/// clicks into the input.
+function formatValue(value: number, step: number, suffix: string): string {
+  const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step)));
+  const abs = Math.abs(value).toFixed(decimals);
+  const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+  return `${sign}${abs}${suffix}`;
+}
+
 export function Slider({
   label,
   value,
@@ -41,7 +55,60 @@ export function Slider({
   className,
 }: SliderProps) {
   const id = useId();
-  const formatted = value > 0 ? `+${value}` : String(value);
+  const formatted = formatValue(value, step, suffix);
+
+  // Editable read-out: click the value or tab to it → swap to text-input
+  // mode, type a number, press Enter or blur to commit. Mirrors how
+  // Lightroom's adjustment rows behave so users can dial in an exact
+  // number without dragging the slider hair-thin distances.
+  const [draft, setDraft] = useState(formatted);
+  const [editing, setEditing] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Re-sync the draft whenever the upstream value changes — including
+  // after the user commits, which causes the parent to fire `onChange`
+  // with a clamped value that may not match what they typed.
+  useEffect(() => {
+    if (!editing) setDraft(formatted);
+  }, [editing, formatted]);
+
+  const commit = () => {
+    // Strip suffix + whitespace, then parse. Accepts `+12`, `-5.5`,
+    // `25%` (suffix retained for symmetry with the display form), and
+    // bare numbers. Anything unparseable reverts to the previous value.
+    const cleaned = draft.replace(suffix, '').trim();
+    const parsed = Number(cleaned);
+    if (Number.isFinite(parsed)) {
+      const next = clamp(parsed, min, max);
+      // Snap to step grid. Without this, typing `25.7` on an integer
+      // slider would round-trip to `25.7` then snap visually to `26`,
+      // which feels like the input is lying about what it accepted.
+      const snapped = step > 0 ? Math.round(next / step) * step : next;
+      onChange(snapped);
+    }
+    setEditing(false);
+  };
+
+  const handleKey = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.currentTarget.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      setDraft(formatted);
+      setEditing(false);
+      event.currentTarget.blur();
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      // Arrow keys nudge in step increments — the same behaviour the
+      // range input has, kept consistent so keyboard users get the same
+      // muscle memory whether they're focused on the slider or the
+      // value field.
+      event.preventDefault();
+      const delta = (event.key === 'ArrowUp' ? 1 : -1) * (event.shiftKey ? step * 10 : step);
+      const next = clamp(value + delta, min, max);
+      onChange(next);
+    }
+  };
 
   return (
     <div className={cn('slider-row', disabled && 'opacity-60', className)}>
@@ -59,10 +126,24 @@ export function Slider({
         aria-label={label}
         onChange={(e) => onChange(Number(e.target.value))}
       />
-      <span className="val">
-        {formatted}
-        {suffix}
-      </span>
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="decimal"
+        className="val"
+        value={editing ? draft : formatted}
+        disabled={disabled}
+        aria-label={`${label} value`}
+        onFocus={() => {
+          setDraft(formatted);
+          setEditing(true);
+          // Select-all on focus so the user can immediately type-replace.
+          requestAnimationFrame(() => inputRef.current?.select());
+        }}
+        onBlur={commit}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={handleKey}
+      />
     </div>
   );
 }

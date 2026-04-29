@@ -180,6 +180,13 @@ pub fn current() -> &'static Entitlements {
 - [ ] PGP fingerprint + key URL added to `SECURITY.md`
 - [ ] 5 exit-criterion test files (3 e2e + 1 docs + 1 manual checklist)
 
+### Mask toolkit follow-ups (post-PR #98)
+
+The Develop mask toolkit landed in pieces — radial / brush gizmos, color & luminance range, per-face Person N, depth range placeholder, and Lightroom-style click-to-edit slider read-outs. Two threads remain to be picked up later:
+
+- [ ] **Mask hover indicators** — small mask-type icons floating at each mask's centroid on the canvas, click to select. The infrastructure is there (each mask has a known centroid for radial/brush/gradient kinds; bitmap kinds default to image-center) but the overlay component, hit-test, and CSS work weren't worth bundling into the same PR. Estimate: ~150 LOC + tests.
+- [ ] **Depth Range** — UI placeholder exists with a "soon" badge and disabled state. To activate, bundle a small depth model (DPT-tiny or MiDaS-small, ~50–80 MB) and add a `depth_range` rasterizer in `develop::masks` that runs the model once, caches the depth map per photo, then thresholds it against `lo`/`hi`/`feather`. Worth its own PR with model bundling, throughput tests, and a Settings → Models entry.
+
 ### Go-live
 - [ ] Tag `v1.0.0-rc.1` → smoke-test the pipeline end-to-end
 - [ ] Tag `v1.0.0` → marketing site goes live, Buttondown announcement, HackerNews post

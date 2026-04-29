@@ -19,6 +19,7 @@ import {
   useDevelopMaskApplyPreview,
   useDevelopMaskCreate,
   useDevelopMaskDelete,
+  useDevelopMaskFaces,
   useDevelopMaskGenerate,
   useDevelopMasks,
   useDevelopMaskUpdate,
@@ -49,6 +50,23 @@ interface ActivePreset {
   baseOperations: DevelopOperations;
 }
 
+/// Tooltip / aria-label text for a mask preset button. Three branches —
+/// disabled-by-feature (e.g. depth model not bundled), disabled-because-
+/// no-photo, and the regular "create a local foo mask" message. Pulled
+/// out of the JSX so the inline render stays a single early-return-free
+/// expression and SonarLint doesn't fire S3358 on a nested ternary.
+function maskPresetTooltip(preset: MaskPreset, canMask: boolean, isDisabledKind: boolean): string {
+  if (isDisabledKind) {
+    // `disabledReason` only exists on the disabled variants of the
+    // discriminated union — narrow with `in` so the ready entries don't
+    // break the type.
+    const reason = 'disabledReason' in preset ? preset.disabledReason : null;
+    return reason ?? 'Not available yet';
+  }
+  if (!canMask) return 'Open a photo first';
+  return `Create a local ${preset.label.toLowerCase()} mask`;
+}
+
 export function DevelopSidePanel() {
   const [category, setCategory] = useState<PresetCategory>('face');
   const [activePresets, setActivePresets] = useState<Map<number, ActivePreset>>(() => new Map());
@@ -59,12 +77,18 @@ export function DevelopSidePanel() {
 
   const focusedPhotoId = useDevelopUi((s) => s.focusedPhotoId);
   const setPreview = useDevelopUi((s) => s.setPreview);
+  // Latest preview data URL — face-thumbnail circles read this through
+  // a `--mask-preview` CSS variable on the mask section so the cropped
+  // circles always reflect the in-flight global adjustments.
+  const sharedPreview = useDevelopUi((s) => s.preview);
   const currentOperations = useDevelopUi((s) => s.operations);
   const setOperations = useDevelopUi((s) => s.setOperations);
   const selectedMaskId = useDevelopUi((s) => s.selectedMaskId);
   const setSelectedMaskId = useDevelopUi((s) => s.setSelectedMaskId);
   const drawMaskKind = useDevelopUi((s) => s.drawMaskKind);
   const setDrawMaskKind = useDevelopUi((s) => s.setDrawMaskKind);
+  const eyedropperMode = useDevelopUi((s) => s.eyedropperMode);
+  const setEyedropperMode = useDevelopUi((s) => s.setEyedropperMode);
   const maskOverlayVisible = useDevelopUi((s) => s.maskOverlayVisible);
   const setMaskOverlayVisible = useDevelopUi((s) => s.setMaskOverlayVisible);
   const maskOverlayOpacity = useDevelopUi((s) => s.maskOverlayOpacity);
@@ -72,6 +96,7 @@ export function DevelopSidePanel() {
 
   const { data: allPresets = [] } = usePresets();
   const { data: masks = [] } = useDevelopMasks(focusedPhotoId);
+  const { data: faces = [] } = useDevelopMaskFaces(focusedPhotoId);
   const applyPreset = useDevelopApply();
   const applyAdaptivePreset = useDevelopAdaptivePresetApply();
   const createMask = useDevelopMaskCreate();
@@ -184,18 +209,37 @@ export function DevelopSidePanel() {
   }, [applyMaskPreview, focusedPhotoId, previewOperations, setPreview]);
 
   const runMask = useCallback(
-    (preset: MaskPreset) => {
+    (preset: MaskPreset, faceIndex?: number) => {
       if (!canMask || focusedPhotoId == null) return;
+      // Disabled presets (e.g. Depth Range — model not bundled) are
+      // surfaced as visible buttons for discoverability but must not
+      // start a generation. The button itself is `disabled` in the
+      // DOM; this guard is the belt-and-braces version.
+      if (preset.availability === 'disabled') return;
+      // Pixel-driven kinds need a colour / luma sample from the photo
+      // before we can build a mask payload — flip into eyedropper
+      // mode and let DevelopScreen handle the next canvas click. The
+      // sample handler creates the mask and clears this flag.
+      if (preset.id === 'color_range' || preset.id === 'luminance_range') {
+        setEyedropperMode(preset.id);
+        setDrawMaskKind(null);
+        setActiveMaskPresetId(preset.id);
+        return;
+      }
       setActiveMaskPresetId(preset.id);
       setMasking(true);
       setMaskError(null);
+      const exposure =
+        preset.id === 'sky' ? 0.35 : preset.id === 'background' || preset.id === 'landscape' ? -0.2 : 0.2;
+      const name = faceIndex != null ? `${preset.label} ${faceIndex + 1} mask` : `${preset.label} mask`;
       generateMask.mutate(
         {
           photo_id: focusedPhotoId,
-          name: `${preset.label} mask`,
+          name,
           source: preset.id,
           mode: maskMode,
-          operations: { ...identityOperations(), exposure: preset.id === 'sky' ? 0.35 : 0.2 },
+          operations: { ...identityOperations(), exposure },
+          face_index: faceIndex ?? null,
         },
         {
           onSuccess: (receipt) => {
@@ -207,7 +251,27 @@ export function DevelopSidePanel() {
         },
       );
     },
-    [canMask, focusedPhotoId, generateMask, maskMode, setPreview, setSelectedMaskId],
+    [
+      canMask,
+      focusedPhotoId,
+      generateMask,
+      maskMode,
+      setDrawMaskKind,
+      setEyedropperMode,
+      setPreview,
+      setSelectedMaskId,
+    ],
+  );
+
+  // Per-face Person N — uses the existing "person" preset but pins
+  // the face anchor to a specific row from `useDevelopMaskFaces`.
+  const personPreset = useMemo(() => MASK_PRESETS.find((p) => p.id === 'person'), []);
+  const runFaceMask = useCallback(
+    (faceIndex: number) => {
+      if (!personPreset) return;
+      runMask(personPreset, faceIndex);
+    },
+    [personPreset, runMask],
   );
 
   const createManualMask = useCallback(
@@ -373,7 +437,14 @@ export function DevelopSidePanel() {
             </span>
           }
         >
-          <div className="sidepanel-section-body mask-sidepanel">
+          <div
+            className="sidepanel-section-body mask-sidepanel"
+            style={
+              sharedPreview
+                ? ({ '--mask-preview': `url("${sharedPreview}")` } as Record<string, string>)
+                : undefined
+            }
+          >
             <button
               type="button"
               className={selectedMaskId == null ? 'mask-global-target active' : 'mask-global-target'}
@@ -404,20 +475,75 @@ export function DevelopSidePanel() {
             </div>
 
             <div className="mask-preset-grid">
-              {MASK_PRESETS.map((preset) => (
-                <button
-                  key={preset.id}
-                  type="button"
-                  className={activeMaskPresetId === preset.id ? 'btn primary' : 'btn'}
-                  disabled={!canMask}
-                  aria-disabled={!canMask}
-                  onClick={() => runMask(preset)}
-                  title={canMask ? `Create a local ${preset.label.toLowerCase()} mask` : 'Open a photo first'}
-                >
-                  <Icon name={preset.icon} size={12} /> {preset.label}
-                </button>
-              ))}
+              {MASK_PRESETS.map((preset) => {
+                const isDisabledKind = preset.availability === 'disabled';
+                const buttonDisabled = !canMask || isDisabledKind;
+                const tooltip = maskPresetTooltip(preset, canMask, isDisabledKind);
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`${activeMaskPresetId === preset.id ? 'btn primary' : 'btn'}${
+                      isDisabledKind ? ' is-coming-soon' : ''
+                    }`}
+                    disabled={buttonDisabled}
+                    aria-disabled={buttonDisabled}
+                    onClick={() => runMask(preset)}
+                    title={tooltip}
+                  >
+                    <Icon name={preset.icon} size={12} /> {preset.label}
+                  </button>
+                );
+              })}
             </div>
+
+            {faces.length > 0 && (
+              <fieldset className="mask-face-row" aria-label="Mask a specific person">
+                {faces.map((face, idx) => {
+                  const cx = face.x + face.w * 0.5;
+                  const cy = face.y + face.h * 0.5;
+                  const sizePct = Math.max(face.w, face.h) * 100;
+                  const tooltip = `Mask Person ${idx + 1} (face score ${face.quality.toFixed(2)})`;
+                  return (
+                    <button
+                      key={`${focusedPhotoId}-face-${face.index}`}
+                      type="button"
+                      className="mask-face-button"
+                      disabled={!canMask}
+                      onClick={() => runFaceMask(face.index)}
+                      title={tooltip}
+                      aria-label={tooltip}
+                      style={
+                        {
+                          '--face-cx': `${cx * 100}%`,
+                          '--face-cy': `${cy * 100}%`,
+                          '--face-zoom': `${Math.max(120, 320 / Math.max(sizePct, 4))}%`,
+                        } as Record<string, string>
+                      }
+                    >
+                      <span className="mask-face-thumb" aria-hidden="true" />
+                      <span className="mask-face-label">Person {idx + 1}</span>
+                    </button>
+                  );
+                })}
+              </fieldset>
+            )}
+
+            {eyedropperMode && (
+              <div className="mask-draw-hint">
+                {eyedropperMode === 'color_range'
+                  ? 'Click on the photo to sample a colour for the Color Range mask.'
+                  : 'Click on the photo to sample a luma value for the Luminance Range mask.'}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setEyedropperMode(null)}
+                  style={{ marginLeft: 'auto' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
 
             <div className="mask-preset-grid">
               <button

@@ -1686,6 +1686,38 @@ select {
   color: var(--fg);
   text-align: right;
   font-feature-settings: "tnum";
+  /* The value used to be a `<span>`; it's now an editable
+     `<input type="text">` (Lightroom-style click-to-type read-out).
+     Strip the default input chrome so it visually matches the old
+     span when idle, then surface the focus ring + cursor only when
+     the user activates it. */
+  min-width: 4ch;
+  padding: 0 2px;
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  cursor: text;
+  /* Reserve enough width that two-digit + sign + suffix never wraps;
+     the `field-sizing: content` is progressively-enhanced and
+     ignored on browsers that don't support it. */
+  field-sizing: content;
+}
+.slider-row .val:hover:not(:disabled) {
+  border-color: var(--border-mute);
+  background: var(--surface-1);
+}
+.slider-row .val:focus,
+.slider-row .val:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface-1);
+  box-shadow: 0 0 0 1px var(--accent);
+  text-align: center;
+}
+.slider-row .val:disabled {
+  cursor: not-allowed;
+  color: var(--fg-mute);
 }
 .slider-row input[type="range"] {
   -webkit-appearance: none;
@@ -3188,6 +3220,132 @@ select {
   border-radius: 50%;
   background: color-mix(in oklch, var(--accent) 14%, transparent);
   pointer-events: none;
+}
+
+/* === On-canvas mask gizmos (radial / brush) ===================
+   Lightroom-style two-circle radial + single-circle brush handles.
+   The parent `<svg>` is `pointer-events: none` so wheel-zoom keeps
+   working over the photo; only the rings + dots (re-enabled inline
+   via `pointer-events: auto`) accept drag input. */
+.mask-gizmo {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /* viewBox is unitless 0..100 so radii etc. line up with the
+     normalised payload values; preserveAspectRatio="none" lets the
+     SVG stretch to non-square canvases without distorting the math. */
+  overflow: visible;
+  z-index: 5;
+}
+.mask-gizmo-fill {
+  fill: color-mix(in oklch, var(--accent) 22%, transparent);
+}
+.mask-gizmo-ring {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 0.4;
+  vector-effect: non-scaling-stroke;
+  paint-order: stroke;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.55));
+}
+.mask-gizmo-ring.inner {
+  stroke-dasharray: 1.5 1.2;
+  stroke-width: 0.3;
+}
+.mask-gizmo-handle {
+  fill: var(--bg);
+  stroke: var(--accent);
+  stroke-width: 0.3;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.6));
+  transition: transform 80ms ease;
+}
+.mask-gizmo-handle:hover {
+  fill: var(--accent);
+}
+.mask-gizmo-handle.centre {
+  fill: var(--accent);
+  stroke: var(--bg);
+}
+
+/* === Eyedropper overlay (color / luminance range mask) ========
+   Sits on top of the canvas only while `eyedropperMode` is set in the
+   store. Tints the canvas faintly so the user knows they're in pick
+   mode, captures the next pointer-down, samples a pixel from the
+   preview and posts a pixel-driven mask. */
+.develop-mask-eyedropper-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  cursor: crosshair;
+  background: color-mix(in oklch, var(--bg) 18%, transparent);
+}
+
+/* === Face-thumbnail row in the mask sidepanel =================
+   Renders one circular crop per detected face under the preset grid.
+   The crop is a pure CSS background-position trick: the photo's
+   filename is too expensive to re-fetch as a separate thumbnail, so
+   we re-use the editor preview via a `--mask-preview` custom property
+   set on the parent panel (DevelopSidePanel injects it from the
+   shared `useDevelopUi.preview` URL). */
+.mask-face-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+.mask-face-button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.mask-face-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.mask-face-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-2) var(--mask-preview, none) center / cover no-repeat;
+  background-position: var(--face-cx) var(--face-cy);
+  background-size: var(--face-zoom);
+  border: 1.5px solid color-mix(in oklch, var(--accent) 70%, var(--bg));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.mask-face-button:hover .mask-face-thumb {
+  border-color: var(--accent);
+}
+.mask-face-label {
+  font-size: var(--text-2xs);
+  color: var(--fg-mute);
+  letter-spacing: var(--tracking-mono);
+}
+
+/* === "Coming soon" disabled mask preset (Depth Range etc.) ====
+   Surfaces the button so users know the feature exists, but visually
+   distinguishes it from clickable presets so the disabled state isn't
+   surprising. */
+.mask-preset-grid .btn.is-coming-soon {
+  opacity: 0.45;
+  border-style: dashed;
+}
+.mask-preset-grid .btn.is-coming-soon::after {
+  content: 'soon';
+  margin-left: var(--space-1);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-mono);
+  color: var(--fg-mute);
 }
 
 /* === Mask draw hint (sidepanel) =============================== */
