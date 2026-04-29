@@ -3,11 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { ConfirmDialog } from './ConfirmDialog';
 
 describe('<ConfirmDialog />', () => {
-  it('renders nothing when closed', () => {
-    const { container } = render(
+  it('renders no dialog content when closed', () => {
+    render(
       <ConfirmDialog open={false} title="Test" confirmLabel="Go" onCancel={() => {}} onConfirm={() => {}} />,
     );
-    expect(container.firstChild).toBeNull();
+    expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 
   it('renders title + description when open', () => {
@@ -49,7 +49,6 @@ describe('<ConfirmDialog />', () => {
       />,
     );
 
-    // Default: 'a' checked, 'b' unchecked.
     fireEvent.click(screen.getByText('OK'));
     expect(onConfirm).toHaveBeenCalledTimes(1);
     const firstCall = onConfirm.mock.calls[0]?.[0] as Set<string>;
@@ -57,10 +56,12 @@ describe('<ConfirmDialog />', () => {
     expect(firstCall.has('b')).toBe(false);
   });
 
-  it('ESC key triggers onCancel', () => {
+  it('ESC key triggers onCancel via Radix dialog dismissal', () => {
     const onCancel = vi.fn();
     render(<ConfirmDialog open title="T" confirmLabel="OK" onCancel={onCancel} onConfirm={() => {}} />);
-    fireEvent.keyDown(window, { key: 'Escape' });
+    // Radix listens for Escape on the dialog content; firing via the
+    // dialog element ensures the close path runs.
+    fireEvent.keyDown(screen.getByRole('alertdialog'), { key: 'Escape' });
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
@@ -70,7 +71,7 @@ describe('<ConfirmDialog />', () => {
     render(<ConfirmDialog open title="T" confirmLabel="OK" busy onCancel={onCancel} onConfirm={onConfirm} />);
     expect((screen.getByText('Cancel') as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByText('Working…') as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('alertdialog'), { key: 'Escape' });
     expect(onCancel).not.toHaveBeenCalled();
   });
 });

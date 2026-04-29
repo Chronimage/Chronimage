@@ -5,7 +5,15 @@
  * CopyEdits hit the `edits` table via the develop commands.
  */
 
-import { type CSSProperties, type PointerEvent, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { Chip } from '../../primitives/Chip';
 import { Icon } from '../../primitives/Icon';
 import { Placeholder } from '../../primitives/Placeholder';
@@ -863,7 +871,7 @@ function DevelopStageSplit({
 
   const startCropDrag = (
     kind: 'move' | 'nw' | 'ne' | 'sw' | 'se',
-    event: PointerEvent<HTMLButtonElement | HTMLDivElement>,
+    event: ReactPointerEvent<HTMLButtonElement | HTMLDivElement>,
   ) => {
     if (!cropMode) return;
     event.preventDefault();
@@ -882,7 +890,7 @@ function DevelopStageSplit({
     cropDragRef.current = nextDrag;
   };
 
-  const updateCropDrag = (event: PointerEvent<HTMLDivElement>) => {
+  const updateCropDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const activeDrag = cropDragRef.current;
     // Crop coords are % of the image. The wrapper has the photo aspect
     // and is centered inside the (now full-bleed) frame, so divide by
@@ -945,10 +953,20 @@ function DevelopStageSplit({
     setPanY(0);
   }, [photo.id]);
 
-  // Mouse-wheel cursor-anchored zoom. React 19's onWheel is a passive
-  // listener and can't preventDefault, which means the page would scroll
-  // every time you spin the wheel over the canvas. Attach imperatively
-  // with passive:false so wheel events stay on the canvas.
+  // Wheel + trackpad-pinch zoom. React 19's onWheel is a passive listener
+  // and can't preventDefault, which means the page would scroll every time
+  // you spin the wheel over the canvas. Attach imperatively with
+  // passive:false so wheel events stay on the canvas.
+  //
+  // WebView2 / Chromium translate trackpad pinches into wheel events with
+  // `event.ctrlKey === true` (Windows + Linux) or smooth small-delta
+  // wheel events (macOS). We use an exponential factor based on
+  // `deltaY` magnitude so:
+  //   - mouse wheel (deltaY ≈ ±100)         → one ZOOM_STEP per tick
+  //   - trackpad scroll (deltaY ≈ ±1..10)   → smooth fine-grained zoom
+  //   - trackpad pinch  (deltaY + ctrlKey)  → smooth fine-grained zoom
+  // The exponent constant is tuned so a typical mouse-wheel tick still
+  // matches the toolbar's `+`/`-` step (1.25×).
   useEffect(() => {
     const frame = frameRef.current;
     if (!frame) return;
@@ -958,7 +976,11 @@ function DevelopStageSplit({
       const rect = frame.getBoundingClientRect();
       const cx = event.clientX - rect.left - rect.width / 2;
       const cy = event.clientY - rect.top - rect.height / 2;
-      const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+      // Pinches arrive with much smaller magnitudes than a mouse wheel;
+      // amplify them so a comfortable 2-finger pinch crosses a full
+      // ZOOM_STEP in a few frames.
+      const sensitivity = event.ctrlKey ? 0.02 : 0.0022;
+      const factor = Math.exp(-event.deltaY * sensitivity);
       setZoom((current) => {
         const next = clampNumber(current * factor, ZOOM_MIN, ZOOM_MAX);
         const ratio = next / current;
@@ -975,7 +997,80 @@ function DevelopStageSplit({
     };
   }, [cropMode]);
 
-  const startPanDrag = (event: PointerEvent<HTMLDivElement>) => {
+  // Touch pinch-to-zoom. On touch devices the browser doesn't synthesise
+  // wheel events for pinches, so we track 2 simultaneous pointers and
+  // derive a zoom factor from how their distance changes frame-to-frame.
+  // Single-finger drags fall through to the existing pan handler.
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const pointers = new Map<number, { x: number; y: number }>();
+    let pinchStartDist: number | null = null;
+    let pinchStartZoom = 100;
+    let pinchAnchor: { x: number; y: number } | null = null;
+
+    const distance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+      Math.hypot(a.x - b.x, a.y - b.y);
+
+    const onDown = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || cropMode) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        if (!a || !b) return;
+        pinchStartDist = distance(a, b);
+        pinchStartZoom = zoom;
+        const rect = frame.getBoundingClientRect();
+        pinchAnchor = {
+          x: (a.x + b.x) / 2 - rect.left - rect.width / 2,
+          y: (a.y + b.y) / 2 - rect.top - rect.height / 2,
+        };
+      }
+    };
+
+    const onMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || cropMode) return;
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pointers.size === 2 && pinchStartDist !== null && pinchAnchor) {
+        event.preventDefault();
+        const [a, b] = [...pointers.values()];
+        if (!a || !b) return;
+        const currentDist = distance(a, b);
+        const factor = currentDist / pinchStartDist;
+        const target = clampNumber(pinchStartZoom * factor, ZOOM_MIN, ZOOM_MAX);
+        const anchor = pinchAnchor;
+        setZoom((current) => {
+          const ratio = target / current;
+          setPanX((px) => anchor.x - (anchor.x - px) * ratio);
+          setPanY((py) => anchor.y - (anchor.y - py) * ratio);
+          return target;
+        });
+      }
+    };
+
+    const onEnd = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return;
+      pointers.delete(event.pointerId);
+      if (pointers.size < 2) {
+        pinchStartDist = null;
+        pinchAnchor = null;
+      }
+    };
+
+    frame.addEventListener('pointerdown', onDown);
+    frame.addEventListener('pointermove', onMove, { passive: false });
+    frame.addEventListener('pointerup', onEnd);
+    frame.addEventListener('pointercancel', onEnd);
+    return () => {
+      frame.removeEventListener('pointerdown', onDown);
+      frame.removeEventListener('pointermove', onMove);
+      frame.removeEventListener('pointerup', onEnd);
+      frame.removeEventListener('pointercancel', onEnd);
+    };
+  }, [cropMode, zoom]);
+
+  const startPanDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (cropMode) return;
     const target = event.target as HTMLElement;
     // Don't hijack drags that started on a crop handle — those are
@@ -993,7 +1088,7 @@ function DevelopStageSplit({
     };
   };
 
-  const movePanDrag = (event: PointerEvent<HTMLDivElement>) => {
+  const movePanDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = panDragRef.current;
     if (!drag) return;
     const dx = event.clientX - drag.startX;
@@ -1009,7 +1104,7 @@ function DevelopStageSplit({
     setPanY(drag.basePanY + dy);
   };
 
-  const stopPanDrag = (event: PointerEvent<HTMLDivElement>) => {
+  const stopPanDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = panDragRef.current;
     if (!drag) return;
     panDragRef.current = null;
@@ -1041,78 +1136,79 @@ function DevelopStageSplit({
   };
 
   return (
-    <div className="editor-stage">
-      <div className="editor-main">
-        <div className="editor-canvas">
-          <div className="develop-canvas-toolbar">
-            <button type="button" className="btn" onClick={zoomOut} aria-label="Zoom out">
-              -
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setZoomMenuOpen((o) => !o)}
-              aria-haspopup="menu"
-              aria-expanded={zoomMenuOpen}
+    <ResizablePanelGroup direction="horizontal" autoSaveId="develop-stage-v2" className="editor-stage">
+      <ResizablePanel id="develop-main" order={1} defaultSize={72} minSize={45} className="editor-main-panel">
+        <div className="editor-main">
+          <div className="editor-canvas">
+            <div className="develop-canvas-toolbar">
+              <button type="button" className="btn" onClick={zoomOut} aria-label="Zoom out">
+                -
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setZoomMenuOpen((o) => !o)}
+                aria-haspopup="menu"
+                aria-expanded={zoomMenuOpen}
+              >
+                {Math.round(zoom)}%
+              </button>
+              <button type="button" className="btn" onClick={zoomIn} aria-label="Zoom in">
+                +
+              </button>
+              <button type="button" className="btn" onClick={resetView}>
+                Fit
+              </button>
+              <button type="button" className="btn" onClick={goOneToOne} title="Native preview pixels">
+                1:1
+              </button>
+              {zoomMenuOpen ? (
+                <div className="develop-zoom-menu" role="menu">
+                  {[25, 50, 100, 200, 400].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      role="menuitem"
+                      className="develop-zoom-menu-item"
+                      onClick={() => {
+                        setZoom(preset);
+                        setPanX(0);
+                        setPanY(0);
+                        setZoomMenuOpen(false);
+                      }}
+                    >
+                      {preset}%
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <div
+              ref={frameRef}
+              data-testid="develop-canvas-frame"
+              className="develop-canvas-frame"
+              onPointerDown={startPanDrag}
+              onPointerMove={(event) => {
+                movePanDrag(event);
+                updateCropDrag(event);
+              }}
+              onPointerUp={(event) => {
+                stopPanDrag(event);
+                stopCropDrag();
+              }}
+              onPointerCancel={(event) => {
+                stopPanDrag(event);
+                stopCropDrag();
+              }}
+              style={{
+                width: '100%',
+                height: '100%',
+                position: 'relative',
+                overflow: 'hidden',
+                cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'zoom-in',
+              }}
             >
-              {Math.round(zoom)}%
-            </button>
-            <button type="button" className="btn" onClick={zoomIn} aria-label="Zoom in">
-              +
-            </button>
-            <button type="button" className="btn" onClick={resetView}>
-              Fit
-            </button>
-            <button type="button" className="btn" onClick={goOneToOne} title="Native preview pixels">
-              1:1
-            </button>
-            {zoomMenuOpen ? (
-              <div className="develop-zoom-menu" role="menu">
-                {[25, 50, 100, 200, 400].map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    role="menuitem"
-                    className="develop-zoom-menu-item"
-                    onClick={() => {
-                      setZoom(preset);
-                      setPanX(0);
-                      setPanY(0);
-                      setZoomMenuOpen(false);
-                    }}
-                  >
-                    {preset}%
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <div
-            ref={frameRef}
-            data-testid="develop-canvas-frame"
-            className="develop-canvas-frame"
-            onPointerDown={startPanDrag}
-            onPointerMove={(event) => {
-              movePanDrag(event);
-              updateCropDrag(event);
-            }}
-            onPointerUp={(event) => {
-              stopPanDrag(event);
-              stopCropDrag();
-            }}
-            onPointerCancel={(event) => {
-              stopPanDrag(event);
-              stopCropDrag();
-            }}
-            style={{
-              width: '100%',
-              height: '100%',
-              position: 'relative',
-              overflow: 'hidden',
-              cursor: cropMode ? 'default' : zoom > 100 ? 'grab' : 'zoom-in',
-            }}
-          >
-            {/* The zoom wrapper is sized in CSS px from `zoomedBox`
+              {/* The zoom wrapper is sized in CSS px from `zoomedBox`
                 (= fittedBox × zoom). Pan applies via `left`/`top` offsets
                 from the centre anchor; `translate(-50%, -50%)` keeps the
                 box centred on that anchor at any zoom. We avoid CSS
@@ -1120,175 +1216,186 @@ function DevelopStageSplit({
                 the original size then resamples, softening detail; an
                 explicit width/height resize keeps the browser's native
                 bilinear pipeline crisp through every zoom level. */}
-            <div
-              ref={zoomWrapperRef}
-              className="develop-canvas-zoom"
-              style={{
-                position: 'absolute',
-                left: `calc(50% + ${panX}px)`,
-                top: `calc(50% + ${panY}px)`,
-                width: zoomedBox ? `${zoomedBox.width}px` : '100%',
-                height: zoomedBox ? `${zoomedBox.height}px` : '100%',
-                transformOrigin: 'center center',
-                transform: 'translate(-50%, -50%)',
-                willChange: 'width, height, left, top',
-              }}
-            >
-              {preview ? (
-                <img
-                  src={preview}
-                  alt={photo.filename}
-                  draggable={false}
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'contain',
-                    borderRadius: 4,
-                    background: 'var(--bg-chrome)',
-                    userSelect: 'none',
-                  }}
-                />
-              ) : (
-                <div
-                  className="mono"
-                  style={{
-                    position: 'absolute',
-                    inset: 0,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'var(--fg-mute)',
-                    fontSize: 12,
-                  }}
-                >
-                  Rendering…
-                </div>
-              )}
-              {selectedMaskPreview && (
-                <div
-                  className={`local-mask-preview ${selectedMaskPreview.className}`}
-                  style={selectedMaskPreview.style}
-                  aria-hidden="true"
-                  data-testid="selected-mask-overlay"
-                />
-              )}
-              {showCropOverlay && (
-                <>
-                  <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
-                  <div
-                    className="crop-dim crop-dim-left"
-                    style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
-                  />
-                  <div
-                    className="crop-dim crop-dim-right"
+              <div
+                ref={zoomWrapperRef}
+                className="develop-canvas-zoom"
+                style={{
+                  position: 'absolute',
+                  left: `calc(50% + ${panX}px)`,
+                  top: `calc(50% + ${panY}px)`,
+                  width: zoomedBox ? `${zoomedBox.width}px` : '100%',
+                  height: zoomedBox ? `${zoomedBox.height}px` : '100%',
+                  transformOrigin: 'center center',
+                  transform: 'translate(-50%, -50%)',
+                  willChange: 'width, height, left, top',
+                }}
+              >
+                {preview ? (
+                  <img
+                    src={preview}
+                    alt={photo.filename}
+                    draggable={false}
                     style={{
-                      top: `${cropTop}%`,
-                      left: `${cropLeft + cropWidth}%`,
-                      right: 0,
-                      height: `${cropHeight}%`,
+                      position: 'absolute',
+                      inset: 0,
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'contain',
+                      borderRadius: 4,
+                      background: 'var(--bg-chrome)',
+                      userSelect: 'none',
                     }}
                   />
-                  <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
+                ) : (
                   <div
-                    className={cropMode ? 'crop-box active' : 'crop-box passive'}
+                    className="mono"
                     style={{
-                      left: `${cropLeft}%`,
-                      top: `${cropTop}%`,
-                      width: `${cropWidth}%`,
-                      height: `${cropHeight}%`,
+                      position: 'absolute',
+                      inset: 0,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: 'var(--fg-mute)',
+                      fontSize: 12,
                     }}
-                    onPointerDown={(event) => startCropDrag('move', event)}
-                    role="presentation"
                   >
-                    <div className="crop-grid" />
-                    {cropMode &&
-                      (['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
-                        <button
-                          key={handle}
-                          type="button"
-                          className={`crop-handle ${handle}`}
-                          aria-label={`Resize crop ${handle}`}
-                          onPointerDown={(event) => {
-                            event.stopPropagation();
-                            startCropDrag(handle, event);
-                          }}
-                        />
-                      ))}
+                    Rendering…
                   </div>
-                </>
-              )}
+                )}
+                {selectedMaskPreview && (
+                  <div
+                    className={`local-mask-preview ${selectedMaskPreview.className}`}
+                    style={selectedMaskPreview.style}
+                    aria-hidden="true"
+                    data-testid="selected-mask-overlay"
+                  />
+                )}
+                {showCropOverlay && (
+                  <>
+                    <div className="crop-dim crop-dim-top" style={{ height: `${cropTop}%` }} />
+                    <div
+                      className="crop-dim crop-dim-left"
+                      style={{ top: `${cropTop}%`, width: `${cropLeft}%`, height: `${cropHeight}%` }}
+                    />
+                    <div
+                      className="crop-dim crop-dim-right"
+                      style={{
+                        top: `${cropTop}%`,
+                        left: `${cropLeft + cropWidth}%`,
+                        right: 0,
+                        height: `${cropHeight}%`,
+                      }}
+                    />
+                    <div className="crop-dim crop-dim-bottom" style={{ top: `${cropTop + cropHeight}%` }} />
+                    <div
+                      className={cropMode ? 'crop-box active' : 'crop-box passive'}
+                      style={{
+                        left: `${cropLeft}%`,
+                        top: `${cropTop}%`,
+                        width: `${cropWidth}%`,
+                        height: `${cropHeight}%`,
+                      }}
+                      onPointerDown={(event) => startCropDrag('move', event)}
+                      role="presentation"
+                    >
+                      <div className="crop-grid" />
+                      {cropMode &&
+                        (['nw', 'ne', 'sw', 'se'] as const).map((handle) => (
+                          <button
+                            key={handle}
+                            type="button"
+                            className={`crop-handle ${handle}`}
+                            aria-label={`Resize crop ${handle}`}
+                            onPointerDown={(event) => {
+                              event.stopPropagation();
+                              startCropDrag(handle, event);
+                            }}
+                          />
+                        ))}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
-          {cropMode && (
-            <div className="develop-crop-toolbar">
-              <span className="mono">Crop</span>
-              {[
-                ['Original', { cropX: 0, cropY: 0, cropW: 100, cropH: 100 }],
-                ['1:1', { cropX: 12.5, cropY: 0, cropW: 75, cropH: 100 }],
-                ['4:5', { cropX: 10, cropY: 0, cropW: 80, cropH: 100 }],
-                ['16:9', { cropX: 0, cropY: 21.9, cropW: 100, cropH: 56.2 }],
-              ].map(([label, patch]) => (
-                <button
-                  key={label as string}
-                  type="button"
-                  className="btn"
-                  onClick={() => applyAspect(patch as Partial<DevelopValues>)}
-                >
-                  {label as string}
+            {cropMode && (
+              <div className="develop-crop-toolbar">
+                <span className="mono">Crop</span>
+                {[
+                  ['Original', { cropX: 0, cropY: 0, cropW: 100, cropH: 100 }],
+                  ['1:1', { cropX: 12.5, cropY: 0, cropW: 75, cropH: 100 }],
+                  ['4:5', { cropX: 10, cropY: 0, cropW: 80, cropH: 100 }],
+                  ['16:9', { cropX: 0, cropY: 21.9, cropW: 100, cropH: 56.2 }],
+                ].map(([label, patch]) => (
+                  <button
+                    key={label as string}
+                    type="button"
+                    className="btn"
+                    onClick={() => applyAspect(patch as Partial<DevelopValues>)}
+                  >
+                    {label as string}
+                  </button>
+                ))}
+                <button type="button" className="btn" onClick={resetCrop} disabled={!isCropping}>
+                  Reset
                 </button>
-              ))}
-              <button type="button" className="btn" onClick={resetCrop} disabled={!isCropping}>
-                Reset
+                <button type="button" className="btn primary" onClick={() => setCropMode(false)}>
+                  Done
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="editor-strip">
+            {photos.slice(0, 14).map((p, i) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`thumb ${i === focusedIdx ? 'active' : ''}`}
+                onClick={() => setFocusedIdx(i)}
+                title={p.filename}
+              >
+                <Thumbnail
+                  photoId={p.id}
+                  sizePx={thumbnailSizeForCssBox(96, 64, { maxPx: 240 })}
+                  photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
+                />
               </button>
-              <button type="button" className="btn primary" onClick={() => setCropMode(false)}>
-                Done
-              </button>
-            </div>
-          )}
+            ))}
+          </div>
         </div>
-        <div className="editor-strip">
-          {photos.slice(0, 14).map((p, i) => (
-            <button
-              key={p.id}
-              type="button"
-              className={`thumb ${i === focusedIdx ? 'active' : ''}`}
-              onClick={() => setFocusedIdx(i)}
-              title={p.filename}
-            >
-              <Thumbnail
-                photoId={p.id}
-                sizePx={thumbnailSizeForCssBox(96, 64, { maxPx: 240 })}
-                photo={{ hue: (p.id * 31) % 360, filename: p.filename, id: String(p.id) }}
-              />
-            </button>
-          ))}
-        </div>
-      </div>
-      <EditorInspector
-        photo={photo}
-        values={values}
-        mode={inspectorMode}
-        targetName={selectedMask?.name}
-        targetMeta={
-          selectedMask
-            ? `${selectedMask.source.replaceAll('_', ' ')} / ${selectedMask.mode}${selectedMask.visible ? '' : ' / hidden'}`
-            : undefined
-        }
-        cropMode={cropMode}
-        onToggleCropMode={() => setCropMode(!cropMode)}
-        onClearMaskSelection={onClearMaskSelection}
-        onChange={onValueChange}
-        onChangeMany={onValuesChange}
-        onCurvesChange={onCurvesChange}
-        onAutoLight={onAutoLight}
-        onReset={onReset}
-        onCopy={onCopy}
-        onPaste={onPaste}
-        canPaste={canPaste}
-      />
-    </div>
+      </ResizablePanel>
+      <ResizableHandle className="editor-resize-handle" />
+      <ResizablePanel
+        id="develop-inspector"
+        order={2}
+        defaultSize={28}
+        minSize={20}
+        maxSize={45}
+        className="editor-inspector-panel"
+      >
+        <EditorInspector
+          photo={photo}
+          values={values}
+          mode={inspectorMode}
+          targetName={selectedMask?.name}
+          targetMeta={
+            selectedMask
+              ? `${selectedMask.source.replaceAll('_', ' ')} / ${selectedMask.mode}${selectedMask.visible ? '' : ' / hidden'}`
+              : undefined
+          }
+          cropMode={cropMode}
+          onToggleCropMode={() => setCropMode(!cropMode)}
+          onClearMaskSelection={onClearMaskSelection}
+          onChange={onValueChange}
+          onChangeMany={onValuesChange}
+          onCurvesChange={onCurvesChange}
+          onAutoLight={onAutoLight}
+          onReset={onReset}
+          onCopy={onCopy}
+          onPaste={onPaste}
+          canPaste={canPaste}
+        />
+      </ResizablePanel>
+    </ResizablePanelGroup>
   );
 }
 

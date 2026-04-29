@@ -45,21 +45,15 @@ export function Thumbnail({
 
   const filename = placeholderProps.photo?.filename;
 
+  // `ph-loaded` carries the loaded-photo styling (solid bg, no padding,
+  // no stripe gradient, force-filled img). Keeping `ph` on the wrapper
+  // preserves the existing layout selectors that target the cell body
+  // (e.g. `.cell-justified > .cell-open > .ph` for sizing). The loaded
+  // styles win because `.ph-loaded` is a class-specificity override
+  // declared after `.ph` in global.css.
   return (
-    <div className={placeholderProps.selected ? 'selected ph' : 'ph'}>
-      <img
-        src={url}
-        alt={alt ?? filename ?? 'photo thumbnail'}
-        loading="lazy"
-        style={{
-          position: 'absolute',
-          inset: 0,
-          width: '100%',
-          height: '100%',
-          objectFit: fit,
-          display: 'block',
-        }}
-      />
+    <div className={`ph ph-loaded${placeholderProps.selected ? ' selected' : ''}`} data-fit={fit}>
+      <img src={url} alt={alt ?? filename ?? 'photo thumbnail'} loading="lazy" decoding="async" />
       {placeholderProps.rejected && <div className="corner-rej">×</div>}
       {placeholderProps.keep && <div className="corner-keep">✓</div>}
     </div>

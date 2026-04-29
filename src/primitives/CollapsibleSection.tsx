@@ -1,21 +1,23 @@
+/**
+ * CollapsibleSection — Lightroom-style develop-panel section. Built on
+ * shadcn `Collapsible`; preserves the legacy API (id-keyed open state,
+ * optional eye toggle, action slot).
+ */
+
+import { ChevronDown, ChevronRight, Eye, EyeOff } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { cn } from '@/lib/utils';
 import { useDevelopUi } from '../state/develop';
-import { Icon } from './Icon';
 
 export interface CollapsibleSectionProps {
-  /** Stable identifier used to key panel-open state in the develop store. */
-  id: string;
-  /** Lightroom-style uppercase label rendered in the section head. */
-  title: string;
-  children: ReactNode;
-  /** Optional right-aligned action (typically a reset button). */
-  action?: ReactNode;
-  /** Optional eye toggle. When undefined, the icon is not rendered. */
-  visibility?: { visible: boolean; onToggle: () => void; label?: string };
-  /** Default open state when no value has been recorded in the store. */
-  defaultOpen?: boolean;
-  /** When true the section never collapses (used for stages that must stay visible). */
-  alwaysOpen?: boolean;
+  readonly id: string;
+  readonly title: string;
+  readonly children: ReactNode;
+  readonly action?: ReactNode;
+  readonly visibility?: { visible: boolean; onToggle: () => void; label?: string };
+  readonly defaultOpen?: boolean;
+  readonly alwaysOpen?: boolean;
 }
 
 export function CollapsibleSection({
@@ -32,45 +34,60 @@ export function CollapsibleSection({
   const isOpen = alwaysOpen || open;
 
   return (
-    <section className="editor-section" data-open={isOpen}>
-      <header className="editor-section-head">
-        <button
-          type="button"
-          className="editor-section-disclosure"
-          aria-expanded={isOpen}
-          aria-controls={`section-${id}`}
-          onClick={() => {
-            if (!alwaysOpen) setPanelOpen(id, !isOpen);
-          }}
+    <Collapsible
+      open={isOpen}
+      onOpenChange={(next) => {
+        if (!alwaysOpen) setPanelOpen(id, next);
+      }}
+      className="border-b border-[color:var(--stroke-soft)] last:border-b-0"
+      data-open={isOpen}
+    >
+      <header className="flex items-center justify-between gap-2 px-3 py-2">
+        <CollapsibleTrigger
           disabled={alwaysOpen}
+          className={cn(
+            'flex flex-1 items-center gap-2 font-mono text-[var(--text-2xs)] font-medium uppercase tracking-[0.1em] text-[color:var(--fg-dim)]',
+            'transition-colors hover:text-[color:var(--fg)]',
+            'disabled:cursor-default',
+            'focus-visible:outline-none',
+          )}
+          aria-controls={`section-${id}`}
         >
-          <span className="editor-section-chevron" aria-hidden="true">
-            <Icon name={isOpen ? 'chevD' : 'chevR'} size={11} stroke={1.8} />
+          <span
+            aria-hidden="true"
+            className="inline-flex size-3 items-center justify-center text-[color:var(--fg-mute)]"
+          >
+            {isOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
           </span>
-          <span className="editor-section-title">{title}</span>
-        </button>
-        <div className="editor-section-tools">
+          <span>{title}</span>
+        </CollapsibleTrigger>
+        <div className="flex items-center gap-1.5">
           {action}
-          {visibility ? (
+          {visibility && (
             <button
               type="button"
-              className="editor-section-eye"
               onClick={visibility.onToggle}
               aria-pressed={visibility.visible}
               aria-label={visibility.label ?? `Toggle ${title} visibility`}
               title={visibility.visible ? 'Hide effect' : 'Show effect'}
+              className={cn(
+                'inline-flex size-5 items-center justify-center rounded-xs text-[color:var(--fg-mute)]',
+                'transition-colors hover:bg-[color:var(--bg-hover)] hover:text-[color:var(--fg)]',
+                visibility.visible && 'text-[color:var(--accent)]',
+              )}
               data-active={visibility.visible}
             >
-              <Icon name="eye" size={12} />
+              {visibility.visible ? <Eye className="size-3" /> : <EyeOff className="size-3" />}
             </button>
-          ) : null}
+          )}
         </div>
       </header>
-      {isOpen ? (
-        <div id={`section-${id}`} className="editor-section-body">
-          {children}
-        </div>
-      ) : null}
-    </section>
+      <CollapsibleContent
+        id={`section-${id}`}
+        className="overflow-hidden data-[state=closed]:animate-accordion-up data-[state=open]:animate-accordion-down"
+      >
+        <div className="px-3 pb-3 pt-0.5">{children}</div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

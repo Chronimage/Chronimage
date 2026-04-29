@@ -27,6 +27,16 @@ export default defineConfig(() => ({
 
   envPrefix: ['VITE_', 'TAURI_ENV_'],
 
+  // `react-resizable-panels` ships a dual CJS+ESM build via the modern
+  // `exports` map (cjs.mjs re-export wrapper). Vite's dep optimiser
+  // sometimes resolves it to the CJS variant on the first cold cache,
+  // which doesn't expose named ESM exports — `import { PanelGroup }`
+  // then resolves to `undefined` at runtime. Forcing inclusion in
+  // optimizeDeps makes Vite always pre-bundle it as ESM.
+  optimizeDeps: {
+    include: ['react-resizable-panels'],
+  },
+
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),

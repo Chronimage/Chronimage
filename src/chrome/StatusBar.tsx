@@ -1,25 +1,31 @@
 import type { Screen } from '../state/ui';
 
 export interface StatusBarProps {
-  screen: Screen;
-  version: string;
-  channel: string;
+  readonly screen: Screen;
+  readonly version: string;
+  readonly channel: string;
 }
 
 export function StatusBar({ screen, version, channel }: StatusBarProps) {
   return (
-    <div className="statusbar">
-      <span className="pill">
-        <span className="dot" />
-        moondream2 · on-device
+    <footer className="statusbar">
+      <span className="statusbar-pill">
+        <span className="statusbar-dot" aria-hidden="true" />
+        <span>moondream2</span>
+        <span className="statusbar-sep">·</span>
+        <span className="statusbar-soft">on-device</span>
       </span>
-      <span>Chronimage — {screen.label}</span>
-      <div className="right">
-        <span>
-          v{version}
-          {channel !== 'stable' ? ` · ${channel}` : ''}
-        </span>
+      <span className="statusbar-sep">·</span>
+      <span className="statusbar-soft">{screen.label}</span>
+      <div className="statusbar-right">
+        <span>v{version}</span>
+        {channel !== 'stable' && (
+          <>
+            <span className="statusbar-sep">·</span>
+            <span className="statusbar-channel">{channel}</span>
+          </>
+        )}
       </div>
-    </div>
+    </footer>
   );
 }

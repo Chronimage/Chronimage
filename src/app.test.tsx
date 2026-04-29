@@ -15,7 +15,7 @@ function renderApp() {
 describe('App shell', () => {
   it('renders the titlebar brand split into head + italic tail', () => {
     const { container } = renderApp();
-    const brand = container.querySelector('.titlebar .brand');
+    const brand = container.querySelector('.titlebar-brand');
     expect(brand).not.toBeNull();
     // Design splits app name into two spans: head + italic tail (default 'Chronimage').
     expect(brand?.textContent).toBe('Chronimage');
@@ -24,7 +24,7 @@ describe('App shell', () => {
 
   it('renders the rail with the primary screen buttons plus Settings', () => {
     const { container } = renderApp();
-    const buttons = container.querySelectorAll('.rail button');
+    const buttons = container.querySelectorAll('.rail .rail-btn');
     // Catalog, Cull, Develop + Settings
     expect(buttons.length).toBe(4);
   });
