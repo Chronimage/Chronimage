@@ -1,27 +1,15 @@
 /**
  * ShortcutOverlay — Phase 4 §6 discovery modal + inline rebinder.
  *
- * Press `?` anywhere (outside a text input) to open. Shows every
- * registered keyboard shortcut grouped by context, overlaid on top of
- * the current screen.
- *
- * Rebinding — click the keys column on any row to capture a new
- * combination; the next keyboard event is recorded and persisted via
- * `shortcuts_set`. The override appears with a `custom` badge and a
- * reset link that deletes it (reverts to the built-in default).
- *
- * The shortcut list has two sources:
- *   - **Static** — hard-coded hotkeys wired directly in screens
- *     (Catalog detail view, Cull, Develop). These show as the
- *     baseline "built-in" bindings.
- *   - **Overrides** — rows in the `shortcuts` table, fetched via
- *     `shortcuts_list`.
+ * Built on shadcn `Dialog`. Press `?` anywhere (outside a text input)
+ * to open. Click any keys-cell to capture a new combo.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { cn } from '@/lib/utils';
 import { type ShortcutRow, shortcutsList, shortcutsSet } from '../tauri/invoke';
 import { warn } from '../util/log';
-import { Icon } from './Icon';
 
 interface StaticShortcut {
   command_id: string;
@@ -31,11 +19,9 @@ interface StaticShortcut {
 }
 
 const STATIC_SHORTCUTS: StaticShortcut[] = [
-  // Global
   { command_id: 'app.help', label: 'Show this overlay', keys: ['?'], context: 'Global' },
   { command_id: 'app.search', label: 'Focus search', keys: ['/'], context: 'Global' },
 
-  // Catalog detail view
   { command_id: 'detail.prev', label: 'Previous photo', keys: ['←'], context: 'Detail view' },
   { command_id: 'detail.next', label: 'Next photo', keys: ['→'], context: 'Detail view' },
   { command_id: 'detail.rate.clear', label: 'Clear rating', keys: ['0'], context: 'Detail view' },
@@ -47,14 +33,12 @@ const STATIC_SHORTCUTS: StaticShortcut[] = [
   },
   { command_id: 'detail.flag', label: 'Toggle flag', keys: ['X'], context: 'Detail view' },
 
-  // Cull screen
   { command_id: 'cull.reject_a', label: 'Reject A', keys: ['A'], context: 'Cull' },
   { command_id: 'cull.reject_b', label: 'Reject B', keys: ['B'], context: 'Cull' },
   { command_id: 'cull.accept', label: 'Accept AI verdict', keys: ['↵'], context: 'Cull' },
   { command_id: 'cull.prev', label: 'Previous pair', keys: ['←'], context: 'Cull' },
   { command_id: 'cull.next', label: 'Next pair', keys: ['→'], context: 'Cull' },
 
-  // Multi-select
   {
     command_id: 'catalog.select_all',
     label: 'Select all visible',
@@ -64,14 +48,12 @@ const STATIC_SHORTCUTS: StaticShortcut[] = [
 ];
 
 export interface ShortcutOverlayProps {
-  open: boolean;
-  onClose: () => void;
+  readonly open: boolean;
+  readonly onClose: () => void;
 }
 
-/** Normalise a KeyboardEvent into a stable `Ctrl+Shift+A`-style string. */
 function keyBindingFromEvent(e: KeyboardEvent): string | null {
   const key = e.key;
-  // Ignore pure modifier presses — wait for the combo.
   if (key === 'Control' || key === 'Shift' || key === 'Alt' || key === 'Meta') {
     return null;
   }
@@ -80,8 +62,6 @@ function keyBindingFromEvent(e: KeyboardEvent): string | null {
   if (e.altKey) parts.push('Alt');
   if (e.shiftKey) parts.push('Shift');
   if (e.metaKey) parts.push('Meta');
-  // Normalise single printable characters to uppercase so `Ctrl+a` and
-  // `Ctrl+A` collapse into one binding.
   const normalised = key.length === 1 ? key.toUpperCase() : key;
   parts.push(normalised);
   return parts.join('+');
@@ -104,34 +84,27 @@ export function ShortcutOverlay({ open, onClose }: ShortcutOverlayProps) {
   }, [open, refresh]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !capturing) return;
     const onKey = (e: KeyboardEvent) => {
-      if (capturing) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.key === 'Escape') {
-          setCapturing(null);
-          return;
-        }
-        const binding = keyBindingFromEvent(e);
-        if (!binding) return;
-        shortcutsSet(capturing.commandId, binding, capturing.context)
-          .then(() => {
-            setCapturing(null);
-            setError(null);
-            refresh();
-          })
-          .catch((err) => setError(String(err)));
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        setCapturing(null);
         return;
       }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-      }
+      const binding = keyBindingFromEvent(e);
+      if (!binding) return;
+      shortcutsSet(capturing.commandId, binding, capturing.context)
+        .then(() => {
+          setCapturing(null);
+          setError(null);
+          refresh();
+        })
+        .catch((err) => setError(String(err)));
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
-  }, [open, onClose, capturing, refresh]);
+  }, [open, capturing, refresh]);
 
   const grouped = useMemo(() => {
     const overrideByCmd = new Map(overrides.map((o) => [o.command_id, o]));
@@ -147,8 +120,6 @@ export function ShortcutOverlay({ open, onClose }: ShortcutOverlayProps) {
   const resetToDefault = useCallback(
     async (commandId: string, context: string, defaultKeys: string[]) => {
       try {
-        // There's no dedicated "delete override" command; write the default
-        // binding back so overrides-table shows the same as the built-in.
         await shortcutsSet(commandId, defaultKeys.join('+'), context);
         setError(null);
         refresh();
@@ -159,92 +130,94 @@ export function ShortcutOverlay({ open, onClose }: ShortcutOverlayProps) {
     [refresh],
   );
 
-  if (!open) return null;
-
   return (
-    <button type="button" className="shortcut-backdrop" onClick={onClose} aria-label="Close shortcut overlay">
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Keyboard shortcuts"
-        className="shortcut-modal"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent
+        className={cn(
+          'max-h-[80vh] max-w-3xl gap-0 overflow-hidden p-0',
+          'border-[color:var(--stroke-strong)] bg-[color:var(--bg-chrome)]',
+        )}
       >
-        <div className="shortcut-modal-head">
-          <h2>
-            Keyboard shortcuts<em>.</em>
-          </h2>
-          <button type="button" className="btn" onClick={onClose} aria-label="Close">
-            <Icon name="close" size={14} />
-          </button>
-        </div>
-        <div className="shortcut-modal-body">
-          {error && <div className="shortcut-error mono">{error}</div>}
-          {grouped.map(([context, items]) => (
-            <section key={context}>
-              <div className="mono shortcut-section-label">{context.toUpperCase()}</div>
-              <div className="shortcut-list">
-                {items.map((item) => {
-                  const isCapturing = capturing?.commandId === item.command_id;
-                  const activeKeys = item.override
-                    ? item.override.key_binding.split('+').map((k) => k.trim())
-                    : item.keys;
-                  return (
-                    <div key={item.command_id} className="shortcut-row">
-                      <div className="shortcut-label">{item.label}</div>
-                      <div className="shortcut-keys">
-                        {isCapturing ? (
-                          <span className="shortcut-capturing mono">Press new combo…</span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="shortcut-keys-btn"
-                            onClick={() =>
-                              setCapturing({
-                                commandId: item.command_id,
-                                context: item.context.toLowerCase(),
-                              })
-                            }
-                            aria-label={`Rebind ${item.label}`}
-                            title="Click to rebind"
-                          >
-                            {activeKeys.map((key) => (
-                              <kbd key={`${item.command_id}-${key}`}>{key}</kbd>
-                            ))}
-                          </button>
-                        )}
-                        {item.override && !isCapturing && (
-                          <>
-                            <span
-                              className="mono"
-                              style={{ fontSize: 10, color: 'var(--accent)', marginLeft: 6 }}
-                            >
-                              custom
+        <DialogHeader className="border-b border-[color:var(--stroke)] px-6 py-4">
+          <DialogTitle className="font-display text-[var(--text-display-sm)] font-normal leading-none tracking-[var(--tracking-display)] text-[color:var(--fg)]">
+            Keyboard shortcuts<span className="italic text-[color:var(--accent)]">.</span>
+          </DialogTitle>
+          <DialogDescription className="font-mono text-[var(--text-2xs)] uppercase tracking-[0.1em] text-[color:var(--fg-mute)]">
+            Click any combo to rebind · Esc closes
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="max-h-[60vh] overflow-y-auto px-6 py-4">
+          {error && (
+            <div className="mb-3 rounded-sm border border-[color:var(--danger)] bg-[color:var(--danger)]/10 px-3 py-2 font-mono text-[var(--text-xs)] text-[color:var(--danger)]">
+              {error}
+            </div>
+          )}
+          <div className="flex flex-col gap-5">
+            {grouped.map(([context, items]) => (
+              <section key={context}>
+                <div className="eyebrow mb-2">{context}</div>
+                <div className="flex flex-col gap-0.5">
+                  {items.map((item) => {
+                    const isCapturing = capturing?.commandId === item.command_id;
+                    const activeKeys = item.override
+                      ? item.override.key_binding.split('+').map((k) => k.trim())
+                      : item.keys;
+                    return (
+                      <div
+                        key={item.command_id}
+                        className="flex items-center justify-between gap-3 rounded-sm px-2 py-1.5 hover:bg-[color:var(--bg-hover)]"
+                      >
+                        <div className="text-[var(--text-base)] text-[color:var(--fg)]">{item.label}</div>
+                        <div className="flex items-center gap-1.5">
+                          {isCapturing ? (
+                            <span className="font-mono text-[var(--text-xs)] uppercase tracking-[0.08em] text-[color:var(--accent)]">
+                              Press new combo…
                             </span>
+                          ) : (
                             <button
                               type="button"
-                              className="shortcut-reset mono"
-                              onClick={() => resetToDefault(item.command_id, item.context, item.keys)}
-                              title="Reset to built-in default"
+                              onClick={() =>
+                                setCapturing({
+                                  commandId: item.command_id,
+                                  context: item.context.toLowerCase(),
+                                })
+                              }
+                              aria-label={`Rebind ${item.label}`}
+                              title="Click to rebind"
+                              className="inline-flex items-center gap-1 rounded-xs px-1 py-0.5 transition-colors hover:bg-[color:var(--bg-elev)]"
                             >
-                              reset
+                              {activeKeys.map((key) => (
+                                <kbd key={`${item.command_id}-${key}`}>{key}</kbd>
+                              ))}
                             </button>
-                          </>
-                        )}
+                          )}
+                          {item.override && !isCapturing && (
+                            <>
+                              <span className="font-mono text-[var(--text-2xs)] uppercase tracking-[0.08em] text-[color:var(--accent)]">
+                                custom
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => resetToDefault(item.command_id, item.context, item.keys)}
+                                title="Reset to built-in default"
+                                className="font-mono text-[var(--text-2xs)] uppercase tracking-[0.08em] text-[color:var(--fg-mute)] underline-offset-2 hover:text-[color:var(--fg)] hover:underline"
+                              >
+                                reset
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
         </div>
-        <div className="shortcut-modal-foot mono">
-          Press <kbd>Esc</kbd> to close · click any key combo to rebind
-        </div>
-      </div>
-    </button>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -260,7 +233,6 @@ export function useShortcutOverlay(): [boolean, () => void, () => void] {
       ) {
         return;
       }
-      // Match both `?` and shift+/ (depending on layout both can fire)
       if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
         e.preventDefault();
         setOpen((v) => !v);
@@ -274,13 +246,7 @@ export function useShortcutOverlay(): [boolean, () => void, () => void] {
 
 /**
  * Subscribe a handler to a command id, respecting any user override
- * stored in the `shortcuts` table. Use at the top of screens so a
- * custom binding takes effect without a restart.
- *
- * NOTE: the list is fetched once on mount and not refreshed; the
- * overlay is the canonical place to rebind, and rebinds take effect on
- * the next screen remount. A global subscription system is tracked for
- * a future pass.
+ * stored in the `shortcuts` table.
  */
 export function useShortcut(
   commandId: string,

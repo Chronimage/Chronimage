@@ -1,36 +1,36 @@
 /**
- * TagDropdown — Phase 2 §10 manual-tagging menu for a multi-select.
+ * TagDropdown — manual tag-management menu for a multi-select. Built on
+ * shadcn `Command` for the searchable list with the same outside-click
+ * + Escape-to-close behaviour from the legacy version.
  *
- * Opens from the Catalog toolbar's Tag button. Contains:
- * - Free-text add box with existing-tag autocomplete
- * - List of tags currently applied (any photo in selection) with remove
- * - Recent tags the user has applied before (quick re-apply)
- *
- * Closes on outside-click + Escape + success toast-less (react-query
- * invalidation refreshes the list in-place).
+ * Anchored inline by the caller (a `position: relative` parent renders
+ * this absolutely-positioned card next to the trigger button).
  */
 
+import { Plus, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Badge } from '@/components/ui/badge';
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command';
 import { useAddUserTag, useRemoveUserTag, useUserTags } from '../state/queries';
-import { Chip } from './Chip';
-import { Icon } from './Icon';
 
 export interface TagDropdownProps {
-  photoIds: number[];
-  onClose: () => void;
+  readonly photoIds: number[];
+  readonly onClose: () => void;
 }
 
 export function TagDropdown({ photoIds, onClose }: TagDropdownProps) {
   const [input, setInput] = useState('');
   const ref = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
   const { data: tags = [] } = useUserTags();
   const addTag = useAddUserTag();
   const removeTag = useRemoveUserTag();
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -48,22 +48,11 @@ export function TagDropdown({ photoIds, onClose }: TagDropdownProps) {
     };
   }, [onClose]);
 
-  const suggestions = useMemo(() => {
-    const q = input.trim().toLowerCase();
-    if (!q) return tags.slice(0, 12);
-    return tags.filter((t) => t.label.toLowerCase().includes(q)).slice(0, 12);
-  }, [input, tags]);
-
   const onAdd = useCallback(
     (label: string) => {
       const trimmed = label.trim();
       if (!trimmed || photoIds.length === 0) return;
-      addTag.mutate(
-        { photoIds, label: trimmed },
-        {
-          onSuccess: () => setInput(''),
-        },
-      );
+      addTag.mutate({ photoIds, label: trimmed }, { onSuccess: () => setInput('') });
     },
     [addTag, photoIds],
   );
@@ -73,70 +62,103 @@ export function TagDropdown({ photoIds, onClose }: TagDropdownProps) {
       if (!label || photoIds.length === 0) return;
       removeTag.mutate({ photoIds, label });
     },
-    [removeTag, photoIds],
+    [photoIds, removeTag],
+  );
+
+  const trimmed = input.trim();
+  const hasExactMatch = useMemo(
+    () => tags.some((t) => t.label.toLowerCase() === trimmed.toLowerCase()),
+    [tags, trimmed],
   );
 
   return (
-    <div ref={ref} className="tag-dropdown" role="menu">
-      <div className="tag-dropdown-head">
-        <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-mute)' }}>
+    <div
+      ref={ref}
+      role="menu"
+      className="absolute right-0 top-[calc(100%+6px)] z-[var(--z-overlay)] w-72 overflow-hidden rounded-md border border-[color:var(--stroke)] bg-[color:var(--bg-chrome)] shadow-[var(--shadow-lg)]"
+    >
+      <div className="flex items-center justify-between gap-2 border-b border-[color:var(--stroke)] px-3 py-2">
+        <span className="font-mono text-[var(--text-2xs)] uppercase tracking-[0.1em] text-[color:var(--fg-mute)]">
           Tag {photoIds.length} photo{photoIds.length === 1 ? '' : 's'}
         </span>
-        <button type="button" className="btn" onClick={onClose} aria-label="Close tag menu">
-          <Icon name="close" size={12} />
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close tag menu"
+          className="inline-flex size-5 items-center justify-center rounded-xs text-[color:var(--fg-mute)] hover:bg-[color:var(--bg-hover)] hover:text-[color:var(--fg)]"
+        >
+          <X className="size-3" />
         </button>
       </div>
-      <input
-        ref={inputRef}
-        type="text"
-        placeholder="Add tag…"
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') {
-            e.preventDefault();
-            onAdd(input);
-          }
-        }}
-        className="tag-input"
-        aria-label="Tag label"
-      />
-      <div className="tag-suggestions">
-        {suggestions.map((t) => (
-          <button
-            key={t.label}
-            type="button"
-            className="tag-suggestion"
-            onClick={() => onAdd(t.label)}
-            role="menuitem"
-          >
-            <Icon name="plus" size={11} />
-            <span>{t.label}</span>
-            <span className="mono" style={{ color: 'var(--fg-mute)', marginLeft: 'auto' }}>
-              {t.photo_count}
+
+      <Command shouldFilter className="[&_[cmdk-input-wrapper]]:border-b-[color:var(--stroke)]">
+        <CommandInput
+          placeholder="Add tag…"
+          value={input}
+          onValueChange={setInput}
+          autoFocus
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && trimmed && !hasExactMatch) {
+              e.preventDefault();
+              onAdd(trimmed);
+            }
+          }}
+          className="text-[var(--text-base)]"
+        />
+        <CommandList className="max-h-60">
+          {trimmed && !hasExactMatch && (
+            <CommandGroup>
+              <CommandItem
+                onSelect={() => onAdd(trimmed)}
+                className="flex items-center gap-2 text-[var(--text-base)]"
+              >
+                <Plus className="size-3 text-[color:var(--accent)]" />
+                <span>
+                  Create <span className="text-[color:var(--accent)]">"{trimmed}"</span>
+                </span>
+              </CommandItem>
+            </CommandGroup>
+          )}
+          <CommandEmpty>
+            <span className="text-[var(--text-sm)] text-[color:var(--fg-mute)]">
+              {trimmed ? `No tag named "${trimmed}".` : 'No tags yet — type to create one.'}
             </span>
-          </button>
-        ))}
-        {suggestions.length === 0 && input.trim() && (
-          <button type="button" className="tag-suggestion" onClick={() => onAdd(input)} role="menuitem">
-            <Icon name="plus" size={11} />
-            <span>Create “{input.trim()}”</span>
-          </button>
-        )}
-        {suggestions.length === 0 && !input.trim() && (
-          <div className="tag-empty">No tags yet — type to create one.</div>
-        )}
-      </div>
+          </CommandEmpty>
+          {tags.length > 0 && (
+            <CommandGroup heading="Library">
+              {tags.slice(0, 24).map((t) => (
+                <CommandItem
+                  key={t.label}
+                  value={t.label}
+                  onSelect={() => onAdd(t.label)}
+                  className="flex items-center gap-2 text-[var(--text-base)]"
+                >
+                  <Plus className="size-3 text-[color:var(--fg-mute)]" />
+                  <span className="flex-1 truncate">{t.label}</span>
+                  <span className="font-mono text-[var(--text-2xs)] tabular-nums text-[color:var(--fg-mute)]">
+                    {t.photo_count}
+                  </span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
+        </CommandList>
+      </Command>
+
       {tags.length > 0 && (
-        <div className="tag-applied">
-          <div className="mono" style={{ fontSize: 10, color: 'var(--fg-mute)', marginBottom: 4 }}>
-            LIBRARY TAGS
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {tags.slice(0, 16).map((t) => (
-              <Chip key={t.label} onClose={() => onRemove(t.label)}>
-                {t.label}
-              </Chip>
+        <div className="border-t border-[color:var(--stroke)] px-3 py-2">
+          <div className="eyebrow mb-1.5">Library tags · click to remove</div>
+          <div className="flex flex-wrap gap-1">
+            {tags.slice(0, 18).map((t) => (
+              <Badge
+                key={t.label}
+                variant="outline"
+                className="cursor-pointer gap-1 rounded-sm border-[color:var(--stroke)] bg-[color:var(--bg-elev)] px-1.5 py-0.5 font-sans text-[var(--text-xs)] font-normal text-[color:var(--fg-dim)] hover:border-[color:var(--danger)] hover:text-[color:var(--danger)]"
+                onClick={() => onRemove(t.label)}
+              >
+                <span>{t.label}</span>
+                <X className="size-2.5 opacity-60" aria-hidden="true" />
+              </Badge>
             ))}
           </div>
         </div>

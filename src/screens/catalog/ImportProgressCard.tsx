@@ -1,12 +1,12 @@
 /**
  * ImportProgressCard — live import progress for the catalog sidebar.
  *
- * Replaces the hard-coded `99.6% Cataloging` fixture that used to live at
- * the top of `CatalogSidePanel`. Reads the global [`useImportStore`],
- * collapses to nothing when no imports are active, and shows one compact
- * row per active import with an INDEX or CONSOLIDATE pill.
+ * Reads `useImportStore` and renders one compact row per active import
+ * with an INDEX or CONSOLIDATE eyebrow, filename, percentage, ETA, and
+ * a thin progress bar driven by `var(--accent)`.
  */
 
+import { cn } from '@/lib/utils';
 import { type ActiveImport, useActiveImports } from '../../state/import';
 
 function formatEta(seconds: number | null): string {
@@ -16,28 +16,10 @@ function formatEta(seconds: number | null): string {
   return `~${Math.round(seconds / 3600)}h`;
 }
 
-function ModePill({ mode }: { mode: ActiveImport['mode'] }) {
+function ModePill({ mode }: { readonly mode: ActiveImport['mode'] }) {
   const label = mode === 'consolidate' ? 'CONSOLIDATE' : 'INDEX';
-  const bg =
-    mode === 'consolidate'
-      ? 'color-mix(in oklch, var(--accent) 18%, transparent)'
-      : 'color-mix(in oklch, var(--fg) 10%, transparent)';
-  const fg = mode === 'consolidate' ? 'var(--accent)' : 'var(--fg-dim)';
   return (
-    <span
-      className="mono"
-      style={{
-        fontSize: 9.5,
-        letterSpacing: '0.08em',
-        padding: '2px 6px',
-        borderRadius: 4,
-        background: bg,
-        color: fg,
-        flexShrink: 0,
-      }}
-    >
-      {label}
-    </span>
+    <span className={cn('import-progress-mode', mode === 'consolidate' && 'is-consolidate')}>{label}</span>
   );
 }
 
@@ -47,88 +29,29 @@ export function ImportProgressCard() {
   if (running.length === 0) return null;
 
   return (
-    <div style={{ padding: '0 10px 10px' }}>
-      <div
-        style={{
-          border: '1px solid var(--stroke)',
-          borderRadius: 'var(--radius-md)',
-          padding: 8,
-          background: 'var(--bg-elev)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-        }}
-      >
-        <div
-          className="mono"
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            fontSize: 10.5,
-            color: 'var(--fg-mute)',
-            letterSpacing: '0.06em',
-          }}
-        >
-          <span>IMPORTING</span>
-          <span>{running.length}</span>
+    <div className="import-progress-wrap">
+      <div className="import-progress-card">
+        <div className="import-progress-head eyebrow">
+          <span>Importing</span>
+          <span className="num">{running.length}</span>
         </div>
         {running.map((imp) => {
           const pct = imp.total > 0 ? Math.round((imp.done / imp.total) * 100) : 0;
           return (
-            <div key={imp.importId} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  fontSize: 11.5,
-                }}
-              >
+            <div key={imp.importId} className="import-progress-row">
+              <div className="import-progress-row-head">
                 <ModePill mode={imp.mode} />
-                <span
-                  style={{
-                    flex: 1,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                  title={imp.sourceName}
-                >
+                <span className="import-progress-name" title={imp.sourceName}>
                   {imp.sourceName}
                 </span>
-                <span className="mono" style={{ color: 'var(--accent)', fontSize: 11, flexShrink: 0 }}>
-                  {pct}%
-                </span>
+                <span className="import-progress-pct num">{pct}%</span>
               </div>
-              <div
-                className="progress"
-                style={{
-                  height: 3,
-                  background: 'var(--stroke)',
-                  borderRadius: 2,
-                  overflow: 'hidden',
-                }}
-              >
-                <div
-                  style={{
-                    width: `${pct}%`,
-                    height: '100%',
-                    background: 'var(--accent)',
-                    transition: 'width 200ms linear',
-                  }}
-                />
+              <div className="import-progress-bar">
+                <div className="import-progress-bar-fill" style={{ width: `${pct}%` }} />
               </div>
-              <div
-                className="mono"
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  fontSize: 10,
-                  color: 'var(--fg-mute)',
-                }}
-              >
+              <div className="import-progress-meta caption num">
                 <span>
-                  {imp.done}/{imp.total || '?'}
+                  {imp.done.toLocaleString()}/{imp.total ? imp.total.toLocaleString() : '?'}
                 </span>
                 <span>{formatEta(imp.etaSeconds)}</span>
               </div>

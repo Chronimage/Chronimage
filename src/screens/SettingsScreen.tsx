@@ -11,6 +11,7 @@
 import { listen } from '@tauri-apps/api/event';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useEffect, useState } from 'react';
+import { Switch } from '@/components/ui/switch';
 import {
   type ModelSource,
   type ModelStatus,
@@ -286,39 +287,7 @@ interface ToggleProps {
 }
 
 function Toggle({ on, onChange, label }: ToggleProps) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      aria-label={label}
-      onClick={() => onChange(!on)}
-      style={{
-        width: 36,
-        height: 20,
-        borderRadius: 10,
-        border: 'none',
-        background: on ? 'var(--accent)' : 'var(--stroke-strong)',
-        cursor: 'pointer',
-        position: 'relative',
-        flexShrink: 0,
-        transition: 'background 0.15s',
-      }}
-    >
-      <span
-        style={{
-          position: 'absolute',
-          top: 3,
-          left: on ? 19 : 3,
-          width: 14,
-          height: 14,
-          borderRadius: '50%',
-          background: 'var(--fg)',
-          transition: 'left 0.15s',
-        }}
-      />
-    </button>
-  );
+  return <Switch checked={on} onCheckedChange={onChange} aria-label={label} />;
 }
 
 interface SliderProps {

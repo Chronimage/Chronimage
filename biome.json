@@ -10,6 +10,8 @@
       "!**/src-tauri/target",
       "!**/models",
       "!**/src/routeTree.gen.ts",
+      "!**/src/components/ui",
+      "!**/src/styles/global.css",
       "!**/coverage",
       "!**/playwright-report",
       "!**/test-results",

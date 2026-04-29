@@ -1,84 +1,240 @@
 /*
- * Chronimage design tokens.
- * This file should be the ONLY place where raw oklch() / color values appear.
- * Screens reference the CSS vars exclusively.
+ * Chronimage design tokens — Bolder/Compact direction.
+ *
+ * Identity: editorial-meets-darkroom. High-contrast neutral palette,
+ * sharp accent, tight spacing, mono micro-labels in caps + tracking,
+ * Instrument Serif for display moments only. Compact density first
+ * — this is a power tool, not a marketing site.
+ *
+ * This file is the ONLY place where raw oklch() values live. Every
+ * surface in `src/styles/**` and `src/screens/**` consumes vars.
+ *
+ * Bridges to shadcn/ui semantic tokens via the `@theme inline` block
+ * in global.css — `--background` etc. are aliases, not duplicates.
  */
 
 :root {
-  --display-font: "Instrument Serif", "Times New Roman", serif;
-  --ui-font: "Inter Tight", -apple-system, BlinkMacSystemFont, sans-serif;
-  --mono-font: "JetBrains Mono", ui-monospace, monospace;
+  /* === Type families ============================================ */
+  --font-display: "Instrument Serif", "Times New Roman", serif;
+  --font-ui: "Inter Tight", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  /* Dark (default) */
-  --bg: oklch(0.17 0.008 60);
-  --bg-chrome: oklch(0.14 0.008 60);
-  --bg-elev: oklch(0.22 0.008 60);
-  --bg-hover: oklch(0.25 0.008 60);
-  --stroke: oklch(0.28 0.008 60);
-  --stroke-strong: oklch(0.38 0.008 60);
-  --fg: oklch(0.96 0.005 80);
-  --fg-dim: oklch(0.72 0.005 80);
-  --fg-mute: oklch(0.5 0.005 80);
+  /* Legacy aliases — kept until all callers migrate. */
+  --display-font: var(--font-display);
+  --ui-font: var(--font-ui);
+  --mono-font: var(--font-mono);
 
-  --accent: oklch(0.88 0.18 150);
-  --accent-ink: oklch(0.2 0.04 150);
-  --warn: oklch(0.72 0.17 25);
-  --danger: oklch(0.66 0.22 27);
-  --info: oklch(0.78 0.12 230);
+  /* === Type scale ==============================================
+     Compact ladder: every step is intentional, no in-between
+     sizes. Use the helper classes in typography.css instead of
+     raw px in component styles.
 
-  /* Spacing scale (Phase 0 seed; expand as screens need) */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
+     Display: editorial moments only (page titles, hero quotes).
+     UI:      every other piece of running text.
+     Mono:    micro-labels, kbd, numeric tables.
+  */
+  --text-2xs: 9.5px; /* mono micro-labels (eyebrow, AI badge)   */
+  --text-xs: 10.5px; /* mono captions, count chips             */
+  --text-sm: 11.5px; /* secondary UI text, table cells         */
+  --text-base: 12.5px; /* default UI body                         */
+  --text-md: 13.5px; /* primary list rows, cards                */
+  --text-lg: 15px; /* h3, side-panel section heads            */
+  --text-xl: 18px; /* h2                                      */
+  --text-2xl: 22px; /* h1                                      */
+  --text-display-sm: 28px; /* display h1 inside scroll regions    */
+  --text-display: 44px; /* hero display titles                 */
+  --text-display-lg: 64px; /* full-bleed empty states             */
 
+  --leading-tight: 1.05;
+  --leading-snug: 1.25;
+  --leading-normal: 1.45;
+  --leading-relaxed: 1.6;
+
+  --tracking-mono: 0.08em;
+  --tracking-mono-loose: 0.12em;
+  --tracking-display: -0.015em;
+  --tracking-tight: -0.01em;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* === Spacing scale ============================================
+     Tight 4-step ladder. Anything wider than --space-6 should be
+     a deliberate break, not an accident.
+  */
+  --space-0: 0;
+  --space-1: 3px;
+  --space-2: 6px;
+  --space-3: 9px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --space-6: 22px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  /* === Radii =====================================================
+     Sharper than before. Buttons + chips at 4 px, panels at 6 px,
+     overlays at 8 px max. No 12 px+ rounding anywhere.
+  */
+  --radius-xs: 2px;
   --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
 
-  /* Type scale — always use these, never raw px in component CSS */
-  --text-2xs: 10px;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-base: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 18px;
+  /* shadcn alias */
+  --radius: var(--radius-md);
+
+  /* === Strokes ================================================== */
+  --stroke-w: 1px;
+  --stroke-w-strong: 1.5px;
+
+  /* === Dark theme (default) =====================================
+     Punchier than before. --bg drops a shade for richer black,
+     --fg climbs higher for sharper text contrast, accent picks
+     up chroma to cut through.
+  */
+  --bg: oklch(0.135 0.005 260);
+  --bg-chrome: oklch(0.105 0.005 260);
+  --bg-elev: oklch(0.18 0.006 260);
+  --bg-elev-2: oklch(0.225 0.006 260);
+  --bg-hover: oklch(0.26 0.008 260);
+  --bg-active: oklch(0.305 0.01 260);
+
+  --stroke: oklch(0.25 0.006 260);
+  --stroke-soft: oklch(0.205 0.006 260);
+  --stroke-strong: oklch(0.38 0.008 260);
+
+  --fg: oklch(0.985 0.004 80);
+  --fg-dim: oklch(0.76 0.004 80);
+  --fg-mute: oklch(0.52 0.004 80);
+  --fg-faint: oklch(0.38 0.004 80);
+
+  /* Default accent (overridden by [data-accent="…"]) */
+  --accent: oklch(0.875 0.205 152);
+  --accent-strong: oklch(0.795 0.225 152);
+  --accent-soft: oklch(0.265 0.06 152);
+  --accent-ink: oklch(0.15 0.03 152);
+
+  --warn: oklch(0.825 0.165 80);
+  --danger: oklch(0.69 0.225 28);
+  --info: oklch(0.785 0.13 230);
+  --success: oklch(0.785 0.155 152);
+
+  /* === Shadows ================================================== */
+  --shadow-sm: 0 1px 0 0 oklch(0 0 0 / 0.4);
+  --shadow-md: 0 4px 14px oklch(0 0 0 / 0.45);
+  --shadow-lg: 0 12px 32px oklch(0 0 0 / 0.55);
+
+  /* === Z-index ladder =========================================== */
+  --z-chrome: 10;
+  --z-overlay: 50;
+  --z-modal: 60;
+  --z-toast: 90;
+  --z-tooltip: 100;
+
+  /* === Motion =================================================== */
+  --ease-snap: cubic-bezier(0.2, 0, 0, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 80ms;
+  --dur-base: 140ms;
+  --dur-slow: 220ms;
 }
 
+/* === Light theme ================================================= */
 [data-theme="light"] {
-  --bg: oklch(0.98 0.004 80);
-  --bg-chrome: oklch(0.94 0.004 80);
+  --bg: oklch(0.985 0.003 80);
+  --bg-chrome: oklch(0.945 0.003 80);
   --bg-elev: oklch(1 0 0);
+  --bg-elev-2: oklch(0.975 0.003 80);
   --bg-hover: oklch(0.91 0.004 80);
+  --bg-active: oklch(0.87 0.005 80);
+
   --stroke: oklch(0.88 0.004 80);
-  --stroke-strong: oklch(0.78 0.004 80);
-  --fg: oklch(0.2 0.01 60);
-  --fg-dim: oklch(0.45 0.01 60);
-  --fg-mute: oklch(0.62 0.01 60);
-  --accent: oklch(0.72 0.19 150);
-  --accent-ink: oklch(0.98 0.01 150);
+  --stroke-soft: oklch(0.93 0.004 80);
+  --stroke-strong: oklch(0.76 0.005 80);
+
+  --fg: oklch(0.15 0.01 60);
+  --fg-dim: oklch(0.395 0.01 60);
+  --fg-mute: oklch(0.56 0.01 60);
+  --fg-faint: oklch(0.7 0.008 60);
+
+  --accent: oklch(0.575 0.205 152);
+  --accent-strong: oklch(0.495 0.215 152);
+  --accent-soft: oklch(0.945 0.045 152);
+  --accent-ink: oklch(1 0 0);
+
+  --shadow-sm: 0 1px 0 0 oklch(0 0 0 / 0.06);
+  --shadow-md: 0 4px 14px oklch(0 0 0 / 0.1);
+  --shadow-lg: 0 12px 32px oklch(0 0 0 / 0.18);
 }
 
+/* === Accent variants ============================================
+   Each variant defines: the base hue (--accent), the saturated
+   "press" tone (--accent-strong), the tinted background well
+   (--accent-soft), and the ink color for use against the base
+   (--accent-ink).
+*/
 [data-accent="mint"] {
-  --accent: oklch(0.88 0.18 150);
-  --accent-ink: oklch(0.2 0.04 150);
+  --accent: oklch(0.875 0.205 152);
+  --accent-strong: oklch(0.795 0.225 152);
+  --accent-soft: oklch(0.265 0.06 152);
+  --accent-ink: oklch(0.15 0.03 152);
 }
 [data-accent="ember"] {
-  --accent: oklch(0.78 0.17 40);
-  --accent-ink: oklch(0.2 0.04 40);
+  --accent: oklch(0.77 0.195 40);
+  --accent-strong: oklch(0.69 0.215 40);
+  --accent-soft: oklch(0.255 0.075 40);
+  --accent-ink: oklch(0.13 0.04 40);
 }
 [data-accent="violet"] {
-  --accent: oklch(0.78 0.17 295);
-  --accent-ink: oklch(0.99 0.01 295);
+  --accent: oklch(0.78 0.2 295);
+  --accent-strong: oklch(0.7 0.225 295);
+  --accent-soft: oklch(0.245 0.08 295);
+  --accent-ink: oklch(0.985 0.012 295);
 }
 [data-accent="sky"] {
-  --accent: oklch(0.82 0.14 230);
-  --accent-ink: oklch(0.2 0.04 230);
+  --accent: oklch(0.815 0.165 230);
+  --accent-strong: oklch(0.73 0.185 230);
+  --accent-soft: oklch(0.245 0.07 230);
+  --accent-ink: oklch(0.14 0.045 230);
 }
 [data-accent="gold"] {
-  --accent: oklch(0.87 0.17 85);
-  --accent-ink: oklch(0.2 0.04 85);
+  --accent: oklch(0.87 0.19 88);
+  --accent-strong: oklch(0.785 0.21 88);
+  --accent-soft: oklch(0.27 0.075 88);
+  --accent-ink: oklch(0.15 0.04 88);
+}
+
+[data-theme="light"][data-accent="mint"] {
+  --accent: oklch(0.56 0.22 152);
+  --accent-strong: oklch(0.475 0.23 152);
+  --accent-soft: oklch(0.945 0.045 152);
+  --accent-ink: oklch(1 0 0);
+}
+[data-theme="light"][data-accent="ember"] {
+  --accent: oklch(0.61 0.22 40);
+  --accent-strong: oklch(0.53 0.23 40);
+  --accent-soft: oklch(0.96 0.04 40);
+  --accent-ink: oklch(1 0 0);
+}
+[data-theme="light"][data-accent="violet"] {
+  --accent: oklch(0.585 0.235 295);
+  --accent-strong: oklch(0.505 0.245 295);
+  --accent-soft: oklch(0.965 0.03 295);
+  --accent-ink: oklch(1 0 0);
+}
+[data-theme="light"][data-accent="sky"] {
+  --accent: oklch(0.56 0.18 230);
+  --accent-strong: oklch(0.48 0.19 230);
+  --accent-soft: oklch(0.96 0.035 230);
+  --accent-ink: oklch(1 0 0);
+}
+[data-theme="light"][data-accent="gold"] {
+  --accent: oklch(0.625 0.195 88);
+  --accent-strong: oklch(0.545 0.21 88);
+  --accent-soft: oklch(0.965 0.045 88);
+  --accent-ink: oklch(0.14 0.03 88);
 }
