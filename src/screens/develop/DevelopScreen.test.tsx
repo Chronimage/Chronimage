@@ -235,8 +235,11 @@ describe('DevelopScreen', () => {
 
     const autoLight = await screen.findByRole('button', { name: /auto light/i });
     fireEvent.click(autoLight);
-    // Exposure slider should now read +12 after auto-light preset.
-    expect(await screen.findByText('+12 EV')).toBeInTheDocument();
+    // Exposure slider's editable value field should now read `+12 EV`
+    // after auto-light. The value lives in an `<input>` rather than a
+    // text node, so we query by display value (Lightroom-style click-
+    // to-edit numeric read-out, see `primitives/Slider.tsx`).
+    expect(await screen.findByDisplayValue('+12 EV')).toBeInTheDocument();
   });
 
   it('slider edits apply to preview and Save persists the same current operations', async () => {
@@ -277,7 +280,7 @@ describe('DevelopScreen', () => {
       expect(pasteArgs.photoIds).toEqual([2]);
       expect((pasteArgs.operations as DevelopOperations).exposure).toBe(1);
     });
-    expect(await screen.findByText('+25 EV')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('+25 EV')).toBeInTheDocument();
   });
 
   it('reset clears UI values and re-renders the identity operations', async () => {
@@ -285,7 +288,7 @@ describe('DevelopScreen', () => {
     render(<DevelopScreen />, { wrapper });
 
     fireEvent.click(await screen.findByRole('button', { name: /auto light/i }));
-    expect(await screen.findByText('+12 EV')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('+12 EV')).toBeInTheDocument();
     fireEvent.click(screen.getByTitle('Reset edits'));
 
     await waitFor(() => {
@@ -293,7 +296,7 @@ describe('DevelopScreen', () => {
       const applyArgs = lastCallArg(invoke, 'develop_apply');
       expect((applyArgs.operations as DevelopOperations).exposure).toBe(0);
     });
-    expect(await screen.findByText('0 EV')).toBeInTheDocument();
+    expect(await screen.findByDisplayValue('0 EV')).toBeInTheDocument();
   });
 
   it('preset applies update the screen operations so Save persists the previewed edit once', async () => {

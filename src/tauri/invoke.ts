@@ -1344,6 +1344,19 @@ export interface DevelopMaskGenerateRequest {
   source: string;
   mode?: string | null;
   operations: DevelopOperations;
+  /** Per-face mask routing — when set, anchors the SAM2 prompt builder
+   *  on the face at that 0-based index from `developMaskListFaces`.
+   *  Used by the "Person 1 / Person 2" mask buttons. */
+  face_index?: number | null;
+}
+
+export interface DevelopMaskFaceEntry {
+  index: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  quality: number;
 }
 
 export interface DevelopMaskGenerateReceipt {
@@ -1493,6 +1506,10 @@ export async function developMaskGenerate(
 
 export async function developMaskUpdate(req: DevelopMaskUpdateRequest): Promise<DevelopMask> {
   return tauriInvoke<DevelopMask>('develop_mask_update', { req });
+}
+
+export async function developMaskListFaces(photoId: number): Promise<DevelopMaskFaceEntry[]> {
+  return tauriInvoke<DevelopMaskFaceEntry[]>('develop_mask_list_faces', { photoId });
 }
 
 export async function developMaskDelete(maskId: number): Promise<number> {

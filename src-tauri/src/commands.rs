@@ -5450,6 +5450,14 @@ pub struct DevelopMaskGenerateRequest {
     pub source: String,
     pub mode: Option<String>,
     pub operations: Operations,
+    /// Restrict the SAM2 face anchor to a single detected face.
+    /// `Some(index)` selects the face at that 0-based row in
+    /// `develop_mask_face_hints`'s order (largest-quality first); used
+    /// by per-person mask buttons in the UI ("Person 1", "Person 2").
+    /// `None` lets the prompt builder pick the largest face — the
+    /// existing default for the "Subject" / "Person" preset buttons.
+    #[serde(default)]
+    pub face_index: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -5469,7 +5477,17 @@ pub async fn develop_mask_generate(
     let decoded = image::load_from_memory(&thumb_bytes)
         .map_err(|e| AppError::Internal(format!("decode thumb for photo {}: {e}", req.photo_id)))?;
     let rgb = decoded.to_rgb8();
-    let face_hints = develop_mask_face_hints(&state.pool, req.photo_id).await?;
+    let all_face_hints = develop_mask_face_hints(&state.pool, req.photo_id).await?;
+    // Per-face routing: when the UI passes a `face_index`, narrow the
+    // hint set to a single face so the SAM2 prompt builder anchors
+    // there. Out-of-range indices fall through to the full hint set
+    // rather than erroring — keeps the UI forgiving when face state
+    // changes between the user opening the panel and clicking the
+    // button.
+    let face_hints: Vec<crate::develop::segmentation::FaceHint> = match req.face_index {
+        Some(idx) if idx < all_face_hints.len() => vec![all_face_hints[idx]],
+        _ => all_face_hints,
+    };
     let generated = {
         let sam_result = crate::develop::sam::global_sam_session()
             .ok_or_else(|| AppError::NotFound("SAM2.1 runtime not loaded".into()))
@@ -5550,6 +5568,59 @@ pub async fn develop_mask_apply_preview(
     operations: Operations,
 ) -> AppResult<RenderReceipt> {
     develop_apply(state, photo_id, operations).await
+}
+
+/// Per-face metadata returned to the UI's "Person 1 / 2 / …" picker.
+/// Coordinates are normalised to `[0, 1]` against the photo's full
+/// dimensions so the frontend can render thumbnails without re-reading
+/// `photos.width / height`. The `index` is stable for the lifetime of
+/// the underlying face rows (largest-quality first) and is what the
+/// caller passes back as `DevelopMaskGenerateRequest::face_index`.
+#[derive(Debug, Serialize)]
+pub struct DevelopMaskFaceEntry {
+    pub index: usize,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub quality: f32,
+}
+
+#[tauri::command]
+pub async fn develop_mask_list_faces(
+    state: State<'_, AppState>,
+    photo_id: i64,
+) -> AppResult<Vec<DevelopMaskFaceEntry>> {
+    let dims: Option<(Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT width, height FROM photos WHERE id = ?1")
+            .bind(photo_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((Some(width), Some(height))) = dims else {
+        return Ok(Vec::new());
+    };
+    if width <= 0 || height <= 0 {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(f64, f64, f64, f64, f64)> = sqlx::query_as(
+        "SELECT bbox_x, bbox_y, bbox_w, bbox_h, COALESCE(quality, 0.0) \
+         FROM faces WHERE photo_id = ?1 ORDER BY quality DESC, id ASC LIMIT 16",
+    )
+    .bind(photo_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, (x, y, w, h, quality))| DevelopMaskFaceEntry {
+            index,
+            x: (x as f32 / width as f32).clamp(0.0, 1.0),
+            y: (y as f32 / height as f32).clamp(0.0, 1.0),
+            w: (w as f32 / width as f32).clamp(0.0, 1.0),
+            h: (h as f32 / height as f32).clamp(0.0, 1.0),
+            quality: quality as f32,
+        })
+        .collect())
 }
 
 async fn develop_mask_face_hints(

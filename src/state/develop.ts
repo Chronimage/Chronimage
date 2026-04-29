@@ -34,6 +34,13 @@ export interface ActiveDevelopMask {
  *  posts a new mask via `createManualMask`. */
 export type DrawMaskKind = 'linear_gradient' | 'radial_gradient' | 'brush';
 
+/** Pixel-driven mask kinds that need a single canvas click to sample
+ *  a target value (RGB triple for `color_range`, luma for
+ *  `luminance_range`). The next pointer-down on the editor canvas
+ *  reads the pixel under the cursor and posts a new mask via
+ *  `createPixelDrivenMask`, then clears this state. */
+export type EyedropperKind = 'color_range' | 'luminance_range';
+
 interface DevelopUiState {
   focusedPhotoId: number | null;
   preview: string | null;
@@ -44,6 +51,7 @@ interface DevelopUiState {
   maskOverlayVisible: boolean;
   maskOverlayOpacity: number;
   drawMaskKind: DrawMaskKind | null;
+  eyedropperMode: EyedropperKind | null;
   /**
    * Open/closed state for each `<CollapsibleSection>` in the editor inspector,
    * keyed by section id (e.g. `'light'`, `'curves'`). Survives photo
@@ -58,6 +66,7 @@ interface DevelopUiState {
   setMaskOverlayVisible: (visible: boolean) => void;
   setMaskOverlayOpacity: (opacity: number) => void;
   setDrawMaskKind: (kind: DrawMaskKind | null) => void;
+  setEyedropperMode: (kind: EyedropperKind | null) => void;
   setPanelOpen: (id: string, open: boolean) => void;
 }
 
@@ -88,6 +97,7 @@ export const useDevelopUi = create<DevelopUiState>((set) => ({
   maskOverlayVisible: true,
   maskOverlayOpacity: 62,
   drawMaskKind: null,
+  eyedropperMode: null,
   panelOpen: DEFAULT_PANEL_OPEN,
   setFocusedPhotoId: (id) => set({ focusedPhotoId: id }),
   setPreview: (url) => set({ preview: url }),
@@ -97,5 +107,6 @@ export const useDevelopUi = create<DevelopUiState>((set) => ({
   setMaskOverlayVisible: (maskOverlayVisible) => set({ maskOverlayVisible }),
   setMaskOverlayOpacity: (maskOverlayOpacity) => set({ maskOverlayOpacity }),
   setDrawMaskKind: (drawMaskKind) => set({ drawMaskKind }),
+  setEyedropperMode: (eyedropperMode) => set({ eyedropperMode }),
   setPanelOpen: (id, open) => set((state) => ({ panelOpen: { ...state.panelOpen, [id]: open } })),
 }));

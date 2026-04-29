@@ -205,6 +205,7 @@ fn main() {
             commands::develop_masks_list,
             commands::develop_mask_create,
             commands::develop_mask_generate,
+            commands::develop_mask_list_faces,
             commands::develop_mask_update,
             commands::develop_mask_delete,
             commands::develop_mask_apply_preview,
