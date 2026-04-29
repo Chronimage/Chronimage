@@ -2559,23 +2559,33 @@ select {
   min-height: 0;
   width: 100%;
 }
-/* The two ResizablePanel containers. react-resizable-panels v2 sets
-   inline `flex: 1 1 <basis>%` on the panel div, so the panel is sized
-   horizontally by the group and gets the group's full height as its
-   cross-axis. We just need the children to fill that height — done
-   via `width/height: 100%` so we're not stacking another flex layer. */
+/* The ResizablePanel containers in develop. react-resizable-panels
+   sets inline `flex: 1 1 <basis>%` on the panel div, so the panel is
+   sized horizontally by the group and gets the group's full height as
+   its cross-axis. We just need each panel's child to actually FILL
+   that height — done via `width/height: 100%` directly so we don't
+   stack a redundant flex layer. The inspector is `.editor-inspector`
+   (not `.inspector` — that selector was a leftover from the legacy
+   detail-view inspector and matched nothing). */
+.editor-sidepanel-panel,
 .editor-main-panel,
 .editor-inspector-panel {
   min-width: 0;
   min-height: 0;
+  /* Without `display: flex` the inner div would only auto-size to its
+     intrinsic content; the inspector's `flex: 1` body would have no
+     definite height to fill, killing the scroll. */
+  display: flex;
 }
+.editor-sidepanel-panel > .sidepanel,
 .editor-main-panel > .editor-main,
-.editor-inspector-panel > .inspector {
+.editor-inspector-panel > .editor-inspector {
   width: 100%;
   height: 100%;
   min-height: 0;
+  flex: 1;
 }
-.editor-inspector-panel > .inspector {
+.editor-inspector-panel > .editor-inspector {
   border-left: 0;
 }
 .editor-resize-handle {
@@ -3083,6 +3093,262 @@ select {
   margin: 8px 0 6px;
 }
 
+/* Bleed the curves panel out to the inspector's full width — the
+   parent CollapsibleSection wraps children in `px-3` (12 px gutters),
+   which leaves the curve box looking floaty. Cancel the gutter and
+   drop the box's left/right borders so it reads as a flush edge-to-
+   edge histogram + curve canvas. */
+.curves-panel {
+  margin: 0 -12px;
+}
+.curves-panel > div:first-child {
+  /* The toolbar (channel pills + reset) keeps its own gutter so it
+     doesn't run flush against the panel edge. */
+  padding: 0 12px;
+}
+.curves-panel > .curves-box {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+.curves-panel > div:last-child {
+  /* Zone labels — restore the gutter so Blacks / Whites sit inside. */
+  padding: 0 12px;
+}
+/* === Face tagging (catalog detail view) ======================== */
+.face-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.face-cluster-trigger {
+  flex: 1 1 150px;
+  min-width: 0;
+  height: 28px !important;
+  font-size: var(--text-sm) !important;
+}
+.face-name-row {
+  display: flex;
+  gap: var(--space-2);
+}
+.face-name-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px !important;
+  font-size: var(--text-sm) !important;
+}
+
+/* === Catalog sort dropdown ==================================== */
+.sort-menu-content {
+  min-width: 180px;
+}
+
+/* === AI badge (catalog sidebar section header) ================ */
+.ai-badge-shadcn {
+  gap: 4px;
+  padding: 1px var(--space-2) !important;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-mono-loose);
+  text-transform: uppercase;
+  font-weight: var(--weight-medium);
+  border-color: color-mix(in oklch, var(--accent) 50%, var(--stroke)) !important;
+  color: var(--accent) !important;
+  background: transparent !important;
+}
+
+/* === Drawable mask overlay (Lightroom-style click+drag) =====
+   Rendered inside `.editor-canvas` only when `drawMaskKind` is set
+   in the develop UI store. Captures pointer events from the entire
+   canvas so the user can drag from any point. The live preview is a
+   pure-CSS line (linear) or circle (radial) drawn in image-space
+   coords (already normalised to the wrapper). */
+.develop-mask-draw-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  cursor: crosshair;
+  background: color-mix(in oklch, var(--bg) 25%, transparent);
+}
+.develop-mask-draw-overlay[data-kind="linear_gradient"] {
+  cursor: ns-resize;
+}
+.develop-mask-draw-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+  background: color-mix(in oklch, var(--accent) 18%, transparent);
+  pointer-events: none;
+}
+.develop-mask-draw-circle {
+  position: absolute;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--accent) 14%, transparent);
+  pointer-events: none;
+}
+
+/* === Mask draw hint (sidepanel) =============================== */
+.mask-draw-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+/* === Cull mode seg (CullSidePanel review-mode segmented) ====== */
+.cull-mode-wrap {
+  padding: 0 var(--space-3) var(--space-3);
+}
+.cull-mode-seg-shadcn {
+  width: 100%;
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px !important;
+}
+.cull-mode-seg-shadcn .seg-item {
+  width: 100%;
+}
+
+/* === Preset category seg (DevelopSidePanel) =================== */
+.preset-cats-seg {
+  width: 100%;
+  display: grid !important;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px !important;
+  height: auto !important;
+}
+.preset-cats-seg .seg-item {
+  width: 100%;
+}
+
+/* === Settings slider override =================================
+   The shared `.slider-row` rule sizes the label column at 64 px
+   (good for the dense develop inspector). In Settings the slider
+   lives inline next to a freeform label, so collapse the label
+   slot and let the track + readout span the full row. */
+.settings-slider {
+  grid-template-columns: 0px minmax(0, 1fr) 36px !important;
+  gap: var(--space-3);
+}
+.settings-slider .lbl {
+  display: none;
+}
+
+/* === Settings → Appearance / theme tweaks =====================
+   A grid of "pick one of N" pills that re-skins every primitive
+   via the `[data-radii|data-stroke|data-shadow]` attributes on
+   the app root. */
+.theme-tweaks-section {
+  border-top: 1px solid var(--stroke);
+  padding-top: var(--space-5);
+}
+.theme-tweaks-head {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-mono-loose);
+  text-transform: uppercase;
+  color: var(--fg-mute);
+  margin: 0 0 var(--space-4);
+  font-weight: var(--weight-medium);
+}
+.theme-tweaks-grid {
+  display: flex;
+  flex-direction: column;
+}
+.theme-tweak-row {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
+  border-top: 1px dashed var(--stroke-soft);
+  align-items: center;
+}
+.theme-tweak-row:first-child {
+  border-top: 0;
+}
+.theme-tweak-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.theme-tweak-label {
+  font-size: var(--text-md);
+  color: var(--fg);
+  font-weight: var(--weight-medium);
+}
+.theme-tweak-hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--fg-mute);
+}
+.theme-tweak-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.theme-tweak-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px var(--space-3);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-snap),
+    color var(--dur-fast) var(--ease-snap),
+    background var(--dur-fast) var(--ease-snap);
+}
+.theme-tweak-pill:hover {
+  border-color: var(--stroke-strong);
+  color: var(--fg);
+}
+.theme-tweak-pill.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.theme-tweak-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  display: inline-block;
+}
+.theme-tweak-pill[data-accent="mint"] .theme-tweak-swatch {
+  background: oklch(0.875 0.205 152);
+}
+.theme-tweak-pill[data-accent="ember"] .theme-tweak-swatch {
+  background: oklch(0.77 0.195 40);
+}
+.theme-tweak-pill[data-accent="violet"] .theme-tweak-swatch {
+  background: oklch(0.78 0.2 295);
+}
+.theme-tweak-pill[data-accent="sky"] .theme-tweak-swatch {
+  background: oklch(0.815 0.165 230);
+}
+.theme-tweak-pill[data-accent="gold"] .theme-tweak-swatch {
+  background: oklch(0.87 0.19 88);
+}
+
 .curves-box {
   position: relative;
   background: var(--bg);
@@ -3515,6 +3781,16 @@ select {
   border: 1px solid var(--stroke);
   border-radius: var(--radius-sm);
   background: var(--bg-elev);
+  /* Even with short labels we want any unexpected length (loc, weird
+     fonts) to fail gracefully instead of bleeding into the next cell. */
+  overflow: hidden;
+}
+.mask-mode-seg button,
+.mask-layer-mode button {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .mask-mode-legend {
   position: absolute;

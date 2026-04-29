@@ -1,6 +1,14 @@
 import { Icon } from '../../primitives/Icon';
+import { Seg } from '../../primitives/Seg';
 import { useCull } from '../../state/cull';
 import { useCullBinSummary, usePhotos } from '../../state/queries';
+import type { CullMode } from './types';
+
+const CULL_MODE_OPTIONS: { value: CullMode; label: string }[] = [
+  { value: 'compare', label: 'Compare' },
+  { value: 'grid', label: 'Grid' },
+  { value: 'swipe', label: 'Swipe' },
+];
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -91,27 +99,13 @@ export function CullSidePanel() {
       <div className="section-label">
         <span>Review mode</span>
       </div>
-      <div style={{ padding: '0 12px 12px' }}>
-        <div className="cull-mode-seg" role="tablist" aria-label="Cull mode">
-          {(
-            [
-              { value: 'compare', label: 'Compare' },
-              { value: 'grid', label: 'Grid' },
-              { value: 'swipe', label: 'Swipe' },
-            ] as const
-          ).map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              role="tab"
-              aria-selected={mode === o.value}
-              className={mode === o.value ? 'on' : ''}
-              onClick={() => onModeChange(o.value)}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
+      <div className="cull-mode-wrap">
+        <Seg<CullMode>
+          value={mode}
+          onChange={onModeChange}
+          options={CULL_MODE_OPTIONS}
+          className="cull-mode-seg-shadcn"
+        />
       </div>
 
       <div

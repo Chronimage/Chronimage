@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Chip } from '../../primitives/Chip';
 import { CollapsibleSection } from '../../primitives/CollapsibleSection';
 import { Icon } from '../../primitives/Icon';
+import { Seg } from '../../primitives/Seg';
 import { Slider } from '../../primitives/Slider';
 import { useDevelopUi } from '../../state/develop';
 import {
@@ -62,6 +63,8 @@ export function DevelopSidePanel() {
   const setOperations = useDevelopUi((s) => s.setOperations);
   const selectedMaskId = useDevelopUi((s) => s.selectedMaskId);
   const setSelectedMaskId = useDevelopUi((s) => s.setSelectedMaskId);
+  const drawMaskKind = useDevelopUi((s) => s.drawMaskKind);
+  const setDrawMaskKind = useDevelopUi((s) => s.setDrawMaskKind);
   const maskOverlayVisible = useDevelopUi((s) => s.maskOverlayVisible);
   const setMaskOverlayVisible = useDevelopUi((s) => s.setMaskOverlayVisible);
   const maskOverlayOpacity = useDevelopUi((s) => s.maskOverlayOpacity);
@@ -305,19 +308,12 @@ export function DevelopSidePanel() {
               </div>
             )}
 
-            <div className="preset-cats">
-              {CATEGORIES.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  className={category === c.id ? 'on' : ''}
-                  onClick={() => setCategory(c.id)}
-                  aria-pressed={category === c.id}
-                >
-                  {c.label}
-                </button>
-              ))}
-            </div>
+            <Seg<PresetCategory>
+              value={category}
+              onChange={setCategory}
+              options={CATEGORIES.map((c) => ({ value: c.id, label: c.label }))}
+              className="preset-cats-seg"
+            />
 
             <div className="preset-list">
               {category === 'custom' && filtered.length === 0 ? (
@@ -398,6 +394,8 @@ export function DevelopSidePanel() {
                     className={maskMode === mode.id ? 'on' : ''}
                     onClick={() => setMaskMode(mode.id)}
                     aria-pressed={maskMode === mode.id}
+                    aria-label={mode.full}
+                    title={mode.full}
                   >
                     {mode.label}
                   </button>
@@ -432,21 +430,40 @@ export function DevelopSidePanel() {
               </button>
               <button
                 type="button"
-                className="btn"
-                onClick={() => createManualMask('linear_gradient')}
+                className={`btn${drawMaskKind === 'linear_gradient' ? ' on' : ''}`}
+                onClick={() => setDrawMaskKind(drawMaskKind === 'linear_gradient' ? null : 'linear_gradient')}
                 disabled={!canCreateManualMask}
+                aria-pressed={drawMaskKind === 'linear_gradient'}
+                title="Drag a vertical line on the photo to define the gradient"
               >
                 Linear gradient
               </button>
               <button
                 type="button"
-                className="btn"
-                onClick={() => createManualMask('radial_gradient')}
+                className={`btn${drawMaskKind === 'radial_gradient' ? ' on' : ''}`}
+                onClick={() => setDrawMaskKind(drawMaskKind === 'radial_gradient' ? null : 'radial_gradient')}
                 disabled={!canCreateManualMask}
+                aria-pressed={drawMaskKind === 'radial_gradient'}
+                title="Drag from the center outwards to define a radial mask"
               >
                 Radial gradient
               </button>
             </div>
+            {drawMaskKind && drawMaskKind !== 'brush' && (
+              <div className="mask-draw-hint">
+                {drawMaskKind === 'linear_gradient'
+                  ? 'Drag vertically on the photo to place the gradient.'
+                  : 'Drag outwards on the photo to place the radial mask.'}
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setDrawMaskKind(null)}
+                  style={{ marginLeft: 'auto' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
 
             <label className="mask-overlay-toggle">
               <input
@@ -501,6 +518,8 @@ export function DevelopSidePanel() {
                             type="button"
                             className={mask.mode === mode.id ? 'on' : ''}
                             onClick={() => updateLayer(mask.id, { mode: mode.id })}
+                            aria-label={mode.full}
+                            title={mode.full}
                           >
                             {mode.label}
                           </button>

@@ -5,7 +5,7 @@ import { Titlebar } from './chrome/Titlebar';
 import { ShortcutOverlay, useShortcutOverlay } from './primitives/ShortcutOverlay';
 import { CatalogScreen, CatalogSidePanel } from './screens/catalog';
 import { CullScreen, CullSidePanel } from './screens/cull';
-import { DevelopScreen, DevelopSidePanel } from './screens/develop';
+import { DevelopScreen } from './screens/develop';
 import { MapScreen } from './screens/map/MapScreen';
 import { SettingsScreen } from './screens/SettingsScreen';
 import { useImportProgressListener } from './state/import';
@@ -73,7 +73,9 @@ export function App() {
       mainPanel = <CullScreen />;
       break;
     case 'develop':
-      sidePanel = <DevelopSidePanel />;
+      // Develop owns its own 3-pane layout (sidepanel + canvas + inspector)
+      // via `ResizablePanelGroup`, so it spans the full canvas column and
+      // doesn't surface a separate `sidePanel` slot.
       mainPanel = <DevelopScreen />;
       break;
     case 'map':
@@ -94,6 +96,9 @@ export function App() {
         data-density={tweaks.gridDensity}
         data-facet={tweaks.facetPlacement}
         data-editor={tweaks.editorLayout}
+        data-radii={tweaks.radii}
+        data-stroke={tweaks.stroke}
+        data-shadow={tweaks.shadow}
         style={{ ['--display-font' as string]: `'${tweaks.displayFont}', serif` }}
       >
         <Titlebar screen={screen} appName={tweaks.appName} />

@@ -1,3 +1,4 @@
+import { Badge } from '@/components/ui/badge';
 import { Icon } from '../../primitives/Icon';
 import { useAlbums, useSources } from '../../state/queries';
 import { ImportProgressCard } from './ImportProgressCard';
@@ -29,9 +30,10 @@ export function CatalogSidePanel({ albumId, onAlbumChange }: CatalogSidePanelPro
 
         <div className="section-label">
           <span>Smart Albums</span>
-          <span className="ai-badge on">
-            <Icon name="ai" size={10} /> AI
-          </span>
+          <Badge variant="outline" className="ai-badge-shadcn">
+            <Icon name="ai" size={10} />
+            AI
+          </Badge>
         </div>
         <div className="list">
           <button

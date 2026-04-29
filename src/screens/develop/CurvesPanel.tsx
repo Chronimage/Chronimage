@@ -208,7 +208,7 @@ export function CurvesPanel({ value, onChange, channel, setChannel }: CurvesPane
   const isIdentity = useMemo(() => curveIsIdentity(active), [active]);
 
   return (
-    <div>
+    <div className="curves-panel">
       <div style={{ display: 'flex', gap: 4, marginBottom: 8, alignItems: 'center' }}>
         {CHANNELS.map((c) => {
           const on = channel === c.id;
