@@ -265,10 +265,19 @@ pub(crate) fn encode_luma_png(width: u32, height: u32, alpha: &[u8]) -> AppResul
             "mask alpha buffer has wrong size".into(),
         ));
     }
+    // See `develop::sam::encode_luma_png` for why we encode mask matte in
+    // the alpha channel of a LumaA8 PNG instead of as plain luminance:
+    // `mask-image` in WebView2 defaults to alpha-mode for raster images,
+    // and a luma-only PNG ends up looking 100% opaque to the compositor.
+    let mut interleaved = Vec::with_capacity(expected * 2);
+    for &a in alpha {
+        interleaved.push(255_u8);
+        interleaved.push(a);
+    }
     let mut out = Vec::new();
     let encoder = PngEncoder::new(&mut out);
     encoder
-        .write_image(alpha, width, height, image::ExtendedColorType::L8)
+        .write_image(&interleaved, width, height, image::ExtendedColorType::La8)
         .map_err(|e| AppError::Internal(format!("encode mask png: {e}")))?;
     Ok(B64.encode(out))
 }

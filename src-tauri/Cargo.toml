@@ -24,6 +24,15 @@ path = "src/bin/chronimage-cli.rs"
 name = "chronimage-face-labeler"
 path = "src/bin/chronimage-face-labeler.rs"
 
+# Dev-only harness for iterating SAM2.1 subject-mask prompt strategies.
+# Encodes a single image once, decodes every prompt strategy in turn, and
+# writes alpha + overlay PNGs so we can see what SAM saw. Used to diagnose
+# "subject mask landed on the wrong region" reports without booting the
+# full Tauri app + catalog.
+[[bin]]
+name = "chronimage-mask-debug"
+path = "src/bin/chronimage-mask-debug.rs"
+
 [lib]
 name = "chronimage"
 path = "src/lib.rs"

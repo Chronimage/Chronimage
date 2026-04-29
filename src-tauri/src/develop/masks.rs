@@ -374,12 +374,26 @@ fn rasterize_bitmap_payload(
         .decode(data_b64)
         .map_err(|e| AppError::InvalidInput(format!("invalid bitmap mask base64: {e}")))?;
     let decoded = image::load_from_memory(&bytes)
-        .map_err(|e| AppError::InvalidInput(format!("invalid bitmap mask image: {e}")))?
-        .to_luma8();
-    let resized = if decoded.width() as usize == w && decoded.height() as usize == h {
-        decoded
+        .map_err(|e| AppError::InvalidInput(format!("invalid bitmap mask image: {e}")))?;
+    // Mask matte lives in the alpha channel for LumaA8 / RGBA encodings —
+    // see `develop::sam::encode_luma_png`. Older legacy payloads (or any
+    // hand-crafted L8 / RGB PNGs) have no alpha; for those we read luma.
+    // ColorType-based dispatch keeps both encodings working.
+    let color = decoded.color();
+    let has_alpha = color.has_alpha();
+    let (decoded_w, decoded_h) = (decoded.width(), decoded.height());
+    let raw: Vec<u8> = if has_alpha {
+        decoded.to_rgba8().pixels().map(|p| p.0[3]).collect()
     } else {
-        imageops::resize(&decoded, w as u32, h as u32, imageops::FilterType::Triangle)
+        decoded.to_luma8().into_raw()
+    };
+    let buf = image::GrayImage::from_raw(decoded_w, decoded_h, raw).ok_or_else(|| {
+        AppError::Internal("bitmap mask: gray buffer length mismatch after channel pick".into())
+    })?;
+    let resized = if buf.width() as usize == w && buf.height() as usize == h {
+        buf
+    } else {
+        imageops::resize(&buf, w as u32, h as u32, imageops::FilterType::Triangle)
     };
     Ok(resized.pixels().map(|p| p.0[0] as f32 / 255.0).collect())
 }

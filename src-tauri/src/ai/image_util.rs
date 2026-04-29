@@ -273,6 +273,34 @@ pub fn write_thumbnail_cache_from_source(
 /// - JPEG q=85 lands ~150 KB per photo, keeping the cache lean.
 pub const AI_PREVIEW_MAX_EDGE: u32 = 1280;
 
+/// Compute the dimensions a `DynamicImage::thumbnail(max_edge, max_edge)` would
+/// produce given the original full image size. Mirrors `image`'s
+/// `resize_dimensions` (the same math `write_ai_preview_cache` triggers via
+/// `img.thumbnail(...)`) so callers can derive the AI-preview cache size
+/// without re-opening the image.
+///
+/// The face-detection pipeline produces bboxes in *AI-preview pixel space*
+/// (because SCRFD runs on the cached preview, not the full image). The catalog
+/// stores `photos.width / photos.height` in full-image space. To go from
+/// detection output to a coord system aligned with `photos.width`, the bbox
+/// must be scaled by `(full_w / preview_w, full_h / preview_h)` — those are
+/// what this helper feeds.
+#[must_use]
+pub fn preview_dims_for_full(full_w: u32, full_h: u32, max_edge: u32) -> (u32, u32) {
+    if full_w == 0 || full_h == 0 {
+        return (full_w.max(1), full_h.max(1));
+    }
+    if full_w.max(full_h) <= max_edge {
+        return (full_w, full_h);
+    }
+    let wratio = f64::from(max_edge) / f64::from(full_w);
+    let hratio = f64::from(max_edge) / f64::from(full_h);
+    let ratio = wratio.min(hratio);
+    let nw = ((f64::from(full_w) * ratio).round() as u32).max(1);
+    let nh = ((f64::from(full_h) * ratio).round() as u32).max(1);
+    (nw, nh)
+}
+
 /// Path of the per-photo AI/dedupe input cache. Layout
 /// `{thumbs_dir}/{sha256}_aipreview.jpg`. Sized at most
 /// `AI_PREVIEW_MAX_EDGE` on the longest edge, JPEG-encoded.
@@ -1257,6 +1285,51 @@ mod tests {
 
         let decoded = image::open(ai_preview_cache_path(tmp.path(), sha)).expect("decode");
         assert_eq!((decoded.width(), decoded.height()), (600, 400));
+    }
+
+    #[test]
+    fn preview_dims_for_full_matches_write_ai_preview_cache() {
+        // The whole point of this helper is to predict the pixel dims SCRFD
+        // sees — i.e. the dims `write_ai_preview_cache` produces, which
+        // *skip* the resize when the source already fits. Crucially this
+        // differs from raw `DynamicImage::thumbnail`, which UPSCALES to
+        // fill the box. Verify both branches:
+        for (full_w, full_h) in [
+            (7008_u32, 4672_u32), // Sony A7 IV landscape — downscales
+            (4672, 7008),         // portrait — downscales
+            (3840, 2160),         // 4K landscape — downscales
+            (1920, 1080),         // landscape larger than max — downscales
+            (1280, 853),          // exact-fit, no scaling
+            (640, 480),           // already smaller — must NOT upscale
+            (320, 180),           // tiny input — must NOT upscale
+        ] {
+            let img = solid(full_w, full_h, [128, 128, 128]);
+            let preview = if full_w.max(full_h) > AI_PREVIEW_MAX_EDGE {
+                img.thumbnail(AI_PREVIEW_MAX_EDGE, AI_PREVIEW_MAX_EDGE)
+            } else {
+                img.clone()
+            };
+            let (pw, ph) = preview_dims_for_full(full_w, full_h, AI_PREVIEW_MAX_EDGE);
+            assert_eq!(
+                (pw, ph),
+                (preview.width(), preview.height()),
+                "preview_dims_for_full({full_w}, {full_h}) disagreed with write_ai_preview_cache",
+            );
+        }
+    }
+
+    #[test]
+    fn preview_dims_for_full_handles_smaller_than_max() {
+        // Source already fits inside the box: no scaling, identity mapping.
+        assert_eq!(preview_dims_for_full(800, 600, 1280), (800, 600));
+        assert_eq!(preview_dims_for_full(1280, 853, 1280), (1280, 853));
+    }
+
+    #[test]
+    fn preview_dims_for_full_handles_zero_dim() {
+        // Defensive: never produce 0-dimension output.
+        let (w, h) = preview_dims_for_full(0, 0, 1280);
+        assert!(w >= 1 && h >= 1, "zero input must not produce zero output");
     }
 
     #[test]
