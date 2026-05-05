@@ -51,7 +51,7 @@ mozjpeg = ["dep:mozjpeg"]
 
 [dependencies]
 # Tauri
-tauri = { version = "2.2", features = ["devtools", "tray-icon"] }
+tauri = { version = "2.11", features = ["devtools", "tray-icon"] }
 tauri-plugin-dialog = "2.2"
 tauri-plugin-fs = "2.2"
 tauri-plugin-log = "2.2"
@@ -200,7 +200,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-tauri = { version = "2.2", features = ["test"] }
+tauri = { version = "2.11", features = ["test"] }
 tempfile = "3"
 proptest = "1"
 mockall = "0.14"
