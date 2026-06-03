@@ -51,15 +51,15 @@ mozjpeg = ["dep:mozjpeg"]
 
 [dependencies]
 # Tauri
-tauri = { version = "2.2", features = ["devtools", "tray-icon"] }
-tauri-plugin-dialog = "2.2"
+tauri = { version = "2.11", features = ["devtools", "tray-icon"] }
+tauri-plugin-dialog = "2.7"
 tauri-plugin-fs = "2.2"
 tauri-plugin-log = "2.2"
 tauri-plugin-notification = "2.2"
 tauri-plugin-os = "2.2"
 tauri-plugin-shell = "2.2"
-tauri-plugin-single-instance = "2.2"
-tauri-plugin-store = "2.2"
+tauri-plugin-single-instance = "2.4"
+tauri-plugin-store = "2.4"
 tauri-plugin-updater = "2.3"
 
 # Serialization + errors
@@ -146,7 +146,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # .env loader — dev convenience so CHRONIMAGE_* env vars (e.g. the Google
 # Photos OAuth client_secret) can live in the gitignored .env.local.
 dotenvy = "0.15"
-trash = "5.2.5"
+trash = "5.2.6"
 
 # Phase 4 §7 — XMP sidecar parse (rating + subject tags). quick-xml is a
 # zero-copy pull parser, MIT-licensed, no system deps.
@@ -200,7 +200,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-tauri = { version = "2.2", features = ["test"] }
+tauri = { version = "2.11", features = ["test"] }
 tempfile = "3"
 proptest = "1"
 mockall = "0.14"
