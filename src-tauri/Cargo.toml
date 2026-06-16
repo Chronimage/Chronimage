@@ -78,7 +78,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Storage + migrations (Phase 1 will flesh these out)
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "uuid"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "uuid"] }
 
 # sqlite-vec: statically-linked vec0 extension for ANN search (MIT OR Apache-2.0).
 # The crate compiles sqlite-vec.c with -DSQLITE_CORE so it shares the same
